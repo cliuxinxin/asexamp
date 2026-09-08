@@ -130,3 +130,5 @@
 .branch-covered{color:var(--accent);font-size:12px}.branch-gap{color:#936324;font-size:12px}.branch-evidence li{flex-wrap:wrap}.traceability-report{margin:16px 0}.traceability-report table{width:100%;border-collapse:collapse;font-size:12px}.traceability-report th,.traceability-report td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}
 
 .mobile-workspace{padding:0}.mobile-workspace .artifact-card{margin-top:0}
+
+.clarification-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.clarification-actions>button:not(.primary){border:1px solid var(--accent);color:var(--accent)}

@@ -1,0 +1,1 @@
+import{M as e}from"./mermaid-parser.core-CTdb4ZB4.js";export{e as createArchitectureServices};

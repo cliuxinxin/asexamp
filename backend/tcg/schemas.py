@@ -92,6 +92,7 @@ class RestoreInput(BaseModel):
 class ResumeInput(BaseModel):
     answer: str | None = Field(default=None, max_length=100_000)
     approved: bool | None = None
+    proceed: bool = False
 
 
 class SettingsInput(BaseModel):

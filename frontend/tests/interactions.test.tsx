@@ -17,6 +17,32 @@ const {ArtifactCard}=await import('../src/ArtifactCard');
 const {SettingsDialog}=await import('../src/SettingsDialog');
 afterEach(()=>cleanup());
 
+test('clarification allows continuing with unresolved questions and preserves typed answers',async()=>{
+ const {RunCard}=await import('../src/RunCard');const requests:any[]=[];
+ globalThis.fetch=async(input:any,init:any)=>{requests.push({url:String(input),body:JSON.parse(init?.body??'{}')});return new Response('{}',{status:200});};
+ const run:any={id:'run-clarify',experience:'agent',graph_version:2,status:'waiting',stage:'requirement_analysis',updated_at:'2026-09-08',artifact_ids:[],interrupt:{type:'clarification',artifact_id:'analysis-1',questions:['锁定阈值是多少？']}};
+ render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
+ fireEvent.change(screen.getByRole('textbox',{name:'回答澄清问题'}),{target:{value:'连续失败4次锁定30分钟'}});
+ fireEvent.click(screen.getByRole('button',{name:'按当前信息继续'}));
+ await waitFor(()=>assert.equal(requests.length,1));
+ assert.equal(requests[0].url,'/api/runs/run-clarify/resume');
+ assert.deepEqual(requests[0].body,{proceed:true,answer:'连续失败4次锁定30分钟'});
+});
+
+test('missing requirement intake offers no proceed bypass',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ render(<RunCard run={{id:'run-empty',experience:'agent',status:'waiting',stage:'requirement_analysis',updated_at:'2026-09-08',artifact_ids:[],interrupt:{type:'clarification',questions:['请提供业务规则']}} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
+ assert.equal(screen.queryByRole('button',{name:'按当前信息继续'}),null);
+});
+
+test('continued artifact displays deferred questions as retained uncertainties',async()=>{
+ const {AnalysisReport}=await import('../src/AnalysisReport');
+ render(<AnalysisReport report={{deferred_questions:['短信验证是否在范围内？'],assumptions:['暂未提供短信服务规则'],clarification_decision:{mode:'proceed'}}}/>);
+ assert.ok(screen.getByText('短信验证是否在范围内？'));
+ assert.ok(screen.getByText('已保留的未决问题'));
+ assert.ok(screen.getByText('暂未提供短信服务规则'));
+});
+
 function streamingFixture(){
  const previous=(globalThis as any).EventSource;
  const instances:FakeSource[]=[];
