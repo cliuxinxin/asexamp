@@ -1,0 +1,1 @@
+ALTER TABLE `tcg_owners` ADD `gate` text;

@@ -266,3 +266,18 @@ test('backend stage names and slow model progress are visible with a diagnostic 
  const link=screen.getByRole('link',{name:'下载诊断日志'});assert.equal(link.getAttribute('href'),'/api/runs/r-slow/diagnostics?download=true');
  assert.equal(screen.queryByText('正在处理'),null);
 });
+
+
+test('cloud execution keeps its SSE connection when the process panel is collapsed',async()=>{
+ const {RunTimeline}=await import('../src/RunTimeline');const stream=streamingFixture();
+ try{
+  const view=render(<RunTimeline runId="cloud-run" restartKey="active" keepAlive/>);
+  assert.equal(stream.instances.length,1);const source=stream.instances[0];
+  fireEvent.click(screen.getByRole('button',{name:/执行过程/}));
+  assert.equal(source.closed,false);assert.equal(stream.instances.length,1);
+  act(()=>source.emit('progress',1,{event:'node.start',node:'analysis',at:'2026-09-08T00:00:00Z'}));
+  fireEvent.click(screen.getByRole('button',{name:/查看完整执行过程/}));
+  await screen.findByText('开始分析需求');assert.equal(stream.instances.length,1);
+  view.unmount();assert.equal(source.closed,true);
+ }finally{stream.restore();}
+});
