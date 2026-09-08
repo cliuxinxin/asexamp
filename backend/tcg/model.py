@@ -28,6 +28,7 @@ Model calls retry at most once and have a configured per-attempt timeout.
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -39,6 +40,26 @@ from .schemas import DomainError
 
 MODEL_TIMEOUT_SECONDS = 3600
 DEFAULT_SETTINGS = {'provider': 'ollama', 'base_url': 'http://127.0.0.1:11434', 'model': '', 'timeout_seconds': MODEL_TIMEOUT_SECONDS}
+
+
+def validate_headers(headers, auth_mode='bearer'):
+    if auth_mode not in ('bearer', 'headers'):
+        raise DomainError('认证模式必须为 bearer 或 headers')
+    if not isinstance(headers, dict) or len(headers) > 32:
+        raise DomainError('自定义请求头必须为最多 32 项的 JSON 对象')
+    seen = set()
+    managed = {'host', 'content-length', 'transfer-encoding', 'connection', 'accept', 'content-type', 'accept-encoding', 'user-agent', 'cookie', 'proxy-authorization', 'te', 'trailer', 'upgrade', 'keep-alive', 'proxy-connection', 'expect'}
+    for name, value in headers.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", name):
+            raise DomainError('请求头名称无效；请使用标准 HTTP token 名称')
+        if name.lower() in managed or name.lower() in seen:
+            raise DomainError('不能覆盖托管传输请求头或使用大小写重复的名称')
+        seen.add(name.lower())
+        if not isinstance(value, str) or len(value) > 8000 or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            raise DomainError('请求头值必须为单行 ASCII 文本，不能包含换行或控制字符')
+    if 'authorization' in seen and auth_mode != 'headers':
+        raise DomainError('显式 Authorization 需要选择 headers 认证模式，避免与 Bearer API Key 冲突')
+    return dict(headers)
 TASK_INSTRUCTIONS = {
     'route': 'Return {"intent":"review_requirement|generate_scenario|generate_case|review_case|query|learn_template|modify"}. Explicit user intent takes priority. Generic requirement processing ends at generate_case. Existing artifact changes route to modify. This classification context intentionally contains source metadata and artifact metadata only; document contents are loaded by later nodes. Infer the action from the current request and recent conversation. Do not mistake omitted document bodies for absent sources. Long message previews retain only the beginning/end; they are not the analysis input.',
     'analyze_requirement': 'Analyze every supplied evidence chunk. Return {"items":[{"id":"REQ-...","title":"...","description":"...","refs":["exact evidence id"]}],"report":{"questions":["blocking ambiguities"],"assumptions":["explicit assumptions and risk"],"requirement_map":{"modules":[],"roles":[],"flows":[],"rules":[],"states":[],"dependencies":[]},"diagrams":[{"title":"...","mermaid":"flowchart TD ..."}]}}. For complex requirements include at least one structured diagram and cross-module dependencies. In auto mode resolve ambiguities with marked assumptions; do not ask the user to pause. Clarification answer, when provided, has highest precedence.',
@@ -73,6 +94,16 @@ do not return only a patch to the rejected response or conduct an additional rev
 Preserve grounded business meaning, stable IDs and valid additional fields. Do not
 fabricate missing business facts merely to pass validation.
 '''
+TASK_INSTRUCTIONS.update({
+    'agent_intake': 'Classify the CURRENT user message as requirement only if it explicitly states concrete business rules or behavior to test, as instruction if it only asks to generate/edit/analyze, or ambiguous if unsure. NEVER infer from length or vocabulary alone, and never fabricate source content. Return {classification:"requirement|instruction|ambiguous",question:"one concise question requesting missing business rules or confirmation of ambiguous input"}. Only requirement classification promotes the verbatim user-authored message to evidence; other classifications pause for clarification.',
+    'agent_plan': 'Choose next_action ONLY from available_actions with its checked prerequisites. Return {depth:"quick|standard|deep",rationale:"why this depth",plan:[{id:"stable short ID",title:"action title"}],next_action:"available action",insight:{summary:"concise evidence-grounded observation, never hidden reasoning",refs:["provided evidence IDs"]}}. Resolve requested_depth=auto based on scope, branches and risk; otherwise honor requested_depth. Revise the plan for instructions and coverage gaps. Plans are product design depth, not ISTQB levels. Never claim work is done before coverage is checked.',
+    'agent_analyze': 'Analyze every supplied evidence chunk under the latest instructions and confirmed memory. Return {items:[{id:"R1",title:"requirement",description:"grounded rule",refs:["exact evidence ID"]}],report:{summary:"concise analysis",questions:["blocking business ambiguities"],assumptions:["unconfirmed hypotheses only"],business_model:{nodes:[{id:"node_id",label:"business state",refs:["exact evidence ID"]}],edges:[{id:"branch_id",from:"node_id",to:"existing_node_id",label:"condition or transition",refs:["exact evidence ID"]}]},strategy:{depth:"resolved context depth",rationale:"scope and risk",techniques:["equivalence partitions","boundaries","decision tables or state transitions when applicable"],scope:["in-scope areas"]}}}. Use stable IDs across revisions. Requirements and branches must be grounded in actual evidence; keep assumptions separate. ALL blocking questions pause even automatic progression; clarification evidence can resolve them. Model and branch coverage is design coverage only. Follow depth_guidance. Do not invent facts to pass validation. Conflicting newer evidence must be explained and the superseded decision identified in report.conflicts:[{decision_id:"confirmed memory decision ID",summary:"what changed",refs:["newer change/clarification evidence ID"]}].',
+    'agent_scenarios': 'Return {items:[{id:"S1",title:"scenario",description:"path",priority:"P1",refs:["exact evidence IDs"],requirement_ids:["confirmed requirement ID"],branch_ids:["confirmed business edge ID"]}],has_more:false,next_cursor:null}. Cover ALL confirmed requirements and branches. Honor strategy, depth_guidance and instructions. For repair=true add targeted scenarios covering gaps; preserve previous_items and never repeat IDs. Paginate with a new cursor if needed. Include decision-table combinations, boundaries and transitions where applicable; do not claim executed coverage.',
+    'agent_cases': 'Return {items:[{id:"C1",title:"case",scenario_id:"existing scenario ID",type:"Business|Negative|Boundary",priority:"P1",preconditions:"string",steps:[{action:"string",expected:"observable string"}],refs:["exact evidence IDs"],requirement_ids:["confirmed requirement IDs within scenario"],branch_ids:["confirmed edge IDs within scenario"]}],has_more:false,next_cursor:null}. Cover all confirmed requirements, branches and scenarios. Follow strategy and depth_guidance substantively. For repair=true add targeted missing cases without repeating previous_items IDs. Paginate with a fresh cursor when needed. Never drop coverage, invent evidence or report tests executed.',
+    'agent_summary': 'Return {summary:"substantive concise result: designed scope, cases, checked requirement/branch design coverage, remaining assumptions and limitations, next steps; tests were NOT executed",refs:["exact evidence IDs"]}. Summarize only provided accepted artifacts, confirmed decisions and computed coverage. Never claim execution, production quality, complete code coverage or facts unsupported by evidence. No hidden reasoning.',
+})
+for agent_task in ('agent_plan', 'agent_analyze', 'agent_scenarios', 'agent_cases', 'agent_summary'):
+    TASK_INSTRUCTIONS[agent_task] += ' If validation_repair is supplied, return the complete corrected response targeting validation_error; no rejected response has been saved. Preserve valid grounded content and stable IDs, never invent missing business facts.'
 for case_task in ('generate_cases', 'import_cases'):
     TASK_INSTRUCTIONS[case_task] += '''
 Every step MUST contain BOTH action and expected as strings in the SAME object.
@@ -102,16 +133,18 @@ class Settings:
         self.path = self.directory / 'settings.json'
         self.key_path = self.directory / '.secret.key'
         self.value = dict(DEFAULT_SETTINGS)
+        self.value['auth_mode'] = 'bearer'
         if self.path.exists():
             self.value.update(json.loads(self.path.read_text('utf-8')))
         self.env_file, layers = model_environment(self.directory)
         self.environment_managed = any(layers)
         self._environment_key = None
+        self._environment_headers = None
         for layer in layers:
             if not layer:
                 continue
             previous_endpoint = (self.value['provider'], self.value['base_url'])
-            candidate = {**self.value, **{key: value for key, value in layer.items() if key != 'api_key'}}
+            candidate = {**self.value, **{key: value for key, value in layer.items() if key not in ('api_key', 'headers_json')}}
             try:
                 candidate['timeout_seconds'] = int(candidate['timeout_seconds'])
             except (TypeError, ValueError):
@@ -127,12 +160,37 @@ class Settings:
                 raise DomainError('.env 模型名或 API Key 超过长度限制')
             if (candidate['provider'], candidate['base_url']) != previous_endpoint:
                 candidate.pop('_api_key', None)
+                candidate.pop('_headers', None)
                 self._environment_key = ''
+                self._environment_headers = {}
             if 'api_key' in layer:
                 self._environment_key = layer['api_key']
+            if 'headers_json' in layer:
+                try:
+                    self._environment_headers = json.loads(layer['headers_json'] or '{}')
+                except (ValueError, TypeError):
+                    raise DomainError('TCG_MODEL_HEADERS_JSON 必须为有效 JSON 对象，且不能跨行') from None
             self.value = candidate
+            validate_headers(self.headers(), candidate.get('auth_mode', 'bearer'))
         # Preserve connection credentials while upgrading all legacy timeout sources.
         self.value['timeout_seconds'] = MODEL_TIMEOUT_SECONDS
+
+    def headers(self):
+        if self._environment_headers is not None:
+            return dict(self._environment_headers) if isinstance(self._environment_headers, dict) else self._environment_headers
+        if not self.value.get('_headers'):
+            return {}
+        try:
+            return json.loads(Fernet(self.key_path.read_bytes()).decrypt(self.value['_headers'].encode()).decode())
+        except Exception:
+            raise DomainError('无法解密自定义请求头，请重新保存模型设置') from None
+
+    def encrypt(self, text):
+        if not self.key_path.exists():
+            fd = os.open(self.key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(Fernet.generate_key())
+        return Fernet(self.key_path.read_bytes()).encrypt(text.encode()).decode()
 
     def secret(self):
         if self._environment_key is not None:
@@ -153,6 +211,8 @@ class Settings:
             'has_api_key': has_key, 'environment_managed': self.environment_managed,
             'env_file': str(self.env_file) if self.env_file else None,
             'timeout_policy': 'fixed_60_minutes',
+            'auth_mode': self.value.get('auth_mode', 'bearer'),
+            'header_names': sorted(self.headers(), key=str.lower), 'has_headers': bool(self.headers()),
         }
 
     def configured(self):
@@ -175,10 +235,19 @@ class Settings:
             raise DomainError('模型连接由 .env 或环境变量管理，请修改配置文件并重启服务', 409)
         self.validate_address(request['base_url'])
         result = {key: request[key] for key in DEFAULT_SETTINGS}
+        result['auth_mode'] = request.get('auth_mode', 'bearer')
         result['timeout_seconds'] = MODEL_TIMEOUT_SECONDS
         result['base_url'] = result['base_url'].rstrip('/')
         result['model'] = result['model'].strip()
         same_endpoint = all(result[key] == self.value[key] for key in ('provider', 'base_url'))
+        headers = request.get('headers')
+        if request.get('clear_headers'):
+            headers = {}
+        elif headers is None:
+            headers = self.headers() if same_endpoint else {}
+        headers = validate_headers(headers, result['auth_mode'])
+        if headers:
+            result['_headers'] = self.encrypt(json.dumps(headers))
         api_key = request.get('api_key')
         if request.get('clear_api_key'):
             api_key = ''
@@ -226,13 +295,28 @@ class LangChainGateway:
         if not self.settings.configured():
             raise DomainError('请先在设置中填写本地模型名称并启动 Ollama，或配置兼容 API 服务')
         settings = self.settings.value
+        headers = self.settings.headers()
+        secret = self.settings.secret()
+        if settings.get('auth_mode', 'bearer') == 'bearer' and secret:
+            headers = {**headers, 'Authorization': 'Bearer ' + secret}
+        def configured_auth(request):
+            request.headers.pop('authorization', None)
+            request.headers.update(headers)
+        async def configured_async_auth(request):
+            configured_auth(request)
         from langchain_core.messages import HumanMessage, SystemMessage
         if settings['provider'] == 'ollama':
             from langchain_ollama import ChatOllama
-            model = ChatOllama(model=settings['model'], base_url=settings['base_url'], temperature=0, format='json', client_kwargs={'timeout': settings['timeout_seconds']})
+            model = ChatOllama(model=settings['model'], base_url=settings['base_url'], temperature=0, format='json',
+                client_kwargs={'timeout': settings['timeout_seconds'], 'headers': headers, 'follow_redirects': False},
+                sync_client_kwargs={'event_hooks': {'request': [configured_auth]}},
+                async_client_kwargs={'event_hooks': {'request': [configured_async_auth]}})
         else:
             from langchain_openai import ChatOpenAI
-            model = ChatOpenAI(model=settings['model'], base_url=settings['base_url'], api_key=self.settings.secret() or 'local-no-key', temperature=0, timeout=settings['timeout_seconds'], max_retries=0)
+            import httpx
+            extra = {'http_async_client': httpx.AsyncClient(follow_redirects=False,
+                event_hooks={'request': [configured_async_auth]} if settings.get('auth_mode') == 'headers' else None)}
+            model = ChatOpenAI(model=settings['model'], base_url=settings['base_url'], api_key=self.settings.secret() or 'local-no-key', default_headers=headers, temperature=0, timeout=settings['timeout_seconds'], max_retries=0, **extra)
             model = model.bind(response_format={'type': 'json_object'})
         messages = [SystemMessage(content=SYSTEM + '\nTASK CONTRACT:\n' + TASK_INSTRUCTIONS[task]), HumanMessage(content=json.dumps(context, ensure_ascii=False))]
         try:
@@ -243,6 +327,7 @@ class LangChainGateway:
                     'provider': settings['provider'], 'base_url': settings['base_url'],
                     'model': settings['model'], 'task': task,
                     'timeout_seconds': settings['timeout_seconds'],
+                    'headers': {name: '••••••' for name in headers},
                     'messages': [{'role': 'system' if m.type == 'system' else 'user', 'content': m.content} for m in messages],
                     'parameters': {'temperature': 0, 'stream': on_text is not None,
                                    **({'format': 'json'} if settings['provider'] == 'ollama' else {'response_format': {'type': 'json_object'}})},
@@ -288,7 +373,20 @@ class LangChainGateway:
             if self.diagnostics:
                 self.diagnostics.record('model.transport_error', level='ERROR', **error_details(exc))
             # Provider exceptions can contain request headers and credentials.
+            status = getattr(exc, 'status_code', None)
+            if status in (301, 302, 303, 307, 308):
+                error = DomainError('模型服务返回重定向；为保护认证信息不会跟随跳转，请直接配置最终模型服务地址后重试。')
+                error.retryable, error.category = False, 'configuration'
+                raise error from None
+            if status in (400, 401, 403, 404):
+                error = DomainError('模型认证或配置失败；请检查服务地址、模型名、API Key 和自定义请求头，然后重试当前阶段')
+                error.retryable = False
+                error.category = 'authentication' if status in (401, 403) else 'configuration'
+                raise error from None
             raise DomainError(f'模型请求失败（{type(exc).__name__}）；请检查服务是否启动、模型名称、服务地址和 API Key，然后重试') from None
+        finally:
+            if settings['provider'] == 'openai' and extra.get('http_async_client'):
+                await extra['http_async_client'].aclose()
 
     async def test(self):
         result = await asyncio.wait_for(self.generate('connection_test', {}), timeout=self.settings.value['timeout_seconds'])

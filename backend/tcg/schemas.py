@@ -59,6 +59,9 @@ class TextInput(NameInput):
 
 
 class MessageInput(BaseModel):
+    experience: Literal['legacy', 'agent'] = 'legacy'
+    depth: Literal['auto', 'quick', 'standard', 'deep'] = 'auto'
+    confirm_strategy: bool = True
     content: str = Field(min_length=1, max_length=100_000)
     as_requirement: bool = False
     intent: Literal['auto', 'review_requirement', 'generate_scenario', 'generate_case', 'review_case', 'query', 'learn_template', 'modify'] = 'auto'
@@ -97,6 +100,9 @@ class SettingsInput(BaseModel):
     model: str = Field(max_length=200)
     api_key: str | None = Field(default=None, max_length=2000)
     clear_api_key: bool = False
+    headers: dict[str, str] | None = None
+    clear_headers: bool = False
+    auth_mode: Literal['bearer', 'headers'] = 'bearer'
     timeout_seconds: int = Field(default=3600, ge=5, le=3600)
 
 

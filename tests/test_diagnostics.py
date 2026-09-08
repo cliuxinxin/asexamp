@@ -155,6 +155,10 @@ def test_unavailable_log_directory_does_not_prevent_startup_or_generation(tmp_pa
         assert run['status'] == 'completed'
         report = client.get('/api/runs/' + run['id'] + '/diagnostics').json()
         assert report['runtime']['diagnostic_file_degraded'] is True
+        deadline = time.monotonic() + 4
+        while report['runtime']['task_active']:
+            assert time.monotonic() < deadline
+            report = client.get('/api/runs/' + run['id'] + '/diagnostics').json()
         assert any(row['event'] == 'run.completed' for row in report['events'])
 
 

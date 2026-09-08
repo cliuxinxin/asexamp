@@ -11,6 +11,7 @@ MODEL_ENV = {
     'TCG_MODEL_PROVIDER': 'provider', 'TCG_MODEL_BASE_URL': 'base_url',
     'TCG_MODEL_NAME': 'model', 'TCG_MODEL_TIMEOUT_SECONDS': 'timeout_seconds',
     'TCG_API_KEY': 'api_key',
+    'TCG_MODEL_HEADERS_JSON': 'headers_json', 'TCG_MODEL_AUTH_MODE': 'auth_mode',
 }
 
 

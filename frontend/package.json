@@ -1,6 +1,6 @@
 {
   "name": "tcg-case-agent-chat",
-  "version": "2.0.7",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,9 @@
     "test": "node --import tsx --test tests/*.test.tsx"
   },
   "dependencies": {
+    "dompurify": "3.4.15",
     "lucide-react": "1.31.0",
+    "mermaid": "11.17.2",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
