@@ -12,7 +12,8 @@
 | Builds for non-production branches | 取消勾选 |
 | Protect with Cloudflare Access | 开启，允许自己的账号登录 |
 | Root directory | 仓库根目录，留空或 `/` |
-| Production branch | 先选 `codex/cloudflare-dual-runtime`；包含适配代码的 PR 合并后再切到 `main` |
+
+创建页没有分支选择时，使用仓库主分支 `main`，因此部署代码需要先通过 PR 合入 `main`。分支设置位于创建后的 Worker → Settings → Build。不要在 Advanced settings 中寻找生产分支选择器；其中的 Non-production branch deploy command 是预览发布命令，不是分支选择。
 
 不要使用默认的 `npm run build`：它是 Sites 专用构建。Workers Builds 当前不会执行 Wrangler 配置中的 custom build，因此页面的 Build command 必须显式填写。参考 [Cloudflare 构建配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)。
 
@@ -20,8 +21,9 @@
 
 | 名称 | 值 |
 |---|---|
-| `NODE_VERSION` | `24` |
 | `CLOUDFLARE_ACCOUNT_ID` | 当前账号的 32 位 Account ID |
+
+仓库根目录的 `.node-version` 已指定 Node.js 24，不必在创建页另外填写 `NODE_VERSION`。参考 [Cloudflare 构建环境](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。
 
 构建 Token 在 Cloudflare 的 API token 选项中选择，不要提交到 Git。需包含 Account 下的 Workers Scripts 编辑、D1 编辑、Workers R2 Storage 编辑权限。Cloudflare 自动生成的默认 Token 权限列表未包含 D1，需要补上 D1 编辑权限或选择已具备这些权限的自定义 Token；已有 Token 可在 My Profile → API Tokens 修改。如果创建页面未提供选择入口，可在首次创建后进入 Worker → Settings → Build 调整 API token 并重试构建。
 
