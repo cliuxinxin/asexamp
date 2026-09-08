@@ -174,12 +174,20 @@ class Store:
         return source
 
     def evidence(self, source_ids):
-        evidence = []
-        for source_id in source_ids:
-            source = self.get('source', source_id)
-            chunks = self.list('chunk', chat_id=source['chat_id'])
-            evidence.extend(c for c in chunks if c['source_id'] == source_id)
-        return evidence
+        sources = [self.get('source', source_id) for source_id in source_ids]
+        chunks_by_source = {source_id: [] for source_id in source_ids}
+        for chat_id in dict.fromkeys(source['chat_id'] for source in sources):
+            for chunk in self.list('chunk', chat_id=chat_id):
+                if chunk.get('source_id') in chunks_by_source:
+                    chunks_by_source[chunk['source_id']].append(chunk)
+
+        def paragraph_key(chunk):
+            _, marker, number = chunk.get('id', '').rpartition('#P')
+            return (0, int(number)) if marker and number.isdigit() else (1, chunk.get('id', ''))
+
+        for chunks in chunks_by_source.values():
+            chunks.sort(key=paragraph_key)
+        return [chunk for source_id in source_ids for chunk in chunks_by_source[source_id]]
 
     def deactivate_source(self, source_id):
         with self.transaction():

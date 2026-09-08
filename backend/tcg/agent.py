@@ -4,6 +4,7 @@ Only concise, evidence-cited findings are exposed as analysis. Planner decisions
 are structured actions, never fabricated execution or private reasoning traces.
 """
 import json
+import copy
 import re
 from collections import Counter
 from typing import TypedDict
@@ -12,6 +13,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from . import agent_contracts as contract
+from .agent_repair import apply_repair, repair_fragment
+from .agent_context import context_for, compact_items, model_view, project_memory
+from .document_workspace import DocumentWorkspace
+from .agent_analysis import analyze_documents
+from .agent_generation import generate_items
+from .agent_import import import_cases
 from .documents import parse_text
 from .schemas import DomainError, OutputValidationError, INTENTS, apply_operations, profile_config, validate_items
 from .storage import now, public, uid
@@ -35,6 +42,8 @@ class AgentState(TypedDict, total=False):
     output_ref: str | None
     intent: str
     reassessments: int
+    tool_arguments: dict
+    document_calls: int
 
 
 class StaleInstruction(Exception):
@@ -51,6 +60,7 @@ class Agent:
 
     def __init__(self, engine, saver):
         self.engine, self.store = engine, engine.store
+        self.documents = DocumentWorkspace(self.store)
         builder = StateGraph(AgentState)
         for name in ('plan', 'work', 'gate', 'finish'):
             builder.add_node(name, self.observed(name))
@@ -92,27 +102,8 @@ class Agent:
         agent = self.store.run(run_id)['agent']
         self.update(run_id, insights=agent.get('insights', []) + [{'id': uid('ins_'), 'summary': summary, 'refs': refs, 'kind': kind}])
 
-    def context(self, state, **extra):
-        run = self.store.run(state['run_id'])
-        depth = run.get('agent', {}).get('depth', 'standard')
-        memory = self.store.get('chat', run['chat_id']).get('memory', {})
-        context = self.engine.context(state['run_id'], memory=memory, instructions=run.get('_instructions', []), depth=depth,
-                                      requested_depth=run['_request'].get('depth', 'auto'), depth_guidance=contract.DEPTH_GUIDANCE.get(depth, contract.DEPTH_GUIDANCE['standard']))
-        context['request'].update(experience='agent', confirm_strategy=run['_request'].get('confirm_strategy', True))
-        for key, name in (('analysis_ref', 'analysis'), ('scenario_ref', 'scenarios'), ('cases_ref', 'cases')):
-            if state.get(key):
-                artifact = self.store.get('artifact', state[key])
-                context[name] = artifact['items']
-                if name == 'analysis':
-                    context['business_model'] = artifact['report']['business_model']
-                    context['strategy'] = artifact['report']['strategy']
-                    context['assumptions'] = artifact['report'].get('assumptions', [])
-                    context['deferred_questions'] = artifact['report'].get('deferred_questions', [])
-        decision = self.continuation(run)
-        if decision:
-            context['clarification_decision'] = decision
-        context.update(extra)
-        return context
+    def context(self, state, purpose=None, **extra):
+        return context_for(self, state, purpose or state.get('action', 'plan'), **extra)
 
     @staticmethod
     def continuation(run):
@@ -139,37 +130,62 @@ class Agent:
             return {'proceed': True, 'has_changes': False}
         if response.get('proceed') and not content:
             return {'proceed': True, 'has_changes': False}
+        if len(json.dumps(content, ensure_ascii=False)) > 4_000:
+            # Preserve substantial replies verbatim as new evidence. A truncated
+            # semantic preview must never infer permission to proceed.
+            return {'proceed': bool(response.get('proceed')), 'has_changes': True}
         def validate(result):
-            contract.require(type(result.get('proceed')) is bool and type(result.get('has_changes')) is bool,
-                             'feedback', 'boolean_proceed_and_has_changes')
+            contract.require(type(result.get('proceed')) is bool, 'proceed', 'boolean')
+            contract.require(type(result.get('has_changes')) is bool, 'has_changes', 'boolean')
             return result
-        result = await self.call(state, 'agent_feedback', self.context(state, feedback=content,
+        result = await self.call(state, 'agent_feedback', self.context(state, purpose='feedback', feedback=content,
             questions=analysis['report'].get('questions', [])), validate)
         return {**result, 'proceed': bool(response.get('proceed')) or result['proceed']}
 
     async def call(self, state, task, context, validator):
         key = f'agent:{state["epoch"]}:{state["iteration"]}:{task}'
         result = await self.engine.call(state['run_id'], key, task, context)
-        original = result
+        original = copy.deepcopy(result)
+        semantic_completion = False
         self.current(state)
-        for attempt in range(2):
+        for attempt in range(4):
             try:
                 accepted = validator(result)
                 if attempt and task in ('agent_analyze', 'agent_scenarios', 'agent_cases', 'import_cases'):
-                    self.preserve_schema_repair(original, accepted)
+                    self.preserve_schema_repair(original, accepted, allow_additions=semantic_completion)
                 return accepted
             except OutputValidationError as exc:
-                if attempt:
+                self.engine.trace('agent.validation_failed', state['run_id'], task=task, validation_error=exc.issue)
+                if attempt == 3:
                     raise
-                result = await self.engine.call(state['run_id'], key + ':schema_repair', task,
-                    {**context, 'validation_repair': {'validation_error': exc.issue, 'previous_response': result}})
+                if task == 'agent_analyze' and exc.issue['expected'] == 'all_supplied_business_evidence_analyzed':
+                    from .agent_analysis import complete_evidence
+                    result = await complete_evidence(self, state, key, context, result, attempt)
+                    semantic_completion = True
+                    continue
+                fragment = repair_fragment(result, exc.issue)
+                self.insight(state['run_id'], f'字段 {exc.issue["path"]} 未通过校验，正在局部修正；已有条目保留。', [], 'decision')
+                repair_context = {'repair': fragment, 'original_task': task,
+                    'constraints': {'depth': context.get('depth'), 'available_actions': context.get('available_actions'),
+                                    'evidence_ids': [e['id'] for e in context.get('evidence', []) if e['role'] != 'example']}}
+                if 'business_model' in fragment['path']:
+                    model = result.get('report', {}).get('business_model', {})
+                    repair_context['constraints']['node_ids'] = [n.get('id') for n in model.get('nodes', []) if isinstance(n, dict)]
+                if any(field in fragment['path'] for field in ('requirement_ids', 'branch_ids', 'scenario_id')):
+                    repair_context['constraints'].update(requirement_ids=[i['id'] for i in context.get('analysis', [])],
+                        branch_ids=[e['id'] for e in context.get('business_model', {}).get('edges', [])],
+                        scenario_links=[{k: s[k] for k in ('id', 'requirement_ids', 'branch_ids') if k in s} for s in context.get('scenarios', [])])
+                if any(word in fragment['path'] for word in ('refs', 'business_model', 'traceability')):
+                    repair_context['evidence'] = context.get('evidence', [])
+                response = await self.engine.call(state['run_id'], key + f':field_repair:{attempt}', 'agent_repair', repair_context)
                 self.current(state)
+                result = apply_repair(result, fragment, response)
 
     @staticmethod
-    def preserve_schema_repair(original, corrected):
+    def preserve_schema_repair(original, corrected, allow_additions=False):
         """Schema repairs may fix invalid fields, never erase previously generated items."""
         if isinstance(original.get('items'), list):
-            contract.require(len(original['items']) == len(corrected['items']), 'items', 'same_schema_repair_item_count')
+            contract.require(len(original['items']) <= len(corrected['items']) if allow_additions else len(original['items']) == len(corrected['items']), 'items', 'preserved_item_count')
             ids = Counter(i.get('id') for i in original['items'] if isinstance(i, dict) and isinstance(i.get('id'), str))
             retained = {i['id'] for i in corrected['items']}
             contract.require(all(i in retained for i, count in ids.items() if i and len(i) <= 200 and count == 1), 'items.id', 'preserved_valid_stable_ids')
@@ -177,11 +193,18 @@ class Agent:
             contract.require(original['has_more'] == corrected.get('has_more'), 'has_more', 'unchanged_page_continuation')
         graph = original.get('report', {}).get('business_model') if isinstance(original.get('report'), dict) else None
         if isinstance(graph, dict):
+            collections = [graph.get(field) for field in ('nodes', 'edges')]
+            graph_ids = Counter(item.get('id') for collection in collections if isinstance(collection, list)
+                                for item in collection if isinstance(item, dict) and contract.valid_graph_id(item.get('id')))
             for field in ('nodes', 'edges'):
                 if isinstance(graph.get(field), list):
-                    old = {i['id'] for i in graph[field] if isinstance(i, dict) and isinstance(i.get('id'), str)}
-                    new = {i['id'] for i in corrected['report']['business_model'][field]}
-                    contract.require(old <= new, 'business_model.' + field, 'preserved_graph_ids_during_schema_repair')
+                    corrected_items = corrected['report']['business_model'][field]
+                    contract.require(len(graph[field]) <= len(corrected_items) if allow_additions else len(graph[field]) == len(corrected_items),
+                                     'report.business_model.' + field, 'preserved_graph_item_count')
+                    old = {item['id'] for item in graph[field] if isinstance(item, dict)
+                           and contract.valid_graph_id(item.get('id')) and graph_ids[item['id']] == 1}
+                    new = {item['id'] for item in corrected_items}
+                    contract.require(old <= new, 'report.business_model.' + field, 'preserved_graph_ids_during_schema_repair')
 
     def available(self, state):
         intent = state.get('intent')
@@ -217,7 +240,7 @@ class Agent:
         changes = {}
         if state.get('epoch') != epoch or state.get('stale'):
             changes = {'epoch': epoch, 'analysis_ref': None, 'scenario_ref': None, 'cases_ref': None, 'approved': False,
-                       'checked': False, 'repairs': 0, 'no_progress': 0, 'signature': '', 'stale': False, 'output_ref': None}
+                       'checked': False, 'repairs': 0, 'no_progress': 0, 'signature': '', 'stale': False, 'output_ref': None, 'document_calls': 0}
             changes['reassessments'] = 0
             state = {**state, **changes}
             with self.store.transaction():
@@ -232,24 +255,67 @@ class Agent:
             intent = run['_request']['intent']
             if intent == 'auto':
                 route_context = self.engine.routing_context(run['id'])
-                route_context['confirmed_memory'] = self.store.get('chat', run['chat_id']).get('memory', {})
+                full_memory = self.store.get('chat', run['chat_id']).get('memory', {})
+                # Fit memory to the remaining router request, preserving complete
+                # durable memory and explicit omission counts. Citation IDs are
+                # unnecessary for intent classification, so this view omits them.
+                projected_memory = None
+                for limits in ((8, 6, 250), (4, 4, 160), (2, 2, 100), (1, 1, 80)):
+                    projected_memory = project_memory(
+                        full_memory, decision_limit=limits[0], list_limit=limits[1], text_budget=limits[2],
+                        ref_limit=0, decision_ref_limit=0)
+                    for decision in projected_memory['decisions']:
+                        decision.pop('refs', None)
+                        decision.pop('superseded_by', None)
+                    route_context['confirmed_memory'] = projected_memory
+                    if len(json.dumps(route_context, ensure_ascii=False)) <= 12_000:
+                        break
+                if len(json.dumps(route_context, ensure_ascii=False)) > 12_000:
+                    # The router can still classify from counts if the request and
+                    # conversation already consume almost all of its small budget.
+                    route_context['confirmed_memory'] = {'_projection': projected_memory['_projection']}
+                if len(json.dumps(route_context, ensure_ascii=False)) > 12_000:
+                    raise DomainError('自动识别的上下文超过预算，请明确选择任务目标后重新发送')
                 routed = await self.call(state, 'route', route_context, self.route_contract)
                 intent = routed['intent']
-            source_ids = run['_source_ids']
-            if intent in ('query', 'modify', 'review_case'):
-                source_ids = list(dict.fromkeys(source_ids + run.get('_artifact_source_ids', [])))
-            self.store.update_run(run['id'], intent=intent, _source_ids=source_ids)
+            self.store.update_run(run['id'], intent=intent)
+            run = self.store.run(run['id'])
             changes['intent'] = intent
             state['intent'] = intent
+        if state['intent'] in ('query', 'modify', 'review_case'):
+            source_ids = list(dict.fromkeys(run['_source_ids'] + run.get('_artifact_source_ids', [])))
+            if source_ids != run['_source_ids']:
+                self.store.update_run(run['id'], _source_ids=source_ids)
+                run = self.store.run(run['id'])
         available = self.available(state)
         if self.continuation(run) and state.get('analysis_ref'):
             available = [action for action in available if action != 'analyze']
-        context = self.context(state, available_actions=available, coverage=run.get('agent', {}).get('coverage'), iteration=iteration, max_iterations=self.MAX_ITERATIONS)
-        evidence = {e['id']: e for e in context['evidence']}
+        if available == ['finish'] or state.get('checked') and not run.get('agent', {}).get('coverage', {}).get('gaps'):
+            return {**changes, 'iteration': iteration, 'action': 'finish', 'stale': False}
+        if run['_source_ids'] and state.get('document_calls', 0) < 4:
+            available += ['search_documents', 'read_document']
+        context = self.context(state, purpose='plan', available_actions=available, coverage=run.get('agent', {}).get('coverage'), iteration=iteration, max_iterations=self.MAX_ITERATIONS)
+        # Validate citations against the complete authorized inventory. The model
+        # sees a bounded metadata projection, which may omit refs still displayed
+        # in compact accepted findings.
+        evidence = {e['id']: e for e in self.documents.evidence(run['_source_ids'])}
         def validator(result):
-            contract.plan(result, available, evidence, run['_request'].get('depth', 'auto'), allow_examples=state['intent'] == 'learn_template')
+            contract.plan(result, available, evidence, run['_request'].get('depth', 'auto'),
+                          allow_examples=state['intent'] == 'learn_template', require_insight_refs=False)
             if state.get('analysis_ref') and result['next_action'] != 'analyze':
                 contract.require(result['depth'] == context['strategy']['depth'], 'depth', 'confirmed_strategy_depth_or_reassess_analysis')
+            if result['next_action'] in ('search_documents', 'read_document'):
+                args = result.get('tool_arguments', {})
+                contract.require(isinstance(args, dict), 'tool_arguments', 'object')
+                if result['next_action'] == 'search_documents':
+                    contract.require(isinstance(args.get('query'), str) and 0 < len(args['query'].strip()) <= 500, 'tool_arguments.query', 'search_query_1_to_500_characters')
+                else:
+                    refs = args.get('refs')
+                    contract.require(isinstance(refs, list), 'tool_arguments.refs', 'array')
+                    contract.require(0 < len(refs) <= 40, 'tool_arguments.refs', '1_to_40_provided_paragraph_ids')
+                    for index, ref in enumerate(refs):
+                        contract.require(isinstance(ref, str) and 0 < len(ref) <= 200,
+                                         f'tool_arguments.refs[{index}]', 'paragraph_id_1_to_200_characters')
             return result
         result = await self.call(state, 'agent_plan', context, validator)
         with self.store.transaction():
@@ -258,7 +324,7 @@ class Agent:
             steps = [{**s, 'status': 'running' if s['id'] == result['next_action'].removeprefix('repair_') else 'completed' if completed.get(s['id']) else 'pending'} for s in result['plan']]
             self.update(run['id'], depth=result['depth'], rationale=result['rationale'], plan=steps)
             self.insight(run['id'], result['insight']['summary'], result['insight']['refs'])
-        return {**changes, 'iteration': iteration, 'action': result['next_action'], 'stale': False}
+        return {**changes, 'iteration': iteration, 'action': result['next_action'], 'tool_arguments': result.get('tool_arguments', {}), 'stale': False}
 
     @staticmethod
     def route_contract(result):
@@ -268,13 +334,24 @@ class Agent:
     async def work(self, state):
         self.current(state)
         run_id, action = state['run_id'], state['action']
+        if action in ('search_documents', 'read_document'):
+            run = self.current(state)
+            args = state['tool_arguments']
+            result = self.documents.search(run['_source_ids'], args['query']) if action == 'search_documents' else self.documents.read(run['_source_ids'], args['refs'])
+            with self.store.transaction():
+                self.current(state)
+                self.store.update_run(run_id, _document_observation={'tool': action, 'epoch': state['epoch'], 'result': result})
+                refs = [e['id'] for e in result.get('matches', result.get('evidence', []))]
+                self.insight(run_id, f'本地搜索命中 {len(refs)} 段；将按需要读取原文。' if action == 'search_documents' else f'按需读取 {len(refs)} 段原文；本次读取已限制大小。', refs, 'decision')
+            return {'document_calls': state.get('document_calls', 0) + 1}
         self.engine.stage(run_id, {'analyze': 'requirement_analysis', 'scenarios': 'scenario_generation', 'cases': 'case_generation', 'check': 'coverage_check'}.get(action, 'coverage_repair'))
         context = self.context(state)
         evidence = {e['id']: e for e in context['evidence']}
         if action in ('query', 'modify', 'review_cases', 'learn_template', 'import_cases'):
             return await self.single(state, action, context, evidence)
         if action == 'analyze':
-            if not any(e['role'] != 'example' for e in evidence.values()):
+            full_inventory = self.documents.evidence(self.current(state)['_source_ids'])
+            if not any(e['role'] != 'example' for e in full_inventory):
                 def intake_schema(result):
                     contract.require(result.get('classification') in ('requirement', 'instruction', 'ambiguous'), 'classification', 'requirement|instruction|ambiguous')
                     contract.text(result.get('question'), 'question')
@@ -294,7 +371,8 @@ class Agent:
                     if not answer.get('instruction'):
                         self.add_instruction(run_id, answer.get('answer', ''), resume=False)
                     return {'stale': True}
-            result = await self.call(state, 'agent_analyze', context, lambda r: contract.analysis(r, evidence, context['depth']))
+            result = await analyze_documents(self, state, context)
+            evidence = {e['id']: e for e in self.documents.evidence(self.current(state)['_source_ids'])}
             reassessments = state.get('reassessments', 0)
             if state.get('analysis_ref'):
                 old = self.store.get('artifact', state['analysis_ref'])
@@ -328,23 +406,7 @@ class Agent:
         if action.startswith('repair_') and state.get('repairs', 0) >= self.MAX_REPAIRS:
             raise IncompleteCoverage('达到定向修复预算，未发布不完整结果。请检查问题并补充规则后重试。')
         previous = context.get(kind, []) if action.startswith('repair_') else []
-        items, cursor, used = list(previous), None, set()
-        for page in range(200):
-            page_context = {**context, 'previous_items': items, 'cursor': cursor, 'coverage': self.store.run(run_id)['agent'].get('coverage'), 'repair': action.startswith('repair_')}
-            page_state = {**state, 'iteration': f'{state["iteration"]}:{page}'}
-            result = await self.call(page_state, 'agent_' + kind, page_context,
-                lambda r: contract.generated(r, kind, evidence, context['analysis'], context['business_model'], context.get('scenarios') if kind == 'cases' else None))
-            new = result['items']
-            contract.require(not {i['id'] for i in items}.intersection(i['id'] for i in new), 'items.id', 'new_unique_ids')
-            items.extend(new)
-            if not result['has_more']:
-                break
-            next_cursor = result.get('next_cursor')
-            contract.require(bool(new) and isinstance(next_cursor, str) and next_cursor and next_cursor not in used, 'next_cursor', 'new_cursor_and_new_items')
-            cursor = next_cursor
-            used.add(cursor)
-        else:
-            raise IncompleteCoverage('分页达到执行预算；未接受不完整结果，请拆分范围后重试。')
+        items = await generate_items(self, state, context, kind, previous)
         with self.store.transaction():
             self.current(state)
             artifact = self.store.artifact(run_id, f'agent_{kind}:{state["epoch"]}:{state["iteration"]}', kind, '测试场景' if kind == 'scenarios' else '测试用例', items,
@@ -368,9 +430,9 @@ class Agent:
                 return {'stale': True}
             def validator(result):
                 contract.text(result.get('answer'), 'answer')
-                contract.refs(result.get('refs'), evidence, 'answer.refs')
+                contract.refs(result.get('refs'), evidence, 'refs')
                 return result
-            result = await self.call(state, 'query', context, validator)
+            result = await self.call(state, 'query', model_view(context, 'query', budget=40_000), validator)
             with self.store.transaction():
                 self.current(state)
                 artifact = self.engine.answer(run_id, f'agent_answer:{state["epoch"]}', result['answer'], result['refs'])
@@ -382,30 +444,14 @@ class Agent:
                 result['config'] = profile_config(result.get('config'))
                 contract.text(result.get('summary'), 'summary')
                 return result
-            result = await self.call(state, 'learn_template', context, validator)
+            result = await self.call(state, 'learn_template', model_view(context, 'learn_template', budget=40_000), validator)
             with self.store.transaction():
                 self.current(state)
                 artifact = self.store.artifact(run_id, f'agent_proposal:{state["epoch"]}', 'proposal', 'Profile 配置建议',
                     [{'id': uid('proposal_'), 'title': '模板学习建议', 'description': result['summary'], 'refs': []}], {'config': result['config']})
             return {'output_ref': artifact['id']}
         if action == 'import_cases':
-            items, cursor, used = [], None, set()
-            for page in range(200):
-                def validator(result):
-                    validate_items('cases', result.get('items'), evidence)
-                    contract.require(isinstance(result.get('has_more'), bool), 'has_more', 'boolean')
-                    return result
-                result = await self.call({**state, 'iteration': f'{state["iteration"]}:{page}'}, 'import_cases', {**context, 'previous_items': items, 'cursor': cursor}, validator)
-                contract.require(not {i['id'] for i in items}.intersection(i['id'] for i in result['items']), 'items.id', 'new_unique_ids')
-                items += result['items']
-                if not result['has_more']:
-                    break
-                cursor = result.get('next_cursor')
-                contract.require(bool(result['items']) and isinstance(cursor, str) and cursor and cursor not in used, 'next_cursor', 'new_cursor_and_new_items')
-                used.add(cursor)
-            else:
-                raise IncompleteCoverage('导入分页达到执行预算，未接受不完整结果。')
-            contract.require(bool(items), 'items', 'nonempty_imported_cases')
+            items = await import_cases(self, state, context)
             with self.store.transaction():
                 self.current(state)
                 artifact = self.store.artifact(run_id, f'agent_import:{state["epoch"]}', 'cases', '导入用例', items)
@@ -416,15 +462,20 @@ class Agent:
         if action == 'review_cases' and snapshot['type'] != 'cases':
             raise DomainError('用例评审需要测试用例 Artifact；请选择用例后重试。')
         context = {**context, 'artifact': public(snapshot), 'cases': snapshot['items'] if action == 'review_cases' else context.get('cases', [])}
+        authorized = {item['id']: item for item in self.documents.evidence(run['_source_ids'])}
         def validator(result):
             items = apply_operations(snapshot['items'], result.get('operations'), run['_request'].get('selected_ids'))
-            validate_items(snapshot['type'], items, evidence)
+            validate_items(snapshot['type'], items, authorized)
+            changed_ids = {operation.get('item', {}).get('id') if operation.get('op') == 'add' else operation.get('id')
+                           for operation in result.get('operations', []) if isinstance(operation, dict) and operation.get('op') != 'delete'}
+            validate_items(snapshot['type'], [item for item in items if item['id'] in changed_ids], evidence)
             result['_accepted_items'] = items
             return result
-        result = await self.call(state, 'modify' if action == 'modify' else 'review_cases', context, validator)
+        task = 'modify' if action == 'modify' else 'review_cases'
+        result = await self.call(state, task, model_view(context, task, budget=40_000), validator)
         with self.store.transaction():
             self.current(state)
-            report = contract.refreshed_report(snapshot['type'], result['_accepted_items'], snapshot.get('report', {}), evidence)
+            report = contract.refreshed_report(snapshot['type'], result['_accepted_items'], snapshot.get('report', {}), authorized)
             if action == 'review_cases':
                 report['review'] = result.get('report', {})
             artifact = self.store.artifact(run_id, f'agent_edit_candidate:{state["epoch"]}:{state["iteration"]}', snapshot['type'], snapshot['title'], result['_accepted_items'], report)
@@ -573,22 +624,31 @@ class Agent:
 
     async def finish(self, state):
         self.current(state)
-        context = self.context(state, coverage=self.store.run(state['run_id'])['agent'].get('coverage'))
+        full_coverage = self.store.run(state['run_id'])['agent'].get('coverage')
+        context = self.context(state, purpose='summary', coverage=full_coverage)
+        full_assumptions, full_deferred_questions = [], []
+        if state.get('analysis_ref'):
+            analysis_report = self.store.get('artifact', state['analysis_ref']).get('report', {})
+            full_assumptions = analysis_report.get('assumptions', [])
+            full_deferred_questions = analysis_report.get('deferred_questions', [])
         design_goal = state['intent'] in ('generate_case', 'generate_scenario')
-        if design_goal and (not context['coverage'] or context['coverage']['gaps']):
+        if design_goal and (not full_coverage or full_coverage['gaps']):
             raise IncompleteCoverage('仍有设计覆盖缺口，不能发布完成结果。')
         output_ref = state.get('output_ref') or state.get('cases_ref') or state.get('scenario_ref') or state.get('analysis_ref')
         contract.require(bool(output_ref), 'output_ref', 'accepted_output')
-        context['output'] = public(self.store.get('artifact', output_ref))
+        output = self.store.get('artifact', output_ref)
+        context['output'] = {'type': output['type'], 'title': output['title'], 'item_count': len(output['items']),
+                             'items': compact_items(output['items'], 12)}
         context['goal'] = state['intent']
+        context = model_view(context, 'summary')
         self.engine.stage(state['run_id'], 'summarizing')
-        evidence = {e['id']: e for e in context['evidence']}
+        evidence = {e['id']: e for e in self.documents.evidence(self.current(state)['_source_ids'])}
         def validate(result):
             contract.text(result.get('summary'), 'summary')
             if state['intent'] != 'learn_template':
-                contract.refs(result.get('refs'), evidence, 'summary.refs')
+                contract.refs(result.get('refs'), evidence, 'refs')
             else:
-                contract.strings(result.get('refs', []), 'summary.refs')
+                contract.strings(result.get('refs', []), 'refs')
             return result
         result = await self.call(state, 'agent_summary', context, validate)
         with self.store.transaction():
@@ -607,13 +667,13 @@ class Agent:
                 report_artifact = None
             summary = result['summary']
             if design_goal:
-                artifact = self.store.artifact(run['id'], f'agent_final:{state["epoch"]}:{state["iteration"]}', artifact['type'], artifact['title'], artifact['items'], {**artifact['report'], 'coverage': context['coverage']})
+                artifact = self.store.artifact(run['id'], f'agent_final:{state["epoch"]}:{state["iteration"]}', artifact['type'], artifact['title'], artifact['items'], {**artifact['report'], 'coverage': full_coverage})
                 output_ref = artifact['id']
-                summary += f'\n设计覆盖：需求 {context["coverage"]["requirements_covered"]}/{context["coverage"]["requirements_total"]}，分支 {context["coverage"]["branches_covered"]}/{context["coverage"]["branches_total"]}。这是设计覆盖，未执行测试。'
-            if context.get('deferred_questions'):
-                summary += '\n按你的指示保留以下未决问题并继续设计，相关业务规则尚未确认：\n' + '\n'.join('- ' + q for q in context['deferred_questions'])
-            if context.get('assumptions'):
-                summary += '\n未确认的假设：\n' + '\n'.join('- ' + a for a in context['assumptions'])
+                summary += f'\n设计覆盖：需求 {full_coverage["requirements_covered"]}/{full_coverage["requirements_total"]}，分支 {full_coverage["branches_covered"]}/{full_coverage["branches_total"]}。这是设计覆盖，未执行测试。'
+            if full_deferred_questions:
+                summary += '\n按你的指示保留以下未决问题并继续设计，相关业务规则尚未确认：\n' + '\n'.join('- ' + q for q in full_deferred_questions)
+            if full_assumptions:
+                summary += '\n未确认的假设：\n' + '\n'.join('- ' + a for a in full_assumptions)
             self.update(run['id'], summary=summary, plan=[{**s, 'status': 'completed'} for s in run['agent']['plan']])
             self.insight(run['id'], summary, result['refs'], 'summary')
             ids = list(dict.fromkeys(ref for ref in (state.get('analysis_ref'), state.get('scenario_ref') if state['intent'] == 'generate_case' else None, output_ref) if ref))
@@ -624,6 +684,8 @@ class Agent:
 
     def recovery(self, run, exc):
         category = getattr(exc, 'category', 'schema' if isinstance(exc, OutputValidationError) else 'model')
+        issue = getattr(exc, 'issue', None)
         return {'category': category, 'title': '智能设计尚未完成', 'detail': f'阶段 {run["stage"]} 已停止，未发布不完整的最终用例。',
-                'suggestions': ['检查设置中的认证方式、模型名称和请求头，然后重试当前阶段。'] if category in ('authentication', 'configuration') else ['检查已保存的分析、覆盖缺口和问题。', '可重试当前阶段，或取消后补充需求、缩小范围重新开始。'],
+                'validation_error': issue,
+                'suggestions': [f'字段 {issue["path"]} 需要 {issue["expected"]}。打开失败调用的发送记录核查修正片段；原草稿已保留。', '重试当前阶段会保留已成功的步骤；反复失败时可缩小需求范围。'] if issue else ['检查设置中的认证方式、模型名称和请求头，然后重试当前阶段。'] if category in ('authentication', 'configuration') else ['检查已保存的分析、覆盖缺口和问题。', '可重试当前阶段，或取消后补充需求、缩小范围重新开始。'],
                 'preserved': ['已有来源证据', '策略与已完成的 Artifact 版本', '检查点、补充指令和确认记忆'], 'retryable': getattr(exc, 'retryable', True)}
