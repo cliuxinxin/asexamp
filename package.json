@@ -9,7 +9,8 @@
     "db:generate": "drizzle-kit generate",
     "build:cloudflare": "node cloud/build.mjs --cloudflare",
     "deploy:cloudflare": "node cloud/deploy.mjs",
-    "check:cloudflare": "wrangler deploy --dry-run --config wrangler.jsonc"
+    "check:cloudflare": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "deploy:builds": "node cloud/deploy-builds.mjs"
   },
   "dependencies": {
     "unpdf": "1.8.1",

@@ -1,5 +1,7 @@
 # 发布到自己的 Cloudflare 账号
 
+如果正在使用 Cloudflare 的 GitHub 导入页面，请使用 [Workers Builds 页面填写说明](CLOUDFLARE_BUILDS.md)。下文是手动 GitHub Actions / 本机 CLI 的备选路径。
+
 此路径使用你的 Workers、D1、R2 和 Cloudflare Access。代码与本地 Python 入口共存，本地继续运行 `python3 start.py`；云端不会读取或上传本机 `.env`、聊天数据库及模型密钥。
 
 ## 一次性账号配置
@@ -22,7 +24,7 @@ Access 必须在首次访问前配置好。未经验证的请求会得到 401，
 | `TCG_ACCESS_AUD` | Variable | Access 应用的 64 位 AUD |
 | `TCG_WORKER_NAME` | Variable，可选 | 默认 `asexamp`，与 Access 域名保持一致 |
 
-在 Actions → Deploy to Cloudflare → Run workflow 执行首次发布。之后 `main` 上的云端代码、前端、依赖或迁移变更会自动发布。首次合并时若尚未配置上述值，工作流会明确失败，补齐后重新运行即可。
+在 Actions → Deploy to Cloudflare → Run workflow 执行发布。此流程现在仅手动触发，避免与 Cloudflare 原生 GitHub 集成重复发布。后续自动更新由 Workers Builds 监听其配置的生产分支。
 
 流程先运行测试与类型检查，再检查资源、应用迁移、构建并发布 Worker。首次发布自动创建 D1 和 R2；后续复用已部署项目的绑定。首次发布生成 `TCG_SECRET_KEY`，后续发布保留它，避免已保存的模型 Key 无法解密。不要删除或随意替换这个秘密变量。
 

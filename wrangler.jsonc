@@ -9,6 +9,9 @@
   "workers_dev": true,
   "preview_urls": false,
   "keep_vars": true,
+  "vars": {
+    "TCG_APP_ID": "cliuxinxin/asexamp"
+  },
   "send_metrics": false,
   "build": {
     "command": "npm run build:cloudflare"

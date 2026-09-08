@@ -68,7 +68,7 @@ Sites 发布使用 `.openai/hosting.json` 中已登记的站点，绑定 `DB` �
 
 可选运行时变量：`TCG_MODEL_NAME`、`TCG_MODEL_PROVIDER`、`TCG_MODEL_BASE_URL`、`TCG_MODEL_API_KEY`。设置 `TCG_MODEL_NAME` 后，界面模型配置只读，优先使用这组变量。它们独立于本地 `.env`，不会自动上传本机密钥。
 
-部署到自己的 Cloudflare 账号使用 `npm run deploy:cloudflare`，入口为 `cloud/worker.ts`。它验证 Cloudflare Access JWT 的签名、发行者、应用 AUD 和有效期，再覆盖内部身份头；所有 API 和静态页面均经过验证。配置、GitHub 自动发布和中断恢复见 [Cloudflare 发布步骤](CLOUDFLARE.md)。不要把 Sites 专用的 `cloud/server.ts` 直接作为独立 Worker 入口。
+部署到自己的 Cloudflare 账号可使用 [Workers Builds 直接连接 GitHub](CLOUDFLARE_BUILDS.md)，也可执行 `npm run deploy:cloudflare` 进行 [手动发布](CLOUDFLARE.md)。入口为 `cloud/worker.ts`：验证 Cloudflare Access JWT 的签名、发行者、应用 AUD 和有效期，再覆盖内部身份头；所有 API 和静态页面均经过验证。不要把 Sites 专用的 `cloud/server.ts` 直接作为独立 Worker 入口。
 
 ## 容量与验证范围
 

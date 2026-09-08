@@ -2,16 +2,6 @@ name: Deploy to Cloudflare
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'cloud/**'
-      - 'frontend/**'
-      - 'db/**'
-      - 'drizzle/**'
-      - 'wrangler.jsonc'
-      - 'package*.json'
-      - '.github/workflows/cloudflare.yml'
 
 permissions:
   contents: read

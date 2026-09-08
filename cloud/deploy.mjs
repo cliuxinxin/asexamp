@@ -33,7 +33,7 @@ export function cloudflareApi(input,transport=fetch){
  };
 }
 
-async function runWrangler(args){
+export async function runWrangler(args){
  await new Promise((resolveRun,reject)=>{
   const child=spawn(process.execPath,[resolve(root,'node_modules/wrangler/bin/wrangler.js'),...args],{cwd:root,env:{...process.env,CI:'true',WRANGLER_SEND_METRICS:'false'},stdio:'inherit',shell:false});
   child.on('error',reject);child.on('exit',code=>code===0?resolveRun():reject(new Error(`Wrangler 执行失败（${code}），未报告部署成功`)));
