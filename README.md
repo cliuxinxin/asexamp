@@ -1,14 +1,8 @@
-# TCG Case Agent · 本地 + 云端聊天版
+# TCG Case Agent · 本地聊天版 v2.0.7
 
 前端是聊天界面，后端使用 **Python + FastAPI + LangGraph + LangChain**。项目、会话、需求、用例、版本和检查点保存在本机 SQLite，上传原件保存在本地目录。默认接本机 Ollama，也支持自行配置 OpenAI 兼容接口。
 
 本包包含完整源码和已编译的前端。正常使用只需要 Python，无需安装 Node、Cloudflare、Redis、外部数据库或云存储。
-
-## 云端部署
-
-现已增加独立的 Cloudflare Workers 适配，使用 LangGraph.js / LangChain.js、D1 和 R2，共用现有聊天界面。本地 Python 部署继续按下方方式运行。云端关闭页面后可能暂停，重新打开会从检查点继续；模型配置在站点中保存一次即可。
-
-推荐在 Cloudflare 创建应用时直接连接 GitHub，按 [Cloudflare 页面填写说明](docs/CLOUDFLARE_BUILDS.md) 配置。也可使用 [手动 Actions/CLI 发布](docs/CLOUDFLARE.md)。详细架构、Graph、配置和开发命令见 [云端架构说明](docs/CLOUD.md)。
 
 ## 从 v2.0 升级与排查等待
 

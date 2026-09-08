@@ -1,4 +1,3 @@
-import {cloudRuntime} from './runtime';
 import type {Json} from './types';
 
 export const stageNames:Record<string,string>={paused_edit:'修改待确认场景',queued:'等待执行',routing:'理解请求',route:'理解请求',requirement_analysis:'分析需求',analysis:'分析需求',applying_clarification:'应用澄清',clarify:'需求澄清',scenario_generation:'生成场景',scenarios:'生成场景',scenario_gate:'场景确认',scenario_review:'等待场景确认',case_generation:'生成用例',case_import:'导入用例',cases:'生成用例',case_review:'评审用例',review:'评审用例',finish:'保存结果',publishing:'保存结果',single:'处理请求',query:'证据问答',modify:'修改结果',learn_template:'学习模板'};
@@ -54,6 +53,6 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
  }else if(event==='run.completed'){add('全部步骤已完成','success');
  }else if(event==='run.cancelled'){finalize('cancelled');add('任务已停止','waiting');
  }else if(event==='run.failed'){finalize('failed');add('任务失败，可重试当前阶段','error');
- }else if(event==='run.suspended'){finalize('cancelled');add(cloudRuntime?'页面连接已断开，将从已保存的进度继续':'服务已暂停，重启后可恢复任务','waiting');}
+ }else if(event==='run.suspended'){finalize('cancelled');add('服务已暂停，重启后可恢复任务','waiting');}
  return next;
 }

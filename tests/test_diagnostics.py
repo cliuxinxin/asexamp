@@ -23,17 +23,9 @@ def test_completed_run_has_correlated_logs_without_business_text(tmp_path):
         _, chat, _ = setup_chat(client, secret_text)
         run = until(client, start(client, chat, content='PRIVATE-USER-MESSAGE'))
         assert run['status'] == 'completed'
-        # Publication precedes the graph's final checkpoint/log flush.
-        # Wait for the executor to settle before asserting its final event.
-        deadline = time.monotonic() + 3
-        while True:
-            response = client.get('/api/runs/' + run['id'] + '/diagnostics')
-            assert response.status_code == 200
-            report = response.json()
-            if not report['runtime']['task_active']:
-                break
-            assert time.monotonic() < deadline, report
-            time.sleep(.01)
+        response = client.get('/api/runs/' + run['id'] + '/diagnostics')
+        assert response.status_code == 200
+        report = response.json()
         assert report['runtime']['graph_thread_id'] == run['id']
         assert report['context']['conversation_messages'] == 1
         assert report['context']['history_limit'] == 12
