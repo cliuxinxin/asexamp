@@ -63,8 +63,9 @@ still use strict Mermaid security and offer a recoverable source view.
 
 `report.strategy` contains `depth`, `rationale`, `techniques`, `scope`. Assumptions
 remain separate from grounded requirement items. All supplied business evidence
-chunks must be represented in the analyzed requirements. Blocking questions always
-pause, including `confirm_strategy: false` requests.
+chunks must be represented in the analyzed requirements. Blocking questions pause
+even `confirm_strategy: false` requests, unless the user explicitly chooses to
+continue with those uncertainties retained.
 
 Default strategy pause:
 
@@ -76,6 +77,31 @@ Default strategy pause:
 `{"answer":"..."}` for a clarification interrupt. Strategy feedback uses
 `POST /api/runs/{run_id}/instructions` with `{"content":"..."}`. It returns
 `{"run":Run}`. After a strategy edit, approve the updated strategy through `/resume`.
+
+At an agent analysis/strategy pause with an `artifact_id`, `/resume` also accepts
+`{"proceed":true}` to continue without another clarification pass. An optional
+`answer` is applied as new business information first, then execution continues.
+Free-text replies from either `/resume` or `/instructions` distinguish continuation
+from business edits. Common complete continuation commands are handled directly;
+other replies use the bounded `agent_feedback` classifier. Pure workflow decisions
+are recorded separately, never promoted to business source evidence. Responses
+containing both concrete changes and a continuation request reanalyze once, apply
+the changes, and do not pause for the remaining questions again.
+
+Continuation is scoped to the current instruction epoch. It removes `analyze` from
+subsequent planner choices while leaving coverage checks and repairs in place. New
+business instructions invalidate that decision and can require strategy review again.
+Unresolved questions/assumptions remain in conversation memory and generation context;
+analysis/scenario/case reports expose `deferred_questions`, `assumptions`, and
+`clarification_decision`. Final summaries include these uncertainties even if the
+model omits them. Missing-evidence intake and legacy pauses cannot use `proceed`.
+Existing v2 waiting checkpoints work without a data reset.
+
+Common short continuation commands also work while analysis is running: they save
+a workflow decision without restarting the analysis. While a previously accepted
+gate reply is still being classified/applied, a second instruction returns 409 so
+neither reply is silently lost; the frontend keeps the unsent draft. Cancellation
+remains available. The pending marker is durable and cleared with reply application.
 
 Scenarios and cases carry `requirement_ids` and `branch_ids`; cases also carry
 `scenario_id`. Case links must be subsets of their parent scenario's links. The

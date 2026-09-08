@@ -26,6 +26,8 @@ class AgentModel:
             while not self.release.is_set():
                 await asyncio.sleep(.01)
         refs = [e['id'] for e in context.get('evidence', []) if e['role'] != 'example']
+        if task == 'agent_feedback':
+            return {'proceed': False, 'has_changes': True}
         if task == 'agent_plan':
             actions = context['available_actions']
             action = actions[0]
@@ -104,6 +106,169 @@ def test_blocking_questions_pause_auto_and_feedback_survives_restart(tmp_path):
         run = until(client, run)
         assert run['status'] == 'completed', run
         assert any('five failures' in json.dumps(c.get('instructions')) for t, c in model.calls if t == 'agent_cases')
+
+
+class PersistentQuestionsModel(AgentModel):
+    """An external model that keeps asking even after the user has replied."""
+    async def generate(self, task, context):
+        result = await super().generate(task, context)
+        if task == 'agent_analyze':
+            result['report']['questions'] = ['What is the lockout threshold?']
+        if task == 'agent_feedback':
+            replies = {
+                '现有信息已经够用了，请往后设计测试用例。': {'proceed': True, 'has_changes': False},
+                '锁定阈值是4次，其他问题先保留，直接生成。': {'proceed': True, 'has_changes': True},
+            }
+            result = replies.get(context['feedback'], result)
+        return result
+
+
+@pytest.mark.parametrize('endpoint,payload', [
+    ('resume', {'proceed': True}),
+    ('resume', {'answer': '不要对了，就这样吧'}),
+    ('instructions', {'content': '按照一般的系统进行假设'}),
+    ('instructions', {'content': '现有信息已经够用了，请往后设计测试用例。'}),
+    ('resume', {'proceed': True, 'answer': '现有信息已经够用了，请往后设计测试用例。'}),
+])
+def test_continue_exits_persistent_clarification_without_reanalyzing(tmp_path, endpoint, payload):
+    model = PersistentQuestionsModel()
+    with TestClient(create_app(tmp_path, model)) as client:
+        _, chat, _ = setup_chat(client)
+        run = until(client, start(client, chat, experience='agent'))
+        assert run['interrupt']['type'] == 'clarification'
+        source_ids = [s['id'] for s in client.get('/api/chats/' + chat['id']).json()['sources']]
+    # Existing waiting checkpoints must be usable after an upgrade/restart.
+    with TestClient(create_app(tmp_path, model)) as client:
+        response = client.post('/api/runs/' + run['id'] + '/' + endpoint, json=payload)
+        assert response.status_code == 200, response.text
+        run = until(client, run)
+        assert run['status'] == 'completed', run
+        assert len([t for t, _ in model.calls if t == 'agent_analyze']) == 1
+        snapshot = client.get('/api/chats/' + chat['id']).json()
+        assert [s['id'] for s in snapshot['sources']] == source_ids
+        assert snapshot['memory']['open_questions'] == ['What is the lockout threshold?']
+        assert snapshot['memory']['clarification_decision']['mode'] == 'proceed'
+        final = client.get('/api/artifacts/' + run['artifact_ids'][-1]).json()
+        assert final['report']['deferred_questions'] == ['What is the lockout threshold?']
+        assert final['report']['assumptions'] == ['No lockout policy supplied']
+        assert 'What is the lockout threshold?' in run['agent']['summary']
+        case_context = next(c for t, c in model.calls if t == 'agent_cases')
+        assert case_context['deferred_questions'] == ['What is the lockout threshold?']
+        assert all('analyze' not in c['available_actions'] for t, c in model.calls if t == 'agent_plan' and c.get('clarification_decision'))
+
+
+def test_continue_with_business_changes_applies_them_before_generation(tmp_path):
+    model = PersistentQuestionsModel()
+    with TestClient(create_app(tmp_path, model)) as client:
+        _, chat, _ = setup_chat(client)
+        run = until(client, start(client, chat, experience='agent'))
+        response = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': '锁定阈值是4次，其他问题先保留，直接生成。'})
+        assert response.status_code == 200
+        run = until(client, run)
+        assert run['status'] == 'completed', run
+        assert len([t for t, _ in model.calls if t == 'agent_analyze']) == 2
+        context = next(c for t, c in model.calls if t == 'agent_cases')
+        assert '锁定阈值是4次' in context['instructions'][-1]['content']
+
+
+def test_reply_that_requests_more_review_does_not_bypass_questions(tmp_path):
+    model = PersistentQuestionsModel()
+    with TestClient(create_app(tmp_path, model)) as client:
+        _, chat, _ = setup_chat(client)
+        run = until(client, start(client, chat, experience='agent'))
+        response = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': '不要继续，先核对需求。'})
+        assert response.status_code == 200
+        run = until(client, run)
+        assert run['status'] == 'waiting', run
+        assert not any(t == 'agent_cases' for t, _ in model.calls)
+
+
+def test_proceed_does_not_bypass_missing_requirement_intake(tmp_path):
+    class MissingModel(AgentModel):
+        async def generate(self, task, context):
+            if task == 'agent_intake':
+                return {'classification': 'instruction', 'question': '请提供业务规则。'}
+            return await super().generate(task, context)
+    with TestClient(create_app(tmp_path, MissingModel())) as client:
+        project = client.get('/api/projects').json()[0]
+        chat = client.post('/api/projects/' + project['id'] + '/chats', json={'title': 'Empty'}).json()
+        run = until(client, start(client, chat, experience='agent', content='Generate cases'))
+        response = client.post('/api/runs/' + run['id'] + '/resume', json={'proceed': True})
+        assert response.status_code == 400
+        assert client.get('/api/runs/' + run['id']).json()['status'] == 'waiting'
+
+
+def test_overlapping_feedback_is_rejected_without_losing_the_accepted_reply(tmp_path):
+    model = PersistentQuestionsModel(block='agent_feedback')
+    with TestClient(create_app(tmp_path, model)) as client:
+        _, chat, _ = setup_chat(client)
+        run = until(client, start(client, chat, experience='agent'))
+        first = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': '锁定阈值是4次，其他问题先保留，直接生成。'})
+        assert first.status_code == 200
+        assert model.entered.wait(4)
+        second = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': 'Only administrators are in scope.'})
+        assert second.status_code == 409
+        model.release.set()
+        run = until(client, run)
+        assert run['status'] == 'completed', run
+        context = next(c for t, c in model.calls if t == 'agent_cases')
+        assert '锁定阈值是4次' in context['instructions'][-1]['content']
+        assert 'administrators' not in json.dumps(context['instructions'])
+
+
+def test_continue_during_analysis_is_control_and_survives_restart(tmp_path):
+    model = PersistentQuestionsModel(block='agent_analyze')
+    with TestClient(create_app(tmp_path, model)) as client:
+        _, chat, _ = setup_chat(client)
+        run = start(client, chat, experience='agent')
+        assert model.entered.wait(4)
+        response = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': '不要对了，就这样吧'})
+        assert response.status_code == 200
+        assert len(client.get('/api/chats/' + chat['id']).json()['sources']) == 1
+    model.release.set()
+    with TestClient(create_app(tmp_path, model)) as client:
+        run = until(client, run)
+        assert run['status'] == 'completed', run
+        assert 'What is the lockout threshold?' in run['agent']['summary']
+
+
+def test_new_business_instruction_after_proceed_reopens_strategy_review(tmp_path):
+    model = PersistentQuestionsModel(block='agent_cases')
+    with TestClient(create_app(tmp_path, model)) as client:
+        _, chat, _ = setup_chat(client)
+        run = until(client, start(client, chat, experience='agent'))
+        client.post('/api/runs/' + run['id'] + '/resume', json={'proceed': True}).raise_for_status()
+        assert model.entered.wait(4)
+        response = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': 'Only administrator login is in scope.'})
+        assert response.status_code == 200, response.text
+        model.release.set()
+        run = until(client, run)
+        assert run['status'] == 'waiting', run
+        assert run['interrupt']['type'] == 'clarification'
+        assert client.get('/api/chats/' + chat['id']).json()['memory']['clarification_decision'] is None
+
+
+def test_continue_at_interrupt_boundary_does_not_leave_task_waiting(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    with TestClient(create_app(tmp_path, PersistentQuestionsModel())) as client:
+        graph = client.app.state.engine.agent.graph
+        original = graph.aget_state
+        async def delayed_snapshot(*args, **kwargs):
+            snapshot = await original(*args, **kwargs)
+            if snapshot.interrupts and not release.is_set():
+                entered.set()
+                while not release.is_set():
+                    await asyncio.sleep(.01)
+            return snapshot
+        monkeypatch.setattr(graph, 'aget_state', delayed_snapshot)
+        _, chat, _ = setup_chat(client)
+        run = start(client, chat, experience='agent')
+        assert entered.wait(4)
+        response = client.post('/api/runs/' + run['id'] + '/instructions', json={'content': '不要对了，就这样吧'})
+        assert response.status_code == 200
+        release.set()
+        run = until(client, run)
+        assert run['status'] == 'completed', run
 
 
 def test_instruction_during_call_discards_obsolete_result(tmp_path):

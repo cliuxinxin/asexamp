@@ -14,8 +14,10 @@ export function AnalysisReport({report}:{report:Json}){
  const diagrams=Array.isArray(report.diagrams)?report.diagrams.filter((d:Json)=>d&&typeof d.mermaid==='string'):[];
  const strategy=report.strategy;
  const traceability:Array<Json>=Array.isArray(report.traceability)?report.traceability:[];
- const groups=[['questions','需要确认'],['assumptions','尚未确认的假设'],['issues','检查发现']] as const;
+ const continued=report.clarification_decision?.mode==='proceed';
+ const groups=[[continued?'deferred_questions':'questions',continued?'已保留的未决问题':'需要确认'],['assumptions','尚未确认的假设'],['issues','检查发现']] as const;
  return <div className="analysis-report">
+  {continued&&<p className="muted small-text">已按你的指示继续设计。以下未决问题与假设尚未确认为业务规则。</p>}
   {report.summary&&<p className="report-summary preserve">{describe(report.summary)}</p>}
   {strategy&&<div className="strategy-overview"><span className="depth-badge">{depthNames[strategy.depth as Depth]??'测试方案'}</span>{strategy.rationale&&<p>{strategy.rationale}</p>}{Array.isArray(strategy.scope)&&strategy.scope.length>0&&<p><strong>测试范围：</strong>{strategy.scope.map(describe).join('、')}</p>}{Array.isArray(strategy.techniques)&&strategy.techniques.length>0&&<div className="technique-tags">{strategy.techniques.map((method:unknown,index:number)=><span key={index}>{describe(method)}</span>)}</div>}</div>}
   {diagrams.map((diagram:Json,index:number)=><BusinessDiagram key={diagram.id??index} title={diagram.title??'业务流程图'} source={diagram.mermaid}/>)}

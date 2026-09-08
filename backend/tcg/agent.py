@@ -4,6 +4,7 @@ Only concise, evidence-cited findings are exposed as analysis. Planner decisions
 are structured actions, never fabricated execution or private reasoning traces.
 """
 import json
+import re
 from collections import Counter
 from typing import TypedDict
 
@@ -105,8 +106,46 @@ class Agent:
                 if name == 'analysis':
                     context['business_model'] = artifact['report']['business_model']
                     context['strategy'] = artifact['report']['strategy']
+                    context['assumptions'] = artifact['report'].get('assumptions', [])
+                    context['deferred_questions'] = artifact['report'].get('deferred_questions', [])
+        decision = self.continuation(run)
+        if decision:
+            context['clarification_decision'] = decision
         context.update(extra)
         return context
+
+    @staticmethod
+    def continuation(run):
+        """A decision only applies until the next business instruction."""
+        decision = run.get('_clarification_decision')
+        return decision if decision and decision['epoch'] == run.get('_instruction_version', 0) else None
+
+    @staticmethod
+    def is_continue_command(content):
+        # Match whole short commands only; negations and mixed business replies
+        # go through semantic classification instead of a substring heuristic.
+        normalized = re.sub(r'[\s，,。.!！?？；;、]', '', content).lower()
+        return normalized in {
+            '不要对了就这样吧', '不要再对了就这样吧', '别问了直接生成',
+            '不用再确认了直接生成', '就这样吧', '就这样继续', '按当前信息继续',
+            '按现有信息继续', '按照一般的系统进行假设', '按一般系统假设继续',
+            '确认继续', '确认', '继续', '直接生成', '继续生成用例',
+            'proceed', 'continue', 'proceedwithcurrentinformation',
+        }
+
+    async def feedback(self, state, response, analysis):
+        content = (response.get('answer') or '').strip()
+        if self.is_continue_command(content):
+            return {'proceed': True, 'has_changes': False}
+        if response.get('proceed') and not content:
+            return {'proceed': True, 'has_changes': False}
+        def validate(result):
+            contract.require(type(result.get('proceed')) is bool and type(result.get('has_changes')) is bool,
+                             'feedback', 'boolean_proceed_and_has_changes')
+            return result
+        result = await self.call(state, 'agent_feedback', self.context(state, feedback=content,
+            questions=analysis['report'].get('questions', [])), validate)
+        return {**result, 'proceed': bool(response.get('proceed')) or result['proceed']}
 
     async def call(self, state, task, context, validator):
         key = f'agent:{state["epoch"]}:{state["iteration"]}:{task}'
@@ -203,6 +242,8 @@ class Agent:
             changes['intent'] = intent
             state['intent'] = intent
         available = self.available(state)
+        if self.continuation(run) and state.get('analysis_ref'):
+            available = [action for action in available if action != 'analyze']
         context = self.context(state, available_actions=available, coverage=run.get('agent', {}).get('coverage'), iteration=iteration, max_iterations=self.MAX_ITERATIONS)
         evidence = {e['id']: e for e in context['evidence']}
         def validator(result):
@@ -308,6 +349,8 @@ class Agent:
             self.current(state)
             artifact = self.store.artifact(run_id, f'agent_{kind}:{state["epoch"]}:{state["iteration"]}', kind, '测试场景' if kind == 'scenarios' else '测试用例', items,
                 {'strategy': context['strategy'], 'business_model': context['business_model'], 'requirements': context['analysis'],
+                 'assumptions': context.get('assumptions', []), 'deferred_questions': context.get('deferred_questions', []),
+                 **({'clarification_decision': context['clarification_decision']} if context.get('clarification_decision') else {}),
                  **({'scenarios': context['scenarios']} if kind == 'cases' else {}), 'traceability': [
                     {**{k: i[k] for k in ('id', 'title', 'requirement_ids', 'branch_ids')}, 'scenario_id': i.get('scenario_id', i['id']),
                      **({'case_id': i['id']} if kind == 'cases' else {}), 'refs': i['refs']} for i in items]})
@@ -396,21 +439,49 @@ class Agent:
         analysis = self.store.get('artifact', state['analysis_ref'])
         questions = analysis['report'].get('questions', [])
         needs_review = run['_request'].get('confirm_strategy', True)
-        if questions or needs_review:
-            self.store.publish(run['id'], [analysis['id']], '请回答阻塞问题后继续。' if questions else '请确认业务模型、范围与测试策略；也可以发送补充指令修订。', waiting=True)
-            response = interrupt({'type': 'clarification' if questions else 'strategy_review', 'artifact_id': analysis['id'], 'questions': questions})
+        decision = self.continuation(run)
+        if not decision and (questions or needs_review):
+            self.store.publish(run['id'], [analysis['id']], '有些信息尚未明确。你可以补充，也可以按当前信息继续，未决问题会保留在结果中。' if questions else '请确认业务模型、范围与测试策略；也可以发送补充指令修订。', waiting=True)
+            response = interrupt({'type': 'clarification' if questions else 'strategy_review', 'artifact_id': analysis['id'], 'questions': questions, 'can_proceed': True})
             if response.get('instruction'):
                 return {'stale': True}
-            if questions:
-                self.add_instruction(run['id'], response.get('answer', ''), resume=False)
-                return {'stale': True}
-            if response.get('approved') is not True:
+            if response.get('proceed') or (response.get('answer') or '').strip():
+                feedback = await self.feedback(state, response, analysis)
+                with self.store.transaction():
+                    self.current(state)
+                    if feedback['has_changes'] or not feedback['proceed']:
+                        self.add_instruction(run['id'], response.get('answer', ''), resume=False)
+                        self.store.update_run(run['id'], _gate_feedback_pending=False)
+                        if feedback['proceed']:
+                            updated = self.store.run(run['id'])
+                            self.store.update_run(run['id'], _clarification_decision={
+                                'mode': 'proceed', 'epoch': updated['_instruction_version'],
+                                'content': response['answer'], 'instruction_recorded': True})
+                        return {'stale': True}
+                    decision = {'mode': 'proceed', 'epoch': state['epoch'],
+                                'content': response.get('answer') or '按当前信息继续', 'instruction_recorded': False}
+                    self.store.update_run(run['id'], _clarification_decision=decision)
+            elif questions or response.get('approved') is not True:
                 raise DomainError('请确认策略后继续，或发送补充指令修改策略。')
         with self.store.transaction():
             self.current(state)
-            self.remember(run['id'], analysis, confirmed=needs_review)
-            self.insight(run['id'], '测试策略已确认。' if needs_review else '按自动推进设置采用当前策略；模型假设仍未确认为需求。', list(dict.fromkeys(r for i in analysis['items'] for r in i['refs'])), 'decision')
-        return {'approved': True}
+            self.store.update_run(run['id'], _gate_feedback_pending=False)
+            if decision:
+                decision = {**decision, 'deferred_questions': questions, 'assumptions': analysis['report'].get('assumptions', [])}
+                self.store.update_run(run['id'], _clarification_decision=decision)
+                # A separate artifact preserves the originally reviewed version.
+                analysis = self.store.artifact(run['id'], f'agent_continued_analysis:{state["epoch"]}:{state["iteration"]}',
+                    'analysis', analysis['title'], analysis['items'], {**analysis['report'],
+                    'deferred_questions': questions, 'clarification_decision': decision})
+                if not decision.get('instruction_recorded'):
+                    self.store.put('message', {'id': f'{run["id"]}:continue:{state["epoch"]}', 'chat_id': run['chat_id'],
+                        'project_id': run['project_id'], 'role': 'user', 'content': decision['content'],
+                        'created_at': now(), 'metadata': {'run_id': run['id'], 'workflow_decision': True}})
+                self.insight(run['id'], '按你的指示继续设计；未决问题和假设会保留，不会当作已确认的业务规则。', [], 'decision')
+            self.remember(run['id'], analysis, confirmed=needs_review or bool(decision))
+            if not decision:
+                self.insight(run['id'], '测试策略已确认。' if needs_review else '按自动推进设置采用当前策略；模型假设仍未确认为需求。', list(dict.fromkeys(r for i in analysis['items'] for r in i['refs'])), 'decision')
+        return {'approved': True, 'analysis_ref': analysis['id']}
 
     def supersede(self, run_id, conflicts, evidence):
         contract.require(isinstance(conflicts, list), 'conflicts', 'array')
@@ -439,6 +510,7 @@ class Agent:
         memory['scope'] = analysis['report']['strategy']['scope']
         memory['scope_confirmed'] = confirmed
         memory['open_questions'] = analysis['report'].get('questions', [])
+        memory['clarification_decision'] = self.continuation(run)
         memory['assumptions'] = analysis['report'].get('assumptions', [])
         memory['source_refs'] = list(dict.fromkeys(memory.get('source_refs', []) + [r for i in analysis['items'] for r in i['refs']]))
         key = run_id + ':' + str(run.get('_instruction_version', 0))
@@ -455,6 +527,25 @@ class Agent:
             run = self.store.run(run_id)
             if run.get('experience') != 'agent' or run['status'] not in ('queued', 'running', 'waiting'):
                 raise DomainError('仅进行中的智能任务支持补充指令', 409)
+            if resume and run.get('_gate_feedback_pending'):
+                raise DomainError('正在应用上一条确认或补充，请稍候再发送；当前输入会保留。', 409)
+            pause = run.get('interrupt', {})
+            if resume and run['status'] == 'waiting' and pause.get('type') in ('clarification', 'strategy_review') and pause.get('artifact_id'):
+                # Let the gate distinguish workflow control from new business
+                # evidence before incrementing the instruction epoch.
+                return self.engine.resume(run_id, {'answer': content.strip()})
+            if resume and self.is_continue_command(content):
+                evidence = self.store.evidence(run['_source_ids'])
+                if not any(e['role'] != 'example' for e in evidence) or run['status'] == 'waiting':
+                    raise DomainError('尚无可沿用的需求分析，请先补充要测试的业务规则。')
+                decision = {'mode': 'proceed', 'epoch': run.get('_instruction_version', 0),
+                            'content': content.strip(), 'instruction_recorded': True}
+                self.store.update_run(run_id, _clarification_decision=decision)
+                self.store.put('message', {'id': f'{run_id}:continue:{decision["epoch"]}', 'chat_id': run['chat_id'],
+                    'project_id': run['project_id'], 'role': 'user', 'content': content.strip(),
+                    'created_at': now(), 'metadata': {'run_id': run_id, 'workflow_decision': True}})
+                self.insight(run_id, '收到继续指令：当前分析完成后继续设计，未决问题与假设将保留。', [], 'decision')
+                return self.store.run(run_id)
             version = run.get('_instruction_version', 0) + 1
             text, chunks = parse_text(content.strip())
             source = self.store.add_source(run['chat_id'], '用户补充指令', 'clarification', text, chunks)
@@ -519,6 +610,10 @@ class Agent:
                 artifact = self.store.artifact(run['id'], f'agent_final:{state["epoch"]}:{state["iteration"]}', artifact['type'], artifact['title'], artifact['items'], {**artifact['report'], 'coverage': context['coverage']})
                 output_ref = artifact['id']
                 summary += f'\n设计覆盖：需求 {context["coverage"]["requirements_covered"]}/{context["coverage"]["requirements_total"]}，分支 {context["coverage"]["branches_covered"]}/{context["coverage"]["branches_total"]}。这是设计覆盖，未执行测试。'
+            if context.get('deferred_questions'):
+                summary += '\n按你的指示保留以下未决问题并继续设计，相关业务规则尚未确认：\n' + '\n'.join('- ' + q for q in context['deferred_questions'])
+            if context.get('assumptions'):
+                summary += '\n未确认的假设：\n' + '\n'.join('- ' + a for a in context['assumptions'])
             self.update(run['id'], summary=summary, plan=[{**s, 'status': 'completed'} for s in run['agent']['plan']])
             self.insight(run['id'], summary, result['refs'], 'summary')
             ids = list(dict.fromkeys(ref for ref in (state.get('analysis_ref'), state.get('scenario_ref') if state['intent'] == 'generate_case' else None, output_ref) if ref))

@@ -241,12 +241,15 @@ class Engine:
                 paused = snapshot.interrupts[0]
                 with self.store.transaction():
                     current = self.store.run(run_id)
-                    if current.get('graph_version') == 2 and current.get('_instruction_version', 0) != snapshot.values.get('epoch', 0):
+                    agent_run = current.get('graph_version') == 2
+                    changed = agent_run and current.get('_instruction_version', 0) != snapshot.values.get('epoch', 0)
+                    continued = agent_run and self.agent.continuation(current) and paused.value.get('artifact_id') and paused.value['type'] in ('clarification', 'strategy_review')
+                    if changed or continued:
                         # Accepted during the tiny call→interrupt boundary:
                         # consume this graph's actual persisted interrupt and
-                        # let the next safe boundary apply the durable epoch.
+                        # apply the durable epoch or a just-arrived continuation.
                         self.store.update_run(run_id, status='queued', stage='applying_instruction', _interrupt_id=paused.id,
-                            _resume={'interrupt_id': paused.id, 'value': {'instruction': True}})
+                            _resume={'interrupt_id': paused.id, 'value': {'instruction': True} if changed else {'proceed': True}})
                     else:
                         self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=paused.value, _interrupt_id=paused.id, _resume=None)
             elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version') != 2:
@@ -760,13 +763,18 @@ class Engine:
             if run['status'] != 'waiting':
                 raise DomainError('任务当前未等待人工输入', 409)
             kind = run['interrupt']['type']
-            if kind == 'clarification' and (not response.get('answer') or not response['answer'].strip()):
+            agent_gate = run.get('graph_version') == 2 and kind in ('clarification', 'strategy_review') and bool(run['interrupt'].get('artifact_id'))
+            if response.get('proceed') and not agent_gate:
+                raise DomainError('请先提供业务规则并完成初步分析，才能按当前信息继续')
+            has_answer = isinstance(response.get('answer'), str) and bool(response['answer'].strip())
+            if kind == 'clarification' and not has_answer and not (agent_gate and response.get('proceed')):
                 raise DomainError('请输入澄清答案')
             if kind == 'scenario_review' and response.get('approved') is not True:
                 raise DomainError('请确认场景后继续生成用例')
-            if kind == 'strategy_review' and response.get('approved') is not True:
+            if kind == 'strategy_review' and response.get('approved') is not True and not (agent_gate and (has_answer or response.get('proceed'))):
                 raise DomainError('请确认策略后继续，或使用补充指令修订策略')
-            run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
+            run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None,
+                       _gate_feedback_pending=agent_gate)
             run.pop('interrupt', None)
             self.store.save_run(run)
         self.trace('run.resumed', run_id)
