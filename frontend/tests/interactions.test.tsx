@@ -132,6 +132,22 @@ test('actual request input loads only when opened and stays separate from stream
  }finally{stream.restore();}
 });
 
+test('minimal gateway request inspector displays readable context and exact content-block HTTP body',async()=>{
+ const {RequestInspector}=await import('../src/RequestInspector');
+ const messages=[{role:'system',content:'MINIMAL SYSTEM CONTRACT'},{role:'user',content:JSON.stringify({requirement:'核查内网请求'})}];
+ const body={model:'gpt-5',messages:messages.map(m=>({...m,content:[{type:'text',text:m.content}]}))};
+ globalThis.fetch=async()=>json({run_id:'minimal-run',call_id:'minimal-call',model:'gpt-5',timeout_seconds:3600,request_mode:'minimal',messages,headers:{'X-API-Key':'••••••'},parameters:{},http_request:{method:'POST',url:'http://localhost:1234/api/v1/chat/completions',body}});
+ render(<RequestInspector runId="minimal-run" callId="minimal-call" onClose={()=>{}}/>);
+ await screen.findByText('MINIMAL SYSTEM CONTRACT');
+ fireEvent.click(screen.getByRole('button',{name:'任务上下文'}));
+ assert.equal(JSON.parse(screen.getByLabelText('发送内容').textContent!).requirement,'核查内网请求');
+ fireEvent.click(screen.getByRole('button',{name:'请求记录',exact:true}));
+ const record=JSON.parse(screen.getByLabelText('发送内容').textContent!);
+ assert.equal(record.request_mode,'minimal');assert.deepEqual(record.http_request.body,body);
+ fireEvent.click(screen.getByRole('button',{name:'请求头（脱敏）'}));
+ assert.deepEqual(JSON.parse(screen.getByLabelText('发送内容').textContent!),{'X-API-Key':'••••••'});
+});
+
 test('input inspector ignores a late response after switching calls',async()=>{
  const {RequestInspector}=await import('../src/RequestInspector');const slow=deferred();
  globalThis.fetch=async(input:any)=>String(input).includes('old-call')?slow.promise:json({run_id:'new-run',call_id:'new-call',messages:[{role:'system',content:'NEW INPUT'}],parameters:{}});

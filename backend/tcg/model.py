@@ -48,7 +48,7 @@ def validate_headers(headers, auth_mode='bearer'):
     if not isinstance(headers, dict) or len(headers) > 32:
         raise DomainError('自定义请求头必须为最多 32 项的 JSON 对象')
     seen = set()
-    managed = {'host', 'content-length', 'transfer-encoding', 'connection', 'accept', 'content-type', 'accept-encoding', 'user-agent', 'cookie', 'proxy-authorization', 'te', 'trailer', 'upgrade', 'keep-alive', 'proxy-connection', 'expect'}
+    managed = {'host', 'content-length', 'transfer-encoding', 'connection', 'accept', 'accept-encoding', 'user-agent', 'cookie', 'proxy-authorization', 'te', 'trailer', 'upgrade', 'keep-alive', 'proxy-connection', 'expect'}
     for name, value in headers.items():
         if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", name):
             raise DomainError('请求头名称无效；请使用标准 HTTP token 名称')
@@ -57,6 +57,8 @@ def validate_headers(headers, auth_mode='bearer'):
         seen.add(name.lower())
         if not isinstance(value, str) or len(value) > 8000 or any(ord(c) < 32 or ord(c) > 126 for c in value):
             raise DomainError('请求头值必须为单行 ASCII 文本，不能包含换行或控制字符')
+        if name.lower() == 'content-type' and value.strip().lower() != 'application/json':
+            raise DomainError('Content-Type 仅支持 application/json；也可以不填，由系统自动设置')
     if 'authorization' in seen and auth_mode != 'headers':
         raise DomainError('显式 Authorization 需要选择 headers 认证模式，避免与 Bearer API Key 冲突')
     return dict(headers)
@@ -138,6 +140,7 @@ class Settings:
         self.key_path = self.directory / '.secret.key'
         self.value = dict(DEFAULT_SETTINGS)
         self.value['auth_mode'] = 'bearer'
+        self.value['request_mode'] = 'standard'
         if self.path.exists():
             self.value.update(json.loads(self.path.read_text('utf-8')))
         self.env_file, layers = model_environment(self.directory)
@@ -178,6 +181,7 @@ class Settings:
             validate_headers(self.headers(), candidate.get('auth_mode', 'bearer'))
         # Preserve connection credentials while upgrading all legacy timeout sources.
         self.value['timeout_seconds'] = MODEL_TIMEOUT_SECONDS
+        self.validate_request_mode(self.value['request_mode'], self.value['provider'])
 
     def headers(self):
         if self._environment_headers is not None:
@@ -216,11 +220,19 @@ class Settings:
             'env_file': str(self.env_file) if self.env_file else None,
             'timeout_policy': 'fixed_60_minutes',
             'auth_mode': self.value.get('auth_mode', 'bearer'),
+            'request_mode': self.value.get('request_mode', 'standard'),
             'header_names': sorted(self.headers(), key=str.lower), 'has_headers': bool(self.headers()),
         }
 
     def configured(self):
         return bool(self.value.get('model', '').strip())
+
+    @staticmethod
+    def validate_request_mode(mode, provider):
+        if mode not in ('standard', 'minimal'):
+            raise DomainError('TCG_MODEL_REQUEST_MODE 必须为 standard 或 minimal')
+        if mode == 'minimal' and provider != 'openai':
+            raise DomainError('minimal 请求模式仅适用于 openai 兼容网关')
 
     @staticmethod
     def validate_address(address):
@@ -244,6 +256,8 @@ class Settings:
         result['base_url'] = result['base_url'].rstrip('/')
         result['model'] = result['model'].strip()
         same_endpoint = all(result[key] == self.value[key] for key in ('provider', 'base_url'))
+        result['request_mode'] = request.get('request_mode') or (self.value.get('request_mode', 'standard') if same_endpoint else 'standard')
+        self.validate_request_mode(result['request_mode'], result['provider'])
         headers = request.get('headers')
         if request.get('clear_headers'):
             headers = {}
@@ -309,6 +323,10 @@ class LangChainGateway:
         async def configured_async_auth(request):
             configured_auth(request)
         from langchain_core.messages import HumanMessage, SystemMessage
+        from .chat_transport import chat_completions_endpoint, minimal_completion
+        minimal = settings['provider'] == 'openai' and settings.get('request_mode') == 'minimal'
+        extra = {}
+        endpoint = chat_completions_endpoint(settings['base_url']) if settings['provider'] == 'openai' else None
         if settings['provider'] == 'ollama':
             from langchain_ollama import ChatOllama
             model = ChatOllama(model=settings['model'], base_url=settings['base_url'], temperature=0, format='json',
@@ -316,13 +334,16 @@ class LangChainGateway:
                 sync_client_kwargs={'event_hooks': {'request': [configured_auth]}},
                 async_client_kwargs={'event_hooks': {'request': [configured_async_auth]}})
         else:
-            from langchain_openai import ChatOpenAI
             import httpx
-            extra = {'http_async_client': httpx.AsyncClient(follow_redirects=False,
+            extra = {'http_async_client': httpx.AsyncClient(timeout=settings['timeout_seconds'], follow_redirects=False,
                 event_hooks={'request': [configured_async_auth]} if settings.get('auth_mode') == 'headers' else None)}
-            model = ChatOpenAI(model=settings['model'], base_url=settings['base_url'], api_key=self.settings.secret() or 'local-no-key', default_headers=headers, temperature=0, timeout=settings['timeout_seconds'], max_retries=0, **extra)
-            model = model.bind(response_format={'type': 'json_object'})
+            if not minimal:
+                from langchain_openai import ChatOpenAI
+                model = ChatOpenAI(model=settings['model'], base_url=endpoint.removesuffix('/chat/completions'), api_key=self.settings.secret() or 'local-no-key', default_headers=headers, temperature=0, timeout=settings['timeout_seconds'], max_retries=0, **extra)
+                model = model.bind(response_format={'type': 'json_object'})
         messages = [SystemMessage(content=SYSTEM + '\nTASK CONTRACT:\n' + TASK_INSTRUCTIONS[task]), HumanMessage(content=json.dumps(context, ensure_ascii=False))]
+        readable_messages = [{'role': 'system' if m.type == 'system' else 'user', 'content': m.content} for m in messages]
+        body = {'model': settings['model'], 'messages': [{'role': m['role'], 'content': [{'type': 'text', 'text': m['content']}]} for m in readable_messages]} if minimal else None
         try:
             if self.request_recorder:
                 # Snapshot the very same messages passed to LangChain below. Only
@@ -330,16 +351,27 @@ class LangChainGateway:
                 self.request_recorder({
                     'provider': settings['provider'], 'base_url': settings['base_url'],
                     'model': settings['model'], 'task': task,
+                    'request_mode': settings.get('request_mode', 'standard'),
+                    **({'endpoint': endpoint} if endpoint else {}),
                     'timeout_seconds': settings['timeout_seconds'],
                     'headers': {name: '••••••' for name in headers},
-                    'messages': [{'role': 'system' if m.type == 'system' else 'user', 'content': m.content} for m in messages],
-                    'parameters': {'temperature': 0, 'stream': on_text is not None,
+                    # Preserve the readable message contract for existing UIs;
+                    # minimal gateways additionally expose the exact HTTP body.
+                    'messages': readable_messages,
+                    **({'http_request': {'method': 'POST', 'url': endpoint, 'body': body}, 'response_delivery': 'complete_json'} if minimal else {}),
+                    'parameters': {} if minimal else {'temperature': 0, 'stream': on_text is not None,
                                    **({'format': 'json'} if settings['provider'] == 'ollama' else {'response_format': {'type': 'json_object'}})},
-                    'representation': 'langchain_messages_and_explicit_parameters',
+                    'representation': 'langchain_messages_with_exact_http_body' if minimal else 'langchain_messages_and_explicit_parameters',
                 })
             if self.diagnostics:
                 self.diagnostics.record('model.transport_start', prompt_characters=sum(len(m.content) for m in messages))
-            if on_text is None:
+            if minimal:
+                response = await minimal_completion(extra['http_async_client'], endpoint, body, headers)
+                if on_text and (text := self.visible_text(response.content)):
+                    # Deliver once when the upstream JSON completes; never fake
+                    # token streaming. The runner still emits progress via SSE.
+                    await on_text(text)
+            elif on_text is None:
                 response = await model.ainvoke(messages)
             else:
                 response = None
@@ -377,13 +409,16 @@ class LangChainGateway:
             if self.diagnostics:
                 self.diagnostics.record('model.transport_error', level='ERROR', **error_details(exc))
             # Provider exceptions can contain request headers and credentials.
-            status = getattr(exc, 'status_code', None)
+            status = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
             if status in (301, 302, 303, 307, 308):
                 error = DomainError('模型服务返回重定向；为保护认证信息不会跟随跳转，请直接配置最终模型服务地址后重试。')
                 error.retryable, error.category = False, 'configuration'
                 raise error from None
-            if status in (400, 401, 403, 404):
-                error = DomainError('模型认证或配置失败；请检查服务地址、模型名、API Key 和自定义请求头，然后重试当前阶段')
+            if status in (400, 401, 403, 404, 405, 422):
+                message = f'模型认证或配置失败（HTTP {status}）；请检查服务地址、模型名、API Key 和自定义请求头'
+                if status in (400, 405, 422):
+                    message += '；若网关只接受 model/messages 和文本块数组，请在 .env 设置 TCG_MODEL_REQUEST_MODE=minimal 后重启'
+                error = DomainError(message)
                 error.retryable = False
                 error.category = 'authentication' if status in (401, 403) else 'configuration'
                 raise error from None
