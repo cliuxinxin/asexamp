@@ -1,3 +1,5 @@
+> 历史 v2 实现说明。当前默认界面使用 v3 增量 Agent，实际流程与升级边界请看 [增量 Agent 指南](INCREMENTAL_AGENT.md)。
+
 # 文档按需读取与 Agent 执行
 
 新版智能模式继续使用 Python、LangGraph 和本地 SQLite，不增加向量数据库、Embedding API 或前端选择项。原有 `.env`、Header 鉴权、minimal 内网网关模式和 60 分钟超时配置继续生效。

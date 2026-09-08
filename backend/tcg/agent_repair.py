@@ -14,9 +14,9 @@ def parts(path):
     return [int(index) if index else name for name, index in re.findall(r'([A-Za-z_][A-Za-z_0-9]*)|\[(\d+)\]', path)]
 
 
-def repair_fragment(result, issue):
+def repair_fragment(result, issue, flat_fields=()):
     path = issue['path']
-    if path.split('.')[0] in REPORT_FIELDS:
+    if path.split('.')[0] in REPORT_FIELDS and path.split('.')[0] not in flat_fields:
         path = 'report.' + path
     keys = parts(path)
     if issue.get('expected') == 'max_30000_characters':

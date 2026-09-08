@@ -11,7 +11,8 @@ from tcg.agent_analysis import merge_analyses
 from tcg.agent_generation import generate_items
 from tcg.agent_repair import repair_fragment
 from tcg.document_workspace import DocumentWorkspace
-from tcg.main import create_app
+# Historical V2 behavior; V3 product acceptance is test_incremental_agent.py.
+from legacy_agent_app import create_app
 from tcg.schemas import DomainError, OutputValidationError
 from tcg.storage import Store
 from test_agent_workflow import AgentModel

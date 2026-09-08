@@ -3,7 +3,8 @@ import json
 
 from fastapi.testclient import TestClient
 
-from tcg.main import create_app
+# Historical V2 behavior; V3 product acceptance is test_incremental_agent.py.
+from legacy_agent_app import create_app
 from tcg.schemas import DomainError
 from test_agent_workflow import AgentModel
 from test_backend_api import setup_chat, start, until

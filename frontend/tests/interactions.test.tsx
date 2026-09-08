@@ -318,7 +318,93 @@ test('agent composer hides task selectors and sends the chosen design depth',asy
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'关注退款与支付状态'}});
  fireEvent.click(screen.getByLabelText('发送消息'));
  await waitFor(()=>assert.equal(submitted?.experience,'agent'));
- assert.equal(submitted.depth,'deep');assert.equal(submitted.confirm_strategy,true);
+ assert.equal(submitted.depth,'deep');assert.equal(submitted.confirm_strategy,false);assert.equal(submitted.mode,'auto');
+});
+
+test('default Auto runs without a confirmation gate and preserves automatic depth',async()=>{
+ let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
+ render(<App/>);await ready();
+ fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'根据需求生成用例'}});fireEvent.click(screen.getByLabelText('发送消息'));
+ await waitFor(()=>assert.ok(submitted));
+ assert.equal(submitted.mode,'auto');assert.equal(submitted.confirm_strategy,false);assert.equal(submitted.depth,'auto');
+});
+
+test('explicit strategy confirmation submits human confirmation mode',async()=>{
+ let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
+ render(<App/>);await ready();fireEvent.click(screen.getByRole('button',{name:/本次方案/}));
+ const confirmation=screen.getByLabelText('生成用例前，先与我确认业务图和测试方向') as HTMLInputElement;
+ assert.equal(confirmation.checked,false);fireEvent.click(confirmation);
+ fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'先检查测试方向'}});fireEvent.click(screen.getByLabelText('发送消息'));
+ await waitFor(()=>assert.ok(submitted));assert.equal(submitted.mode,'hitp');assert.equal(submitted.confirm_strategy,true);
+});
+
+const workItem=(id:string,status='completed')=>({id,key:'analysis:'+id,kind:'analysis',title:'分析 '+id,status,refs:[],artifact_id:null,attempt:1,error:null});
+
+test('incremental work streams counts, failures and retries without opening call details',async()=>{
+ const {RunCard}=await import('../src/RunCard');const stream=streamingFixture();
+ const first=workItem('登录规则');const second={...workItem('退款规则','running'),refs:['s1#P1']};
+ const run:any={id:'r-work',graph_version:3,status:'running',stage:'work',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:1,total:2,current:second,items:[first,second]}}};
+ fixture(path=>path==='/sources/s1'?Promise.resolve(json({id:'s1',name:'退款需求',chunks:[{id:'s1#P1',text:'退款申请必须关联原订单'}]})):undefined);
+ try{
+  render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.ok(screen.getByText(/已完成 1 \/ 2 项/));assert.ok(screen.getByText(/正在处理：分析 退款规则/));
+  fireEvent.click(screen.getByRole('button',{name:'查看依据 · 1'}));await screen.findByText('退款申请必须关联原订单');fireEvent.click(screen.getByRole('button',{name:'关闭',exact:true}));
+  const failed={...second,status:'failed',error:'模型连接中断'};
+  act(()=>stream.instances[0].emit('agent_work',1,{run_id:run.id,work:{completed:1,total:2,current:null,items:[first,failed]}}));
+  await screen.findByText('模型连接中断');assert.equal(screen.queryByText(/正在处理：分析 退款规则/),null);
+  act(()=>stream.instances[0].emit('agent_work',2,{run_id:run.id,work:{completed:1,total:2,current:{...second,attempt:2},items:[first,{...second,attempt:2}]}}));
+  await screen.findByText(/重试中.*第 2 次/);assert.equal(screen.queryByText('模型连接中断'),null);
+  assert.ok(screen.getByRole('button',{name:/查看调用详情/}));
+ }finally{stream.restore();}
+});
+
+test('partial artifacts are labeled drafts and readable before the run completes',async()=>{
+ const {RunCard}=await import('../src/RunCard');const stream=streamingFixture();const reads:string[]=[];
+ fixture(path=>{if(path==='/artifacts/preview-1'){reads.push(path);return Promise.resolve(json({id:'preview-1',type:'cases',title:'退款用例草稿',revision:1,items:[{id:'TC-1',title:'退款失败可再次提交',steps:[],refs:[]}]}));}});
+ try{
+  render(<RunCard run={{id:'r-preview',graph_version:3,status:'running',stage:'cases',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:1,total:3,current:null,items:[]}}} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
+  act(()=>stream.instances[0].emit('agent',1,{run_id:'r-preview',agent:{preview_ids:['preview-1'],work:{completed:1,total:3,current:null,items:[]}}}));
+  const drafts=await screen.findByText('工作草稿 · 1 份');assert.equal(reads.length,0);
+  fireEvent.click(drafts);await screen.findByText('退款失败可再次提交');assert.ok(screen.getByText(/尚未完成全部分析与评审/));
+  assert.ok(screen.getByRole('button',{name:'查看需求依据'}));
+ }finally{stream.restore();}
+});
+
+test('pause waits for a safe boundary and work pause resumes with proceed',async()=>{
+ const {RunCard}=await import('../src/RunCard');const requests:{path:string;body:any}[]=[];
+ fixture((path,init)=>{if(init.method==='POST'){requests.push({path,body:JSON.parse(String(init.body))});return Promise.resolve(json({}));}});
+ const run:any={id:'r-pause',graph_version:3,status:'running',stage:'cases',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:1,total:2,current:workItem('退款规则','running'),items:[]}}};
+ const view=render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
+ fireEvent.click(screen.getByRole('button',{name:'暂停'}));await waitFor(()=>assert.equal(requests.length,1));
+ assert.equal(requests[0].path,'/runs/r-pause/pause');assert.ok(await screen.findByText(/当前工作完成后暂停/));
+ assert.equal((screen.getByRole('button',{name:'正在暂停'}) as HTMLButtonElement).disabled,true);
+ view.rerender(<RunCard run={{...run,status:'waiting',interrupt:{type:'work_pause'}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+ assert.ok(screen.getByText('任务已暂停'));assert.equal(screen.queryByText('需要你确认'),null);assert.equal(screen.queryByText(/正在处理：/),null);
+ fireEvent.click(screen.getByRole('button',{name:'继续执行'}));await waitFor(()=>assert.equal(requests.length,2));
+ assert.deepEqual(requests[1],{path:'/runs/r-pause/resume',body:{proceed:true}});
+});
+
+test('full work inventory is lazy, paginated and deduplicated against live snapshots',async()=>{
+ const {RunCard}=await import('../src/RunCard');const reads:string[]=[];
+ const first=workItem('登录规则');const second=workItem('退款规则');
+ fixture(path=>{if(path.startsWith('/runs/r-inventory/work')){reads.push(path);return Promise.resolve(json(path.includes('cursor=1')?{completed:2,total:2,current:null,items:[second],next_cursor:null}:{completed:2,total:2,current:null,items:[first],next_cursor:1}));}});
+ render(<RunCard run={{id:'r-inventory',graph_version:3,status:'failed',stage:'work',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:2,total:2,current:null,items:[second]}}} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
+ assert.equal(reads.length,0);fireEvent.click(screen.getByText('查看全部工作'));
+ await screen.findByText('分析 登录规则');fireEvent.click(screen.getByRole('button',{name:'加载更多工作'}));await waitFor(()=>assert.equal(reads.length,2));
+ await waitFor(()=>assert.equal(screen.queryByRole('button',{name:'加载更多工作'}),null));
+ assert.deepEqual(reads,['/runs/r-inventory/work?cursor=0&limit=20','/runs/r-inventory/work?cursor=1&limit=20']);
+ assert.equal(screen.getAllByText('分析 退款规则').length,1);
+});
+
+test('nonstreaming calls explain upstream waiting until real output arrives',async()=>{
+ const {RunTimeline}=await import('../src/RunTimeline');const stream=streamingFixture();
+ try{
+  render(<RunTimeline runId="r-nonstream"/>);
+  act(()=>stream.instances[0].emit('progress',1,{event:'model.start',run_id:'r-nonstream',node:'cases',call_id:'c',streaming:false,at:'2026-09-08'}));
+  await screen.findByText(/上游未开启流式返回/);
+  act(()=>stream.instances[0].emit('model_delta',2,{run_id:'r-nonstream',call_id:'c',text:'已收到的业务结论'}));
+  await screen.findByText('已收到的业务结论');assert.equal(screen.queryByText(/上游未开启流式返回/),null);
+ }finally{stream.restore();}
 });
 
 test('running agent accepts a supplemental instruction instead of starting a second run',async()=>{
@@ -430,4 +516,19 @@ test('switching workspace artifact discards old editors before new data arrives'
  await screen.findByLabelText('条目 C1 标题');view.rerender(<ArtifactWorkspace artifact={{...a,id:'a2',title:'用例乙'}} {...props}/>);
  assert.ok(screen.queryByLabelText('条目 C1 标题')===null);assert.ok(screen.queryByRole('button',{name:'保存新版本'})===null);
  await act(async()=>pending.resolve(json({...a,id:'a2',title:'用例乙',items:[]})));
+});
+
+test('stage drafts stay readonly after completion and superseded work remains identifiable',async()=>{
+ const {WorkPanel}=await import('../src/WorkPanel');
+ const draft={id:'draft-only',preview:true,type:'cases',title:'阶段登录用例',revision:1,items:[{id:'C-DRAFT',title:'核查登录规则',type:'Business',priority:'P1',steps:[],refs:[]}]};
+ const old={id:'work-old',key:'old',kind:'work_analyze',title:'旧登录规则',status:'superseded',refs:[],attempt:1};
+ fixture(path=>path==='/artifacts/draft-only'?Promise.resolve(json(draft)):path.startsWith('/runs/r-draft/work')?Promise.resolve(json({completed:0,total:0,current:null,items:[old],next_cursor:null})):undefined);
+ render(<WorkPanel runId="r-draft" runStatus="completed" work={{completed:0,total:0,current:null,items:[old]}} previewIds={['draft-only']}/>);
+ fireEvent.click(screen.getByText('工作草稿 · 1 份'));
+ await screen.findByText('核查登录规则');
+ assert.ok(screen.getByText(/阶段草稿 · 仅供核查/));
+ for(const name of ['编辑','历史版本','导出 Excel','让 AI 修改此结果'])assert.equal(screen.queryByRole('button',{name,exact:true}),null);
+ assert.equal(screen.queryByRole('checkbox',{name:'选择全部条目'}),null);
+ fireEvent.click(screen.getByText('查看全部工作'));
+ await screen.findByText('已被后续规则替代');
 });

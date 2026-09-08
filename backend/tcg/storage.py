@@ -176,10 +176,15 @@ class Store:
     def evidence(self, source_ids):
         sources = [self.get('source', source_id) for source_id in source_ids]
         chunks_by_source = {source_id: [] for source_id in source_ids}
-        for chat_id in dict.fromkeys(source['chat_id'] for source in sources):
-            for chunk in self.list('chunk', chat_id=chat_id):
-                if chunk.get('source_id') in chunks_by_source:
-                    chunks_by_source[chunk['source_id']].append(chunk)
+        # Filter in SQLite before deserializing. Unselected documents may be
+        # large and must not be loaded just to read one authorized source.
+        with self.lock:
+            for source in sources:
+                rows = self.db.execute(
+                    "SELECT payload FROM objects WHERE kind='chunk' AND project_id=? "
+                    "AND json_extract(payload, '$.source_id')=?",
+                    (source['project_id'], source['id'])).fetchall()
+                chunks_by_source[source['id']] = [json.loads(row['payload']) for row in rows]
 
         def paragraph_key(chunk):
             _, marker, number = chunk.get('id', '').rpartition('#P')
@@ -219,6 +224,8 @@ class Store:
                 artifact = self.get('artifact', request['artifact_id'])
                 if artifact['project_id'] != chat['project_id'] or artifact['chat_id'] != chat_id:
                     raise DomainError('Artifact 不属于当前对话')
+                if not artifact.get('_visible'):
+                    raise DomainError('阶段草稿仅供查看；请等待最终成果后再创建修改或评审任务。')
             elif request['intent'] in ('auto', 'query', 'modify', 'review_case', 'learn_template'):
                 visible = [a for a in self.list('artifact', chat_id=chat_id) if a.get('_visible')]
                 if request['intent'] == 'review_case':
@@ -238,7 +245,7 @@ class Store:
             run['_history_total'] = len(history)
             run['_artifact_source_ids'] = artifact.get('_source_ids', []) if artifact else []
             if request.get('experience') == 'agent':
-                run.update(experience='agent', graph_version=2, _instruction_version=0, _applied_instruction_version=0, _instructions=[],
+                run.update(experience='agent', graph_version=3, _instruction_version=0, _applied_instruction_version=0, _instructions=[],
                            agent={'depth': request.get('depth') if request.get('depth') in ('quick', 'standard', 'deep') else 'standard', 'rationale': '', 'plan': [], 'insights': [], 'pending_instructions': 0})
             self.db.execute('INSERT INTO runs VALUES(?,?,?,?,?)', (run_id, chat_id, chat['project_id'], 'queued', dump(run)))
             chat['updated_at'] = now()

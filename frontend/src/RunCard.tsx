@@ -1,5 +1,5 @@
 import {useEffect,useState} from 'react';
-import {Check,RotateCcw,Square} from 'lucide-react';
+import {Check,Pause,Play,RotateCcw,Square} from 'lucide-react';
 import {api,errText} from './api';
 import {ArtifactCard} from './ArtifactCard';
 import {RunTimeline} from './RunTimeline';
@@ -10,21 +10,28 @@ const stages:Record<string,string>={planning:'制定测试计划',agent_plan:'�
 export function RunCard({run,onChanged,onTarget,onSettings}:{run:Run;onChanged:()=>void;onTarget:(artifact:Artifact,ids:string[])=>void;onSettings?:()=>void}){
  const [clock,setClock]=useState(Date.now());
  const [answer,setAnswer]=useState('');const [error,setError]=useState('');const [working,setWorking]=useState(false);
- async function action(name:string,body:object={}){setError('');setWorking(true);try{await api('/runs/'+run.id+'/'+name,body);setAnswer('');onChanged();}catch(e){setError(errText(e));}finally{setWorking(false);}}
- const agentMode=run.experience==='agent'||run.graph_version===2;
+ const [pauseRequested,setPauseRequested]=useState(false);
+ useEffect(()=>{if(run.status!=='running')setPauseRequested(false);},[run.status]);
+ async function action(name:string,body:object={}){setError('');setWorking(true);try{await api('/runs/'+run.id+'/'+name,body);if(name==='pause')setPauseRequested(true);setAnswer('');onChanged();}catch(e){setError(errText(e));}finally{setWorking(false);}}
+ const agentMode=run.experience==='agent'||(run.graph_version??0)>=2;
+ const incremental=(run.graph_version??0)>=3||!!run.agent?.work;
  const canProceed=agentMode&&!!run.interrupt?.artifact_id;
  const pending=run.status==='queued'||run.status==='running';const pause=run.status==='waiting';
+ const workPaused=pause&&run.interrupt?.type==='work_pause';
+ const pausing=pending&&(pauseRequested||run.agent?.pause_requested);
  useEffect(()=>{if(!pending)return;const timer=setInterval(()=>setClock(Date.now()),1000);return()=>clearInterval(timer);},[pending]);
  const detail=run.diagnostic;const waiting=!!detail&&['model.start','model.waiting','model.transport_start'].includes(detail.event);
  const seconds=(value:number)=>Math.max(0,Math.floor(value/1000));
  const elapsed=run.created_at?seconds(clock-Date.parse(run.created_at)):undefined;
  const modelElapsed=detail?seconds((detail.elapsed_ms??0)+Math.max(0,clock-Date.parse(detail.at))):0;
  if(run.status==='completed')return null;
- return <section className={'run-card '+(run.status==='failed'?'failed':'')} aria-live="polite"><div className="run-heading"><span className="inline">{pending?<Spinner/>:<span className={'status-dot '+run.status}/>}<strong>{pending?(stages[run.stage]??'正在处理'):pause?'需要你确认':run.status==='failed'?'任务暂停：处理失败':'任务已停止'}</strong></span><div className="actions">{run.status==='failed'&&<button disabled={working} onClick={()=>action('retry')}><RotateCcw size={15}/>重试此阶段</button>}{(pending||pause)&&<button disabled={working} onClick={()=>action('cancel')}><Square size={13}/>停止</button>}</div></div>
+ return <section className={'run-card '+(run.status==='failed'?'failed':'')} aria-live="polite"><div className="run-heading"><span className="inline">{pending?<Spinner/>:<span className={'status-dot '+run.status}/>}<strong>{pending?(stages[run.stage]??'正在处理'):workPaused?'任务已暂停':pause?'需要你确认':run.status==='failed'?'任务暂停：处理失败':'任务已停止'}</strong></span><div className="actions">{run.status==='failed'&&<button disabled={working} onClick={()=>action('retry')}><RotateCcw size={15}/>{incremental?'重试当前工作':'重试此阶段'}</button>}{pending&&incremental&&<button disabled={working||pausing} onClick={()=>action('pause')}><Pause size={14}/>{pausing?'正在暂停':'暂停'}</button>}{(pending||pause)&&<button disabled={working} onClick={()=>action('cancel')}><Square size={13}/>停止</button>}</div></div>
+ {pausing&&<p role="status" className="instruction-pending">当前工作完成后暂停，已保存的结果会保留。正在进行的模型请求会继续等待，单次超时仍为 60 分钟。</p>}
+ {workPaused&&<div className="work-pause"><p>已保存当前进度。继续后将处理尚未完成的工作。</p><button className="primary" disabled={working} onClick={()=>action('resume',{proceed:true})}><Play size={15}/>继续执行</button></div>}
  {pending&&<div className="run-progress"><p className="muted small-text">{elapsed!==undefined?`本轮已运行 ${elapsed} 秒。`:''}任务在本机后台执行，可以关闭此页面后再回来。</p>{detail?.batch_count&&<p className="small-text">第 {detail.batch_index}/{detail.batch_count} 批需求</p>}{waiting&&<p className="small-text">等待模型响应 · 本次请求 {modelElapsed} 秒{detail.timeout_seconds?` · 超时设置 ${detail.timeout_seconds} 秒`:''}{detail.attempt?` · 第 ${detail.attempt}/${detail.max_attempts} 次尝试`:''}</p>}{detail?.event==='model.retry'&&<p className="small-text">上次模型请求失败，准备第 {detail.next_attempt} 次尝试。</p>}</div>}
  {run.recovery&&<div className="recovery-guide"><strong>{run.recovery.title}</strong><p>{run.recovery.detail}</p><ul>{run.recovery.suggestions.map((suggestion,index)=><li key={index}>{suggestion}</li>)}</ul>{run.recovery.preserved.length>0&&<p className="preserved-progress">已保留：{run.recovery.preserved.join('、')}</p>}{onSettings&&['authentication','configuration','connection','model','transport','network'].includes(run.recovery.category)&&<button onClick={onSettings}>打开模型设置</button>}</div>}
  {run.error&&!run.recovery&&<p className="preserve error-text">{run.error}</p>}
- <RunTimeline runId={run.id} restartKey={run.status} onChanged={onChanged} agentMode={agentMode} initialAgent={run.agent} initialOpen={!agentMode}/>
+ <RunTimeline runId={run.id} restartKey={run.status} runStatus={run.status} onChanged={onChanged} onTarget={onTarget} agentMode={agentMode} initialAgent={run.agent} initialOpen={!agentMode}/>
  {pause&&run.interrupt?.type==='clarification'&&<div className="clarification"><p>{canProceed?'以下信息尚未明确。你可以补充，也可以先按当前信息继续设计。':'以下信息会影响测试设计，请补充后继续。'}</p><ol>{run.interrupt.questions?.map((question,index)=><li key={index}>{typeof question==='string'?question:JSON.stringify(question)}</li>)}</ol><textarea aria-label="回答澄清问题" value={answer} onChange={e=>setAnswer(e.target.value)} placeholder="输入你的确认或补充说明…" rows={4}/><div className="clarification-actions"><button className="primary" disabled={working||!answer.trim()} onClick={()=>action('resume',{answer})}><Check size={16}/>提交补充，重新检查</button>{canProceed&&<button disabled={working} onClick={()=>action('resume',{proceed:true,...(answer.trim()?{answer}: {})})}>按当前信息继续</button>}</div>{canProceed&&<p className="muted small-text">已填写的补充会先应用；剩余问题与假设将保留在结果中，之后仍可修改。</p>}</div>}
  {pause&&run.interrupt?.type==='strategy_review'&&<div className="strategy-review"><p>请先看业务图和测试范围。你可以在下方聊天框指出需要调整的地方。</p>{run.interrupt.artifact_id&&<ArtifactCard id={run.interrupt.artifact_id} refreshKey={run.updated_at} onTarget={onTarget} onChanged={onChanged}/>}<button className="primary" disabled={working} onClick={()=>action('resume',{approved:true})}><Check size={16}/>确认测试方向，继续</button></div>}
  {pause&&run.interrupt?.type==='scenario_review'&&<div className="scenario-review"><p>请检查场景。可以直接编辑，确认后将使用最新版本生成用例。</p>{run.interrupt.artifact_id&&<ArtifactCard id={run.interrupt.artifact_id} refreshKey={run.updated_at} onTarget={onTarget} onChanged={onChanged}/>}<button className="primary" disabled={working} onClick={()=>action('resume',{approved:true})}><Check size={16}/>确认场景，继续生成用例</button></div>}

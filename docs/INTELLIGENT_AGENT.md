@@ -1,3 +1,5 @@
+> 历史 v2 实现说明。当前默认界面使用 v3 增量 Agent，实际流程与升级边界请看 [增量 Agent 指南](INCREMENTAL_AGENT.md)。
+
 # 智能测试设计 Agent · v2.1
 
 本版本保留本地 Python 服务、LangGraph、LangChain、SQLite 和原始数据目录。无需云部署。新页面默认发出 `experience: "agent"`，已有任务及省略此参数的 API 调用继续使用旧图。
