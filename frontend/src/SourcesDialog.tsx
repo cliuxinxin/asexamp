@@ -1,0 +1,13 @@
+import {useState} from 'react';
+import {FileText,Plus,Trash2} from 'lucide-react';
+import {api,errText} from './api';
+import {Dialog,ErrorBox,Spinner} from './ui';
+import {roles} from './types';
+import type {Source} from './types';
+
+export function SourcesDialog({chatId,sources,onChanged,onClose}:{chatId:string;sources:Source[];onChanged:()=>void;onClose:()=>void}){
+ const [detail,setDetail]=useState<Source>();const [paste,setPaste]=useState(false);const [name,setName]=useState('补充需求');const [text,setText]=useState('');const [role,setRole]=useState('primary');const [error,setError]=useState('');const [working,setWorking]=useState(false);
+ async function saveText(){setWorking(true);setError('');try{await api('/chats/'+chatId+'/sources/text',{name,text,role});setPaste(false);setText('');onChanged();}catch(e){setError(errText(e));}finally{setWorking(false);}}
+ return <Dialog title="当前对话的需求来源" onClose={onClose} wide><p className="muted">任务默认使用这里的有效来源。移除来源会影响后续任务，历史证据仍保留。</p><div className="source-list">{sources.map(source=><div className="source-row" key={source.id}><FileText size={20}/><button onClick={async()=>{try{setDetail(await api('/sources/'+source.id));}catch(e){setError(errText(e));}}}><strong>{source.name}</strong><small>{roles[source.role]??source.role} · {source.characters.toLocaleString()} 字符</small></button><button className="icon-button" aria-label={'移除 '+source.name} disabled={working} onClick={async()=>{setWorking(true);try{await api('/sources/'+source.id,undefined,'DELETE');onChanged();if(detail?.id===source.id)setDetail(undefined);}catch(e){setError(errText(e));}finally{setWorking(false);}}}><Trash2 size={16}/></button></div>)}</div>{!sources.length&&<div className="empty-note">还没有需求来源。可以直接在聊天中输入需求，或通过输入框旁的附件按钮上传文件。</div>}
+ <button className="text-accent" onClick={()=>setPaste(!paste)}><Plus size={16}/>粘贴一份需求</button>{paste&&<div className="paste-form"><label>来源名称<input value={name} onChange={e=>setName(e.target.value)}/></label><label>来源角色<select value={role} onChange={e=>setRole(e.target.value)}>{Object.entries(roles).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label><label>需求正文<textarea rows={8} value={text} onChange={e=>setText(e.target.value)}/></label><button className="primary" disabled={working||!text.trim()} onClick={saveText}>{working?<Spinner/>:<Plus size={16}/>}添加来源</button></div>}{detail&&<section className="source-preview"><h3>{detail.name}</h3>{detail.chunks?.map(chunk=><div className="evidence" key={chunk.id}><small>{chunk.id}</small><p className="preserve">{chunk.text}</p></div>)??<pre>{detail.text}</pre>}</section>}<ErrorBox message={error}/></Dialog>;
+}

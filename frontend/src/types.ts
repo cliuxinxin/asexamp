@@ -1,0 +1,13 @@
+export type Json = Record<string, any>;
+export type Project = {id:string;name:string;created_at:string};
+export type Chat = {id:string;project_id:string;title:string;updated_at:string};
+export type Profile = {id:string;project_id:string;name:string;version:number;config:Json};
+export type Source = {id:string;name:string;role:string;characters:number;text?:string;chunks?:{id:string;text:string;location:any}[]};
+export type Message = {id:string;role:'user'|'assistant';content:string;created_at:string;metadata:Json};
+export type Run = {id:string;status:string;intent:string;mode:string;stage:string;error?:string;created_at?:string;updated_at:string;diagnostic?:Json|null;artifact_ids:string[];interrupt?:{type:string;questions?:string[];artifact_id?:string;items?:Json[]}};
+export type Snapshot = {chat:Chat;messages:Message[];sources:Source[];runs:Run[]};
+export type Artifact = {id:string;type:string;title:string;revision:number;items:Json[];report?:Json};
+export type Settings = {provider:'ollama'|'openai';base_url:string;model:string;has_api_key:boolean;timeout_seconds:number;timeout_policy?:string;environment_managed?:boolean;env_file?:string|null};
+export const intents=[['auto','自动识别'],['review_requirement','分析需求'],['generate_scenario','生成场景'],['generate_case','生成用例'],['review_case','评审用例'],['query','证据问答'],['learn_template','学习模板']];
+export const roles:Record<string,string>={primary:'主要需求',change:'变更',supplement:'补充',clarification:'澄清',example:'参考样例',knowledge:'知识来源'};
+export const busy=(run?:Run)=>!!run&&['queued','running','waiting'].includes(run.status);

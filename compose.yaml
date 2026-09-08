@@ -1,0 +1,16 @@
+services:
+  tcg:
+    build: .
+    # Optional .env support requires Docker Compose 2.24.0 or later.
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - tcg-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+volumes:
+  tcg-data:
