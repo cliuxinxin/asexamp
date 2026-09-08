@@ -104,6 +104,7 @@ class SettingsInput(BaseModel):
     headers: dict[str, str] | None = None
     clear_headers: bool = False
     auth_mode: Literal['bearer', 'headers'] = 'bearer'
+    request_mode: Literal['standard', 'minimal'] | None = None
     timeout_seconds: int = Field(default=3600, ge=5, le=3600)
 
 

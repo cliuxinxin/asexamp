@@ -12,6 +12,7 @@ MODEL_ENV = {
     'TCG_MODEL_NAME': 'model', 'TCG_MODEL_TIMEOUT_SECONDS': 'timeout_seconds',
     'TCG_API_KEY': 'api_key',
     'TCG_MODEL_HEADERS_JSON': 'headers_json', 'TCG_MODEL_AUTH_MODE': 'auth_mode',
+    'TCG_MODEL_REQUEST_MODE': 'request_mode',
 }
 
 
