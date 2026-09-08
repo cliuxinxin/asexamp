@@ -14,3 +14,7 @@ frontend/node_modules/
 /node_modules/
 /dist/
 /cloud/.test-output/
+/.cloudflare/
+/.wrangler/
+.dev.vars
+.dev.vars.*

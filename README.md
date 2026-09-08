@@ -8,7 +8,7 @@
 
 现已增加独立的 Cloudflare Workers 适配，使用 LangGraph.js / LangChain.js、D1 和 R2，共用现有聊天界面。本地 Python 部署继续按下方方式运行。云端关闭页面后可能暂停，重新打开会从检查点继续；模型配置在站点中保存一次即可。
 
-详细架构、Graph、配置和开发命令见 [云端部署说明](docs/CLOUD.md)。
+部署到自己的 Cloudflare 账号见 [Cloudflare 发布步骤](docs/CLOUDFLARE.md)；详细架构、Graph、配置和开发命令见 [云端架构说明](docs/CLOUD.md)。
 
 ## 从 v2.0 升级与排查等待
 
