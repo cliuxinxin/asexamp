@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -54,7 +55,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await engine.stop()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.0.7', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.1.0', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -84,6 +85,11 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     async def domain_error(request, exc):
         return JSONResponse({'detail': exc.message}, status_code=exc.status)
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        # Validation input can contain credentials; never echo submitted values.
+        return JSONResponse({'detail': [{'loc': e['loc'], 'type': e['type'], 'msg': e['msg']} for e in exc.errors()]}, status_code=422)
+
     @app.middleware('http')
     async def local_origin(request: Request, call_next):
         host = request.headers.get('host', '')
@@ -109,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.0.7', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.1.0', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/settings')
     def settings_get():
@@ -178,7 +184,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     def chat_get(chat_id: str):
         store = app.state.store
         chat = store.get('chat', chat_id)
-        return {'chat': chat, 'messages': [message_public(m) for m in sorted(store.list('message', chat_id=chat_id), key=lambda m: m['created_at'])], 'sources': [public(s) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
+        return {'chat': chat, 'memory': chat.get('memory'), 'messages': [message_public(m) for m in sorted(store.list('message', chat_id=chat_id), key=lambda m: m['created_at'])], 'sources': [public(s) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
 
     @app.post('/api/chats/{chat_id}/sources')
     async def sources_upload(chat_id: str, file: UploadFile = File(...), role: str = Form('primary')):
@@ -251,7 +257,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.0.7', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.1.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
             'runtime': {'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
@@ -268,6 +274,10 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     @app.post('/api/runs/{run_id}/resume')
     async def run_resume(run_id: str, body: ResumeInput):
         return run_view(app.state.engine.resume(run_id, body.model_dump()))
+
+    @app.post('/api/runs/{run_id}/instructions')
+    async def run_instruction(run_id: str, body: WaitingEditInput):
+        return {'run': run_view(app.state.engine.agent.add_instruction(run_id, body.content))}
 
     @app.post('/api/runs/{run_id}/retry')
     async def run_retry(run_id: str):

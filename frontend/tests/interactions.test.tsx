@@ -222,7 +222,7 @@ test('all-result AI edits omit selection while selected edits send explicit IDs'
   if(path==='/chats/c1/messages'){submitted=JSON.parse(String(init.body));return Promise.resolve(json({message:{},run:{id:'r1'}}));}
   if(path==='/chats/c1')return Promise.resolve(json({chat:{id:'c1',project_id:'p1',title:'对话一'},messages:[{id:'m1',role:'assistant',content:'已完成',metadata:{artifact_ids:['a1']}}],sources:[],runs:[]}));
  });
- render(<App/>);await ready();await screen.findByText('退款成功');fireEvent.click(screen.getByRole('button',{name:'让 AI 修改此结果'}));fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'优化全部标题'}});fireEvent.click(screen.getByLabelText('发送消息'));
+ render(<App/>);await ready();fireEvent.click(await screen.findByRole('button',{name:'打开成果 · 测试用例'}));await screen.findByText('退款成功');fireEvent.click(screen.getByRole('button',{name:'让 AI 修改此结果'}));fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'优化全部标题'}});fireEvent.click(screen.getByLabelText('发送消息'));
  await waitFor(()=>assert.ok(submitted));assert.equal(submitted.intent,'modify');assert.equal(Object.hasOwn(submitted,'selected_ids'),false);
  await waitFor(()=>assert.equal((screen.getByLabelText('聊天输入') as HTMLTextAreaElement).value,''));
  submitted=undefined;fireEvent.click(screen.getByLabelText('选择 TC-1'));fireEvent.click(screen.getByRole('button',{name:'让 AI 修改选中 1 条'}));fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'只改选中的标题'}});fireEvent.click(screen.getByLabelText('发送消息'));
@@ -254,7 +254,7 @@ test('invalid JSON cannot crash the readable artifact editor',async()=>{
 
 test('only explicit requirement checkbox promotes a chat message to source evidence',async()=>{
  let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({message:{},run:{id:'r1'}}))):undefined);render(<App/>);await ready();
- fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'订单支付成功后，用户可以申请部分退款。'}});fireEvent.click(screen.getByLabelText('这条消息是需求正文'));fireEvent.click(screen.getByLabelText('发送消息'));await waitFor(()=>assert.ok(submitted));assert.equal(submitted.as_requirement,true);
+ fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'订单支付成功后，用户可以申请部分退款。'}});fireEvent.click(screen.getByRole('button',{name:/本次方案/}));fireEvent.click(screen.getByLabelText('这条消息是需求正文'));fireEvent.click(screen.getByLabelText('发送消息'));await waitFor(()=>assert.ok(submitted));assert.equal(submitted.as_requirement,true);
  await waitFor(()=>assert.equal((screen.getByLabelText('聊天输入') as HTMLTextAreaElement).value,''));assert.equal((screen.getByLabelText('这条消息是需求正文') as HTMLInputElement).checked,false);
 });
 
@@ -265,4 +265,127 @@ test('backend stage names and slow model progress are visible with a diagnostic 
  await screen.findByText('分析需求');await screen.findByText(/第 2\/4 批/);await screen.findByText(/等待模型响应/);
  const link=screen.getByRole('link',{name:'下载诊断日志'});assert.equal(link.getAttribute('href'),'/api/runs/r-slow/diagnostics?download=true');
  assert.equal(screen.queryByText('正在处理'),null);
+});
+
+test('agent composer hides task selectors and sends the chosen design depth',async()=>{
+ let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
+ render(<App/>);await ready();
+ assert.ok(screen.queryByLabelText('任务目标')===null, 'Task selectors must be collapsed by default');
+ fireEvent.click(screen.getByRole('button',{name:/本次方案/}));
+ fireEvent.change(screen.getByLabelText('测试设计深度'),{target:{value:'deep'}});
+ fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'关注退款与支付状态'}});
+ fireEvent.click(screen.getByLabelText('发送消息'));
+ await waitFor(()=>assert.equal(submitted?.experience,'agent'));
+ assert.equal(submitted.depth,'deep');assert.equal(submitted.confirm_strategy,true);
+});
+
+test('running agent accepts a supplemental instruction instead of starting a second run',async()=>{
+ let submitted:any;
+ fixture((path,init)=>{
+  if(path==='/chats/c1')return Promise.resolve(json({chat:{id:'c1',title:'对话一'},messages:[],sources:[],runs:[{id:'r-live',experience:'agent',status:'running',stage:'planning',updated_at:'2026-09-08',artifact_ids:[]}]}));
+  if(path==='/runs/r-live/instructions'){submitted=JSON.parse(String(init.body));return Promise.resolve(json({run:{id:'r-live'}}));}
+ });
+ render(<App/>);await ready();fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'请增加重复退款的场景'}});
+ assert.equal((screen.getByLabelText('发送消息') as HTMLButtonElement).disabled,false);
+ fireEvent.click(screen.getByLabelText('发送消息'));await waitFor(()=>assert.equal(submitted?.content,'请增加重复退款的场景'));
+});
+
+test('agent summaries stream while raw invocation details stay collapsed',async()=>{
+ const {RunCard}=await import('../src/RunCard');const stream=streamingFixture();
+ try{
+  render(<RunCard run={{id:'r-agent',experience:'agent',status:'running',intent:'generate_case',mode:'auto',stage:'planning',updated_at:'2026-09-08',artifact_ids:[]} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
+  await waitFor(()=>assert.equal(stream.instances.length,1));const source=stream.instances[0];
+  act(()=>source.emit('agent',1,{run_id:'r-agent',agent:{depth:'deep',rationale:'涉及多种订单状态',plan:[{id:'p1',title:'核查订单规则',status:'running'}],insights:[{id:'i1',summary:'退款条件尚未明确',refs:[],kind:'question'}]}}));
+  await screen.findByText('退款条件尚未明确');assert.ok(screen.getByText('核查订单规则'));
+  act(()=>{source.emit('progress',2,{event:'model.start',run_id:'r-agent',call_id:'call-a'});source.emit('model_delta',3,{run_id:'r-agent',call_id:'call-a',text:'RAW-MODEL-JSON'});});
+  assert.equal(screen.queryByText('RAW-MODEL-JSON'),null);
+  fireEvent.click(screen.getByRole('button',{name:/查看调用详情/}));await screen.findByText('RAW-MODEL-JSON');
+  fireEvent.click(screen.getByRole('button',{name:/收起调用详情/}));assert.equal(source.closed,false);
+ }finally{stream.restore();}
+});
+
+test('custom header settings preserve secrets unless explicitly replaced',async()=>{
+ let saved:any;
+ globalThis.fetch=async(_input:any,init:RequestInit={})=>{if(init.method==='PUT')saved=JSON.parse(String(init.body));return json({provider:'openai',base_url:'https://gateway.example/v1',model:'configured',timeout_seconds:3600,has_api_key:true,header_names:['X-Tenant-ID'],has_headers:true,auth_mode:'bearer'});};
+ render(<SettingsDialog projectId="p1" profiles={profiles} onClose={()=>{}} onSaved={()=>{}}/>);
+ await screen.findByLabelText('模型名称');fireEvent.click(screen.getByRole('button',{name:'保存',exact:true}));await waitFor(()=>assert.ok(saved));assert.equal(Object.hasOwn(saved,'headers'),false);
+ fireEvent.click(screen.getByText('自定义请求头'));
+ fireEvent.change(screen.getByLabelText('鉴权方式'),{target:{value:'headers'}});
+ fireEvent.change(screen.getByLabelText('自定义 Header JSON'),{target:{value:'{"X-Tenant-ID":"tenant-2"}'}});
+ fireEvent.click(screen.getByRole('button',{name:'保存',exact:true}));
+ await waitFor(()=>assert.deepEqual(saved.headers,{'X-Tenant-ID':'tenant-2'}));assert.equal(saved.auth_mode,'headers');
+});
+
+test('recovery guidance offers model settings and identifies preserved progress',async()=>{
+ const {RunCard}=await import('../src/RunCard');let opened=false;
+ render(<RunCard run={{id:'r-error',experience:'agent',status:'failed',intent:'generate_case',mode:'auto',stage:'failed',updated_at:'2026-09-08',artifact_ids:[],recovery:{category:'authentication',title:'模型鉴权失败',detail:'检查网关请求头',suggestions:['核对 X-API-Key'],preserved:['需求分析'],retryable:false}} as any} onChanged={()=>{}} onTarget={()=>{}} onSettings={()=>{opened=true;}}/>);
+ assert.ok(screen.getByText('核对 X-API-Key'));assert.ok(screen.getByText(/已保留.*需求分析/));
+ fireEvent.click(screen.getByRole('button',{name:'打开模型设置'}));assert.equal(opened,true);
+});
+
+test('business diagram rejects executable directives and leaves a recoverable source view',async()=>{
+ const {BusinessDiagram}=await import('../src/BusinessDiagram');
+ render(<BusinessDiagram title="退款业务图" source={'flowchart TD\nA-->B\nclick A "https://evil.example"'}/>);
+ await screen.findByText(/图表包含不支持的交互或配置/);
+ assert.equal(document.querySelectorAll('a[href="https://evil.example"]').length,0);
+ assert.ok(screen.getByText('Mermaid 源码'));
+});
+
+test('analysis reports expose business questions and distinguish design coverage from executed tests',async()=>{
+ const {AnalysisReport}=await import('../src/AnalysisReport');
+ render(<AnalysisReport report={{summary:'已经识别订单的关键状态',questions:['已发货后是否允许退款？'],strategy:{depth:'deep',rationale:'存在跨系统依赖',techniques:['状态迁移'],scope:['订单','退款']},coverage:{requirements_total:4,requirements_covered:3,branches_total:5,branches_covered:4,gaps:[{id:'g1',title:'缺少退款失败场景'}]}}}/>);
+ assert.ok(screen.getByText('已发货后是否允许退款？'));assert.ok(screen.getByText('缺少退款失败场景'));assert.ok(screen.getByText(/尚未执行这些测试/));
+});
+
+test('completed artifacts open in a workspace without flooding the chat',async()=>{
+ fixture(path=>{
+  if(path==='/chats/c1')return Promise.resolve(json({chat:{id:'c1',title:'对话一'},sources:[],runs:[],messages:[{id:'m',role:'assistant',content:'完成了退款测试设计。',metadata:{artifact_ids:['result-a']}}]}));
+  if(path==='/artifacts/result-a')return Promise.resolve(json({id:'result-a',type:'cases',title:'退款测试用例',revision:1,items:[{id:'TC-7',title:'失败退款不会重复扣款',type:'Negative',priority:'P1',steps:[],refs:[]}]}));
+ });
+ render(<App/>);await ready();
+ const open=await screen.findByRole('button',{name:'打开成果 · 退款测试用例'});
+ assert.ok(screen.queryByText('失败退款不会重复扣款')===null);
+ fireEvent.click(open);await screen.findByText('失败退款不会重复扣款');
+ fireEvent.click(screen.getByRole('button',{name:'关闭成果工作区'}));
+ assert.ok(screen.queryByText('失败退款不会重复扣款')===null);
+});
+
+test('selected project preference controls subsequent agent requests',async()=>{
+ let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
+ render(<App/>);await ready();fireEvent.click(screen.getByRole('button',{name:'模型与设置'}));
+ fireEvent.click(screen.getByRole('button',{name:'项目偏好',exact:true}));
+ fireEvent.change(screen.getByLabelText('选择 Profile'),{target:{value:'pf2'}});
+ fireEvent.click(screen.getByRole('button',{name:'使用此项目偏好'}));fireEvent.click(screen.getByRole('button',{name:'关闭',exact:true}));
+ fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'帮我梳理需求'}});fireEvent.click(screen.getByLabelText('发送消息'));
+ await waitFor(()=>assert.equal(submitted?.profile_id,'pf2'));
+});
+
+test('business branches display case links and explicit association gaps',async()=>{
+ const {AnalysisReport}=await import('../src/AnalysisReport');
+ render(<AnalysisReport report={{business_model:{edges:[{id:'B1',from:'N1',to:'N2',label:'退款成功',refs:[]},{id:'B2',from:'N1',to:'N2',label:'退款失败',refs:[]}]},traceability:[{id:'C1',case_id:'C1',title:'成功退款到账',branch_ids:['B1'],requirement_ids:['R1'],scenario_id:'S1',refs:[]}]}}/>);
+ assert.ok(screen.getByText('关联用例：C1'));assert.ok(screen.getByText('尚无关联用例'));
+});
+
+test('active agent never silently converts selected artifact edits into instructions',async()=>{
+ const calls:string[]=[];
+ fixture((path,init)=>{
+  if(init.method==='POST')calls.push(path);
+  if(path==='/chats/c1')return Promise.resolve(json({chat:{id:'c1',title:'对话一'},sources:[],messages:[{id:'m',role:'assistant',content:'之前的用例',metadata:{artifact_ids:['a-old']}}],runs:[{id:'r-live',experience:'agent',status:'running',stage:'planning',updated_at:'2026-09-08',artifact_ids:[]}]}));
+  if(path==='/artifacts/a-old')return Promise.resolve(json({id:'a-old',type:'cases',title:'旧用例',revision:1,items:[{id:'C1',title:'旧条目',steps:[],refs:[]}]}));
+ });
+ render(<App/>);await ready();fireEvent.click(await screen.findByRole('button',{name:'打开成果 · 旧用例'}));
+ await screen.findByText('旧条目');fireEvent.click(screen.getByRole('button',{name:'让 AI 修改此结果'}));
+ await screen.findByText(/请在当前任务完成后修改已有结果/);
+ assert.equal(calls.length,0);assert.ok(screen.queryByLabelText('取消修改目标')===null);
+});
+
+test('switching workspace artifact discards old editors before new data arrives',async()=>{
+ const {ArtifactWorkspace}=await import('../src/ArtifactWorkspace');const pending=deferred();
+ const a={id:'a1',type:'cases',title:'用例甲',revision:1,items:[{id:'C1',title:'原用例',steps:[],refs:[]}]} as any;
+ fixture(path=>path==='/artifacts/a1'?Promise.resolve(json(a)):path==='/artifacts/a2'?pending.promise:undefined);
+ const props={refreshKey:'x',onClose:()=>{},onTarget:()=>{},onChanged:()=>{}};
+ const view=render(<ArtifactWorkspace artifact={a} {...props}/>);await screen.findByText('原用例');fireEvent.click(screen.getByRole('button',{name:'编辑',exact:true}));
+ await screen.findByLabelText('条目 C1 标题');view.rerender(<ArtifactWorkspace artifact={{...a,id:'a2',title:'用例乙'}} {...props}/>);
+ assert.ok(screen.queryByLabelText('条目 C1 标题')===null);assert.ok(screen.queryByRole('button',{name:'保存新版本'})===null);
+ await act(async()=>pending.resolve(json({...a,id:'a2',title:'用例乙',items:[]})));
 });

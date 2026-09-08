@@ -106,6 +106,8 @@ class Engine:
         builder.add_edge('single', 'finish')
         builder.add_edge('finish', END)
         self.graph = builder.compile(checkpointer=saver)
+        from .agent import Agent
+        self.agent = Agent(self, saver)
         self.diagnostics.record('service.ready', graph_nodes=10, history_limit=12)
         # Lifespan already holds the exclusive data-directory OS lock. Any
         # persisted edit token therefore belongs to a request in a dead process;
@@ -154,7 +156,14 @@ class Engine:
         self.trace('run.scheduled', run_id)
         task = asyncio.create_task(self.execute(run_id), name='tcg:' + run_id)
         self.tasks[run_id] = task
-        task.add_done_callback(lambda finished: self.tasks.pop(run_id, None) if self.tasks.get(run_id) is finished else None)
+        def finished_callback(finished):
+            if self.tasks.get(run_id) is finished:
+                self.tasks.pop(run_id, None)
+                # A resume can arrive after waiting was persisted but before
+                # the old runner's final diagnostics have drained.
+                if not self.stopping and self.store.run(run_id)['status'] == 'queued':
+                    self.schedule(run_id)
+        task.add_done_callback(finished_callback)
 
     def config(self, run_id):
         # Coverage pagination terminates through explicit progress validation,
@@ -205,9 +214,10 @@ class Engine:
             run = self.store.run(run_id)
             if run['status'] not in ('queued', 'running'):
                 return
+            graph = self.agent.graph if run.get('graph_version') == 2 else self.graph
             self.store.update_run(run_id, status='running', error=None)
             self.trace('checkpoint.loading', run_id)
-            snapshot = await self.graph.aget_state(self.config(run_id))
+            snapshot = await graph.aget_state(self.config(run_id))
             self.trace('checkpoint.loaded', run_id, has_state=bool(snapshot.values), next_nodes=list(snapshot.next), interrupt_count=len(snapshot.interrupts))
             pending = run.get('_resume')
             if pending and any(item.id == pending['interrupt_id'] for item in snapshot.interrupts):
@@ -218,16 +228,28 @@ class Engine:
                 argument = {'run_id': run_id, 'intent': run['intent'], 'analysis_batch': 0, 'scenario_page': 0, 'case_page': 0}
             if snapshot.values and not snapshot.next and not snapshot.interrupts:
                 # Handles process death after final checkpoint but before status update.
-                await self.node_finish(snapshot.values)
+                if run.get('graph_version') != 2:
+                    await self.node_finish(snapshot.values)
             else:
                 self.trace('graph.invoking', run_id, resuming=isinstance(argument, Command))
-                await self.graph.ainvoke(argument, self.config(run_id))
+                # Persist each boundary before the next model call. With async
+                # durability a hard process exit can outrun checkpoint writes.
+                await graph.ainvoke(argument, self.config(run_id), durability='sync')
                 self.trace('graph.returned', run_id)
-            snapshot = await self.graph.aget_state(self.config(run_id))
+            snapshot = await graph.aget_state(self.config(run_id))
             if snapshot.interrupts:
                 paused = snapshot.interrupts[0]
-                self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=paused.value, _interrupt_id=paused.id, _resume=None)
-            elif self.store.run(run_id)['status'] != 'completed':
+                with self.store.transaction():
+                    current = self.store.run(run_id)
+                    if current.get('graph_version') == 2 and current.get('_instruction_version', 0) != snapshot.values.get('epoch', 0):
+                        # Accepted during the tiny call→interrupt boundary:
+                        # consume this graph's actual persisted interrupt and
+                        # let the next safe boundary apply the durable epoch.
+                        self.store.update_run(run_id, status='queued', stage='applying_instruction', _interrupt_id=paused.id,
+                            _resume={'interrupt_id': paused.id, 'value': {'instruction': True}})
+                    else:
+                        self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=paused.value, _interrupt_id=paused.id, _resume=None)
+            elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version') != 2:
                 await self.node_finish(snapshot.values)
         except asyncio.CancelledError:
             # Shutdown preserves queued/running records for the next process.
@@ -235,9 +257,10 @@ class Engine:
         except Exception as exc:
             self.trace('run.error', run_id, level='ERROR', **error_details(exc))
             if self.store.run(run_id)['status'] != 'cancelled' and not self.stopping:
-                message = str(exc) if isinstance(exc, DomainError) else f'任务执行失败（{type(exc).__name__}）：{str(exc)[:200]}'
+                message = str(exc) if isinstance(exc, DomainError) else f'任务执行失败（{type(exc).__name__}）；已有进度保留，请重试当前阶段'
                 current = self.store.run(run_id)
-                self.store.update_run(run_id, status='failed', error=message, stage='failed', _failed_cache_key=current.get('_active_call_key'))
+                recovery = {'recovery': self.agent.recovery(current, exc)} if current.get('experience') == 'agent' else {}
+                self.store.update_run(run_id, status='failed', error=message, stage='failed', _failed_cache_key=current.get('_active_call_key'), **recovery)
 
     def stage(self, run_id, stage):
         self.store.assert_running(run_id)
@@ -312,9 +335,9 @@ class Engine:
                 return self.store.cache_set(run_id, key, result)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 self.store.assert_running(run_id)
-                if attempt:
+                if attempt or getattr(exc, 'retryable', True) is False:
                     raise
                 self.trace('model.retry', run_id, call_key=key, task=task, next_attempt=2)
             await asyncio.sleep(.15)
@@ -741,6 +764,8 @@ class Engine:
                 raise DomainError('请输入澄清答案')
             if kind == 'scenario_review' and response.get('approved') is not True:
                 raise DomainError('请确认场景后继续生成用例')
+            if kind == 'strategy_review' and response.get('approved') is not True:
+                raise DomainError('请确认策略后继续，或使用补充指令修订策略')
             run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
             run.pop('interrupt', None)
             self.store.save_run(run)

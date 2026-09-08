@@ -28,15 +28,16 @@ export function RequestInspector({runId,callId,onClose}:{runId:string;callId:str
  let content=message;
  if(tab==='context'){try{content=JSON.stringify(JSON.parse(message),null,2);}catch{}}
  if(tab==='record')content=JSON.stringify(full,null,2);
+ if(tab==='headers')content=current?.headers?JSON.stringify(current.headers,null,2):'此调用尚未记录自定义请求头。';
  return <Dialog title="发送给 AI 的内容" onClose={onClose} wide>
   <p className="muted">这是应用交给 LangChain 的消息和显式参数快照，后续修改不会改变此记录。</p>
   <p className="muted small-text">适配器可能调整消息角色或省略参数，因此下列内容不等同于服务商收到的完整 HTTP 请求。</p>
   <ErrorBox message={error}/>{error&&<button onClick={()=>setRetry(value=>value+1)}>重新读取</button>}
   {!current&&!error&&<Spinner/>}
   {current&&<><p className="request-meta">模型：{current.model} · 请求超时：{current.timeout_seconds} 秒<br/>服务地址：{current.base_url}<br/>调用：{callId}</p>
-   <div className="tabs request-tabs">{[['system','系统提示词'],['context','任务上下文'],['record','请求记录']].map(([value,label])=><button key={value} className={tab===value?'active':''} onClick={()=>setTab(value)}>{label}</button>)}</div>
+   <div className="tabs request-tabs">{[['system','系统提示词'],['context','任务上下文'],['headers','请求头（脱敏）'],['record','请求记录']].map(([value,label])=><button key={value} className={tab===value?'active':''} onClick={()=>setTab(value)}>{label}</button>)}</div>
    <pre className="request-body" aria-label="发送内容">{content||'本次没有这部分消息。'}</pre>
-   <div className="dialog-actions"><span className="muted">消息正文完整保留；认证信息不包含在记录中。</span><a href={path+'?download=true'} download>下载请求记录</a></div>
+   <div className="dialog-actions"><span className="muted">消息正文完整保留；请求头中的值已隐藏。</span><a href={path+'?download=true'} download>下载请求记录</a></div>
   </>}
  </Dialog>;
 }

@@ -229,6 +229,9 @@ class Store:
             # an operation on a historical artifact or a fresh generation.
             run['_history_total'] = len(history)
             run['_artifact_source_ids'] = artifact.get('_source_ids', []) if artifact else []
+            if request.get('experience') == 'agent':
+                run.update(experience='agent', graph_version=2, _instruction_version=0, _applied_instruction_version=0, _instructions=[],
+                           agent={'depth': request.get('depth') if request.get('depth') in ('quick', 'standard', 'deep') else 'standard', 'rationale': '', 'plan': [], 'insights': [], 'pending_instructions': 0})
             self.db.execute('INSERT INTO runs VALUES(?,?,?,?,?)', (run_id, chat_id, chat['project_id'], 'queued', dump(run)))
             chat['updated_at'] = now()
             self.put('chat', chat)
@@ -348,6 +351,9 @@ class Store:
             before, after = {i['id']: i for i in previous['items']}, {i['id']: i for i in items}
             diff = {'added': [i for i in after if i not in before], 'deleted': [i for i in before if i not in after], 'updated': [i for i in after if i in before and before[i] != after[i]]}
             result = {**previous, 'items': items, 'revision': expected_revision + 1, '_source_ids': source_ids}
+            if previous.get('report'):
+                from .agent_contracts import refreshed_report
+                result['report'] = refreshed_report(previous['type'], items, previous['report'], {e['id']: e for e in self.evidence(source_ids)})
             self.put('artifact', result)
             self.db.execute('INSERT INTO revisions VALUES(?,?,?,?,?,?)', (artifact_id, result['revision'], dump(result), now(), reason, dump(diff)))
             self.audit(artifact_id, reason, {'revision': result['revision'], 'diff': diff})
