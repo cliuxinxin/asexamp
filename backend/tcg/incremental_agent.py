@@ -12,7 +12,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from .agent import Agent, StaleInstruction, IncompleteCoverage
-from .agent_repair import apply_repair, repair_fragment
 from . import agent_contracts as contract
 from .incremental_contracts import analysis_patch, generated_patch, operation_patch, stable_id
 from .incremental_workspace import Workspace, fingerprint
@@ -622,6 +621,10 @@ class IncrementalAgent(Agent):
                 return {}
             available = {e['id']: e for e in data['evidence']}
             result = await self.validate_reply(state, job, context, raw, available, session['round'])
+            if result.get('kind') == 'need_context':
+                self.read_tools(state, key, result, session, evidence)
+                self.store.cache_set(run_id, session_key, session)
+                return {}
             with self.store.transaction():
                 self.current(state)
                 if task=='work_links':
@@ -892,37 +895,8 @@ class IncrementalAgent(Agent):
                 profile_config(value.get('config'))
                 return value
             raise DomainError('未知工作项类型')
-        result = copy.deepcopy(raw)
-        for attempt in range(3):
-            try:
-                return validate(result)
-            except OutputValidationError as exc:
-                self.engine.trace('agent.validation_failed', state['run_id'], task=task, validation_error=exc.issue, work_key=key)
-                if attempt == 2:
-                    raise
-                # Semantic omissions require a missing-evidence patch, not a rewrite.
-                if task == 'work_analyze' and exc.issue['expected'] == 'all_supplied_business_evidence_analyzed':
-                    covered = {r for item in result.get('items', []) for r in item.get('refs', [])} | {e.get('ref') for e in result.get('evidence_review', [])}
-                    missing = [e for e in context['evidence'] if e['id'] not in covered]
-                    patch_context = self.workspace.model_context(self.current(state), task, {'evidence': missing, 'goal':'仅补齐尚未处理的段落；使用新的局部 ID。'})
-                    patch = await self.engine.call(state['run_id'], key+f':completion:{round_number}:{attempt}', task, patch_context)
-                    self.current(state)
-                    for field in ('items','nodes','edges','evidence_review','questions','assumptions'):
-                        result[field] = result.get(field, []) + patch.get(field, [])
-                    continue
-                fragment = repair_fragment(result, self.patch_issue(result, context, exc.issue) if task in ('work_modify','work_review') else exc.issue, flat_fields=('questions','assumptions','techniques'))
-                repair_context = {'repair': fragment, 'original_task': task,
-                    'constraints': {'evidence_ids': list(evidence), 'requirement_ids': [i['id'] for i in context.get('analysis', [])],
-                                    'branch_ids': [e['id'] for e in context.get('business_model', {}).get('edges', [])],
-                                    'scenario_links': [{k:s[k] for k in ('id','requirement_ids','branch_ids')} for s in context.get('scenarios', [])],
-                                    'node_ids': [n.get('id') for n in result.get('nodes', [])]}}
-                if task=='work_links':
-                    repair_context['constraints']['source_units']=[{k:u[k] for k in ('id','title','requirements','excerpts')} for u in context['units']]
-                self.insight(state['run_id'], f'正在修正字段 {fragment["path"]}，其他条目和已完成工作保持不变。', [], 'decision')
-                fixed = await self.engine.call(state['run_id'], key+f':repair:{round_number}:{attempt}', 'agent_repair', repair_context)
-                self.current(state)
-                result = apply_repair(result, fragment, fixed)
-        raise AssertionError('unreachable')
+        from .incremental_repair import recover
+        return await recover(self, state, job, context, raw, evidence, round_number, validate)
 
     @staticmethod
     def patch_issue(value, context, issue):
@@ -1157,3 +1131,4 @@ class IncrementalAgent(Agent):
             self.sync(run_id)
             self.store.publish(run_id,[artifact['id']],summary,proposal=artifact.get('report',{}).get('config') if intent=='learn_template' else None)
         return {'done':True}
+
