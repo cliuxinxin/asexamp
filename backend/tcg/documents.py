@@ -122,7 +122,9 @@ def parse_document(name, data, max_upload=MAX_UPLOAD, parser='native'):
             parts = []
             for index, block in enumerate(document.iter_inner_content(), 1):
                 if hasattr(block, 'text'):
-                    parts.append((f'DOCX 段落 {index}', block.text))
+                    heading = getattr(getattr(block, 'style', None), 'name', '') or ''
+                    location = f'DOCX 段落 {index}' + (' · 标题' if heading.lower().startswith('heading') or heading.startswith('标题') else '')
+                    parts.append((location, block.text))
                 else:
                     parts.extend((f'DOCX 表 {index} 行 {row_number}', ' | '.join(cell.text for cell in row.cells)) for row_number, row in enumerate(block.rows, 1))
             return split_parts(parts)
