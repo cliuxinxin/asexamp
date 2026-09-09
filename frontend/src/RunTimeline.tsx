@@ -5,7 +5,7 @@ import {RequestInspector} from './RequestInspector';
 import {emptyFeed,reduceEvent} from './runProgress';
 import type {ModelOutput} from './runProgress';
 
-const outputStatus:Record<string,string>={running:'生成中 · 尚未校验',returned:'返回完成 · 等待校验',accepted:'阶段完成',invalid:'校验未通过',failed:'本次请求或阶段失败',cancelled:'已停止'};
+const outputStatus:Record<string,string>={running:'生成中 · 尚未校验',returned:'返回完成 · 等待校验',applied:'修正已应用 · 以工作项校验结果为准',accepted:'阶段完成',invalid:'校验未通过',failed:'本次请求或阶段失败',cancelled:'已停止'};
 function Output({call,runId}:{call:ModelOutput;runId:string}){
  const [inspecting,setInspecting]=useState(false);
  const [open,setOpen]=useState(true);const output=useRef<HTMLPreElement>(null);const pinned=useRef(true);
@@ -54,3 +54,4 @@ export function RunTimeline({runId,restartKey='',onChanged,onTarget,initialOpen=
  },[runId,restartKey,connected,reconnect]);
  return <>{agentMode&&(agentLive||open)&&<AgentPanel agent={liveAgent?.runId===runId?liveAgent.data:initialAgent} runId={runId} runStatus={runStatus} onTarget={onTarget} onChanged={onChanged}/>}<section className="run-timeline" aria-label="执行过程"><button className="timeline-heading" onClick={()=>setOpen(value=>!value)} aria-expanded={open}><strong>{agentMode?(open?'收起调用详情':'查看调用详情'):(open?'执行过程':'查看完整执行过程')}</strong><small>{open?({connecting:'连接进度…',live:'实时更新',reconnecting:'连接中断，自动重连…',done:'记录已同步',closed:'连接已关闭',invalid:'事件解析失败'}[connection]):'阶段、模型输出与校验记录'}</small></button>{open&&<>{['closed','invalid'].includes(connection)&&<button className="timeline-reconnect" onClick={()=>setReconnect(value=>value+1)}>重新连接</button>}{!feed.entries.length&&<p className="muted small-text">正在读取执行记录。旧版本任务可能只有状态记录。</p>}<ol className="timeline-list">{feed.entries.map(entry=><li key={entry.id} className={'timeline-entry '+entry.tone}><div className="timeline-marker"/><div className="timeline-content"><div className="timeline-line"><span>{entry.text}</span><time>{new Date(entry.at).toLocaleTimeString()}</time></div>{entry.callId&&feed.calls[entry.callId]&&<Output runId={runId} call={feed.calls[entry.callId]}/>}</div></li>)}</ol><p className="muted small-text timeline-note">已收到的模型内容会显示在这里；是否逐步返回取决于上游服务。以校验通过并保存的最终结果为准。</p></>}</section></>;
 }
+
