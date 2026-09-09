@@ -34,6 +34,7 @@ test('wide conversation shows inline results and explicit editing targets them',
   render(<App/>);
   await waitFor(()=>assert.equal(screen.getByRole('button',{name:'发送消息',exact:true}).hasAttribute('disabled'),true));
   await screen.findByText('Smoke project');
+  assert.equal(screen.queryByLabelText('生成流程'),null);
   await waitFor(()=>assert.equal(screen.getByRole('button',{name:'新建生成会话'}).hasAttribute('disabled'),false));
   fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'用户登录需求'}});
   await waitFor(()=>assert.equal(screen.getByRole('button',{name:'发送消息',exact:true}).hasAttribute('disabled'),false));
@@ -58,6 +59,7 @@ test('source confirmation explicitly sends selected file IDs',async()=>{
  try{
   render(<RunCard run={{id:'r1',status:'waiting',intent:'generate_case',mode:'hitp',stage:'source_review',updated_at:'2026-09-09',artifact_ids:[],experience:'reliable',graph_version:7,interrupt:{type:'source_review',message:'请选择需求文件',sources:[{id:'s1',name:'PHFSD.docx',role:'example'}]}}} onChanged={()=>{}} onTarget={()=>{}}/>);
   assert.equal(screen.getByRole('button',{name:'确认资料，继续当前任务'}).hasAttribute('disabled'),true);
+  assert.equal(screen.getByRole('button',{name:/执行过程/}).getAttribute('aria-expanded'),'true');
   fireEvent.click(screen.getByRole('checkbox'));
   fireEvent.click(screen.getByRole('button',{name:'确认资料，继续当前任务'}));
   await waitFor(()=>assert.deepEqual(body.source_ids,['s1']));

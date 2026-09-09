@@ -1,0 +1,24 @@
+{
+  "config": {
+    "language": "中文",
+    "scenario_level": "standard",
+    "case_level": "standard",
+    "case_types": [
+      "Business",
+      "Negative",
+      "Boundary"
+    ],
+    "additional_rules": "本次证据仅包含业务统计报表示例，不包含测试用例字段定义；建议先沿用当前配置。",
+    "scope": "",
+    "excel_columns": [],
+    "excel_layout": "case",
+    "sheet_name": "Test Cases",
+    "filename_pattern": null,
+    "template_rules": [
+      "沿用当前配置的 case 布局",
+      "沿用当前配置的 Test Cases 工作表",
+      "不从业务报表示例推断测试用例字段或业务规则"
+    ]
+  },
+  "summary": "当前提供的内容是 Summary、Member Details 及区域统计报表示例，而不是测试用例 Excel 模板；建议暂时保留已有配置。"
+}

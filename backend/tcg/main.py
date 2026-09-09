@@ -68,7 +68,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.5.0', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.5.1', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -128,7 +128,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.5.0', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.5.1', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -336,7 +336,8 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.5.0', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.5.1', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
             'runtime': {'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
@@ -349,6 +350,31 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         }
         headers = {'Content-Disposition': f'attachment; filename="{run_id}-diagnostics.json"'} if download else {}
         return JSONResponse(payload, headers=headers)
+
+    @app.get('/api/runs/{run_id}/debug-bundle')
+    async def run_debug_bundle(run_id: str):
+        import io,zipfile
+        store=app.state.store;run=store.run(run_id)
+        graph=app.state.engine.workflow if run.get('graph_version')==7 else app.state.engine.graph
+        checkpoint=await graph.aget_state(app.state.engine.config(run_id))
+        metadata=json.loads(run_diagnostics(run_id).body)
+        metadata['events']=app.state.engine.diagnostics.rows(run_id,500)
+        metadata['retention']='Last 500 diagnostic events; all stored request and response snapshots for this run are attached.'
+        metadata['checkpoint']={'next':list(checkpoint.next),'values':checkpoint.values,
+            'interrupts':[{'id':i.id,'value':i.value} for i in checkpoint.interrupts]}
+        metadata['profile_snapshot']=run['_profile']
+        with store.lock:
+            calls=[dict(row) for row in store.db.execute('SELECT call_id,payload FROM model_requests WHERE run_id=?',(run_id,)).fetchall()]
+            outputs=[dict(row) for row in store.db.execute('SELECT call_id,content FROM model_outputs WHERE run_id=?',(run_id,)).fetchall()]
+            cache_keys=[row['key'] for row in store.db.execute('SELECT key FROM cache WHERE run_id=?',(run_id,)).fetchall()]
+        metadata['cache_keys']=cache_keys
+        buffer=io.BytesIO()
+        with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('diagnostics.json',json.dumps(metadata,ensure_ascii=False,indent=2))
+            for row in calls:archive.writestr('calls/'+row['call_id']+'.request.json',row['payload'])
+            for row in outputs:archive.writestr('calls/'+row['call_id']+'.response.txt',row['content'])
+            archive.writestr('artifacts.json',json.dumps([public(a) for a in store.list('artifact',chat_id=run['chat_id']) if a['id'] in set(run['artifact_ids'])|{v for k,v in checkpoint.values.items() if k.endswith('_ref')}],ensure_ascii=False,indent=2))
+        return Response(buffer.getvalue(),media_type='application/zip',headers={'Content-Disposition':f'attachment; filename="{run_id}-debug.zip"'})
 
     @app.post('/api/runs/{run_id}/resume')
     async def run_resume(run_id: str, body: ResumeInput):

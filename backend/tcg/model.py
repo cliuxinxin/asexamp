@@ -66,7 +66,8 @@ TASK_INSTRUCTIONS = {
     'summarize': 'Return {summary:string}. Summarize only the supplied saved artifact and review findings in the user language: business coverage, unresolved risks, next action. Never claim execution passed or stages completed without supplied evidence.',
     'route': 'Return {"intent":"review_requirement|generate_scenario|generate_case|review_case|query|learn_template|modify"}. Explicit user intent takes priority. Generic requirement processing ends at generate_case. Existing artifact changes route to modify. This classification context intentionally contains source metadata and artifact metadata only; document contents are loaded by later nodes. Infer the action from the current request and recent conversation. Do not mistake omitted document bodies for absent sources. Long message previews retain only the beginning/end; they are not the analysis input.',
     'analyze_requirement': 'Understand the whole supplied business requirement context. Document signatories and version-table headers are metadata, never application roles. Produce at least a flowchart; complex requirements also need a mind map and relevant state transitions. Recommend a depth with reasons in report.strategy. Analyze every supplied evidence chunk. Return {"items":[{"id":"REQ-...","title":"...","description":"...","refs":["exact evidence id"]}],"report":{"questions":["blocking ambiguities"],"assumptions":["explicit assumptions and risk"],"requirement_map":{"modules":[],"roles":[],"flows":[],"rules":[],"states":[],"dependencies":[]},"diagrams":[{"title":"...","mermaid":"flowchart TD ..."}]}}. For complex requirements include at least one structured diagram and cross-module dependencies. In auto mode resolve ambiguities with marked assumptions; do not ask the user to pause. Clarification answer, when provided, has highest precedence.',
-    'generate_scenarios': 'Generate scenarios exhaustively from the supplied analysis and evidence. Return {"items":[{"id":"SC-unique","title":"...","description":"...","priority":"P1","refs":["exact evidence id"]}],"has_more":false,"next_cursor":null}. If context-sized output needs more pages, set has_more true and a fresh next_cursor. Do not repeat previous_items IDs. Cover business, negative and boundary paths and dependencies according to profile.',
+    'link_scenarios': 'Return {links:[{id:exact_scenario_id,requirement_ids:[exact_analysis_id]}]}. Associate every supplied scenario with the requirement IDs it actually tests. Never alter scenario text or invent IDs. Shared evidence refs alone do not prove semantic coverage. Return only these links, not regenerated scenarios.',
+    'generate_scenarios': 'Every scenario MUST include requirement_ids: an array of exact IDs from context.analysis. These are different from evidence refs. Generate scenarios exhaustively from the supplied analysis and evidence. Return {"items":[{"id":"SC-unique","requirement_ids":["exact context.analysis.id"],"title":"...","description":"...","priority":"P1","refs":["exact evidence id"]}],"has_more":false,"next_cursor":null}. If context-sized output needs more pages, set has_more true and a fresh next_cursor. Do not repeat previous_items IDs. Cover business, negative and boundary paths and dependencies according to profile.',
     'generate_cases': 'Generate cases for all supplied scenarios, with no arbitrary count cap. Return {"items":[{"id":"TC-unique","title":"...","scenario_id":"exact scenario id","type":"Business|Negative|Boundary","priority":"P1","preconditions":"...","steps":[{"action":"...","expected":"..."}],"refs":["exact evidence id"]}],"has_more":false,"next_cursor":null}. If more cases are needed, set has_more true and fresh next_cursor. Never repeat previous_items IDs. Preserve configured additional fields.',
     'import_cases': 'Extract uploaded existing test cases into the case schema, preserving their content and grounding each in corresponding non-example requirement evidence. Return {"items":[{"id":"TC-unique","title":"...","scenario_id":"","type":"Business","priority":"P1","preconditions":"...","steps":[{"action":"...","expected":"..."}],"refs":["exact requirement evidence id"]}],"has_more":false,"next_cursor":null}. Use pagination if needed.',
     'review_cases': 'Perform exactly one evidence-grounded review and optimization of the supplied cases. Return {"operations":[{"op":"add|update|delete","id":"target ID for update/delete","item":{"id":"stable ID","field":"new value"}}],"report":{"summary":"...","issues":[],"coverage":[],"score":0}}. Make targeted changes only; never regenerate the whole set. Added items must have complete case fields. Preserve valid stable IDs and refs. Score is descriptive and never gates execution.',
@@ -396,7 +397,14 @@ class LangChainGateway:
             if content.startswith('```'):
                 lines = content.splitlines()
                 content = '\n'.join(lines[1:-1])
-            result = json.loads(content)
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                # Accept a single JSON object wrapped in explanatory prose.
+                start = content.find('{')
+                if start < 0: raise
+                result, end = json.JSONDecoder().raw_decode(content[start:])
+                if '{' in content[start+end:]: raise ValueError('Multiple JSON objects')
             if not isinstance(result, dict):
                 raise ValueError('Expected JSON object')
             return result
@@ -409,6 +417,8 @@ class LangChainGateway:
                 self.diagnostics.record('model.invalid_json', level='ERROR', **error_details(exc))
             error = DomainError('模型未返回有效 JSON；请使用支持结构化输出的指令模型，然后重试失败节点')
             error.retryable, error.category = False, 'protocol'
+            error.raw_response = content
+            error.parse_error = {'type':type(exc).__name__,'line':getattr(exc,'lineno',None),'column':getattr(exc,'colno',None),'position':getattr(exc,'pos',None)}
             raise error from None
         except Exception as exc:
             if self.diagnostics:
@@ -469,6 +479,8 @@ class LangChainGateway:
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
             error = DomainError('模型服务返回了无效或不完整的响应协议')
             error.retryable, error.category = False, 'protocol'
+            error.raw_response = content
+            error.parse_error = {'type':type(exc).__name__,'line':getattr(exc,'lineno',None),'column':getattr(exc,'colno',None),'position':getattr(exc,'pos',None)}
             raise error from None
         return content, choice.get('finish_reason'), envelope.get('usage') or {}
 

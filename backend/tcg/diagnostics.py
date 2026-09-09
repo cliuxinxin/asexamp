@@ -20,11 +20,15 @@ def error_details(exc):
     types, frames, seen = [], [], set()
     status = application_status = provider_status = None
     validation_error = None
+    validation_errors = []
+    parse_error = None
     while exc is not None and id(exc) not in seen and len(types) < 8:
         seen.add(id(exc))
         types.append(type(exc).__name__)
         if isinstance(exc, OutputValidationError) and validation_error is None:
             validation_error = exc.issue
+        if getattr(exc,'errors',None):validation_errors=exc.errors
+        if getattr(exc,'parse_error',None):parse_error=exc.parse_error
         remote = getattr(exc, 'status_code', None)
         local = getattr(exc, 'status', None)
         if isinstance(remote, int):
@@ -43,6 +47,8 @@ def error_details(exc):
             'stack': frames[-12:]}
     if validation_error is not None:
         result['validation_error'] = validation_error
+    if validation_errors:result['validation_errors']=validation_errors
+    if parse_error:result['parse_error']=parse_error
     return result
 
 

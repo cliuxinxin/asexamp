@@ -83,6 +83,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs(chat_id) WHERE status IN ('queued','running','waiting');
             CREATE TABLE IF NOT EXISTS revisions(artifact_id TEXT,revision INTEGER,payload TEXT NOT NULL,created_at TEXT NOT NULL,reason TEXT NOT NULL,diff TEXT NOT NULL,PRIMARY KEY(artifact_id,revision));
+            CREATE TABLE IF NOT EXISTS model_outputs(run_id TEXT,call_id TEXT,content TEXT NOT NULL,PRIMARY KEY(run_id,call_id));
             CREATE TABLE IF NOT EXISTS cache(run_id TEXT,key TEXT,payload TEXT NOT NULL,PRIMARY KEY(run_id,key));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS event_run ON events(run_id,id);
@@ -292,6 +293,10 @@ class Store:
 
     def event(self, run):
         self.db.execute('INSERT INTO events(run_id,payload,created_at) VALUES(?,?,?)', (run['id'], dump(public(run)), now()))
+
+    def append_model_output(self, run_id, call_id, text):
+        with self.transaction():
+            self.db.execute('INSERT INTO model_outputs VALUES(?,?,?) ON CONFLICT(run_id,call_id) DO UPDATE SET content=model_outputs.content||excluded.content',(run_id,call_id,text))
 
     def save_model_request(self, run_id, call_id, request):
         with self.transaction():

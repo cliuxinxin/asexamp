@@ -8,7 +8,7 @@ import type {ModelOutput} from './runProgress';
 const outputStatus:Record<string,string>={running:'生成中 · 尚未校验',returned:'返回完成 · 等待校验',accepted:'阶段完成',invalid:'校验未通过',failed:'本次请求或阶段失败',cancelled:'已停止'};
 function Output({call,runId}:{call:ModelOutput;runId:string}){
  const [inspecting,setInspecting]=useState(false);
- const [open,setOpen]=useState(true);const output=useRef<HTMLPreElement>(null);const pinned=useRef(true);
+ const [open,setOpen]=useState(false);const output=useRef<HTMLPreElement>(null);const pinned=useRef(true);
  useEffect(()=>{if(output.current&&pinned.current)output.current.scrollTop=output.current.scrollHeight;},[call.text,open]);
  return <div className={'model-output '+call.status}><div className="request-actions"><button disabled={!call.requestAvailable} onClick={()=>setInspecting(true)}>查看发送内容</button>{!call.requestAvailable&&<small className="muted">尚无发送记录；旧版本调用无法补回</small>}</div>{inspecting&&<RequestInspector key={runId+':'+call.id} runId={runId} callId={call.id} onClose={()=>setInspecting(false)}/>}<button className="output-toggle" onClick={()=>setOpen(value=>!value)} aria-expanded={open}><span>AI 输出 · {outputStatus[call.status]}</span><small>{call.attempt?`第 ${call.attempt} 次请求`:'模型请求'}{typeof call.elapsed==='number'?` · ${(call.elapsed/1000).toFixed(1)} 秒`:''} · {open?'收起':'展开'}</small></button>{open&&<pre ref={output} onScroll={()=>{const box=output.current;if(box)pinned.current=box.scrollHeight-box.scrollTop-box.clientHeight<48;}} aria-label={call.label+'的模型输出'}>{call.text||(call.status==='running'?'等待模型返回内容…':'本次没有返回可展示的内容。')}</pre>}</div>;
 }

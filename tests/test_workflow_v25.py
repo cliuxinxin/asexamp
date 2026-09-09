@@ -96,8 +96,8 @@ def test_clarification_retry_reuses_answer(tmp_path):
         broken=True
         async def generate(self,task,context):
             result=await super().generate(task,context)
-            if task=='analyze_requirement' and context.get('clarification') and self.broken:
-                result['report']['diagrams']=[]
+            if task=='generate_scenarios' and self.broken:
+                result['items'][0]['title']=''
             return result
     model=RecoverModel(questions=['允许哪些角色？'])
     with TestClient(create_app(tmp_path,model)) as client:
@@ -105,14 +105,18 @@ def test_clarification_retry_reuses_answer(tmp_path):
         run=until(client,start(client,chat,experience='reliable',mode='hitp'))
         client.post('/api/runs/'+run['id']+'/resume',json={'answer':'注册用户'})
         run=until(client,run)
+        assert run['interrupt']['type']=='strategy_review'
+        client.post('/api/runs/'+run['id']+'/resume',json={'approved':True})
+        run=until(client,run)
         assert run['status']=='failed',run
         model.broken=False
         assert client.post('/api/runs/'+run['id']+'/retry',json={}).status_code==200
         run=until(client,run)
-        assert run['status']=='waiting' and run['interrupt']['type']=='strategy_review',run
+        assert run['status']=='waiting' and run['interrupt']['type']=='scenario_review',run
         sources=client.get('/api/chats/'+chat['id']).json()['sources']
         assert len([s for s in sources if s['role']=='clarification'])==1
-        last=[c for t,c in model.calls if t=='analyze_requirement'][-1]
+        assert sum(t=='analyze_requirement' for t,c in model.calls)==1
+        last=[c for t,c in model.calls if t=='generate_scenarios'][-1]
         assert 'validation_repair' in last
 
 
@@ -195,6 +199,6 @@ def test_checkpoint_restart_resumes_same_confirmation(tmp_path):
         assert response.status_code==200
         run=until(client,run)
         assert run['interrupt']['type']=='strategy_review'
-        assert sum(t=='analyze_requirement' for t,c in model.calls)==2
+        assert sum(t=='analyze_requirement' for t,c in model.calls)==1
         sources=client.get('/api/chats/'+chat['id']).json()['sources']
         assert sum(s['role']=='clarification' for s in sources)==1

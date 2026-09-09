@@ -177,6 +177,9 @@ class ReliableEngine(Engine):
                                         'expected': f'输入约{size}字符，预算{self.budget()}；请缩小单批或提高预算，原文未截断'}])
         return await super().invoke_model(task, context, run_id)
 
+    async def prepare_result(self, run_id, task, context, result):
+        return result
+
     async def validated(self, run_id, prefix, task, context, validator):
         self.store.update_run(run_id, _reliable_active_prefix=prefix)
         digest = hashlib.sha256(json.dumps(context, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
@@ -193,6 +196,8 @@ class ReliableEngine(Engine):
         hint=self.store.cache_get(run_id,recovery_key)
         request_context={**context, **({'validation_repair':hint} if hint else {})}
         result = await self.call(run_id, prefix + ':raw', task, request_context)
+        result = await self.prepare_result(run_id, task, context, result)
+        self.store.update_run(run_id,_reliable_active_prefix=prefix)
         original = copy.deepcopy(result)
         original_errors = validator(original)
         valid_original = {}
@@ -224,6 +229,8 @@ class ReliableEngine(Engine):
             repair = {**context, 'validation_repair': {'errors': errors, 'previous_response': result,
                       'instruction': '一次修复列表中的全部错误。返回完整结果，保留合法条目和稳定ID；不可删除条目或编造证据来通过校验。'}}
             result = await self.call(run_id, prefix + f':repair:{attempt}', task, repair)
+            result = await self.prepare_result(run_id, task, context, result)
+            self.store.update_run(run_id,_reliable_active_prefix=prefix)
         raise AssertionError('unreachable')
 
     async def node_analysis(self, state):

@@ -261,7 +261,7 @@ class Engine:
                 message = str(exc) if isinstance(exc, DomainError) else f'任务执行失败（{type(exc).__name__}）；已有进度保留，请重试当前阶段'
                 current = self.store.run(run_id)
                 recovery = {'recovery': self.agent.recovery(current, exc)} if current.get('experience') == 'agent' else {}
-                self.store.update_run(run_id, status='failed', error=message, stage='failed', _failed_cache_key=current.get('_active_call_key'), **recovery)
+                self.store.update_run(run_id, status='failed', error=message, stage='failed', failed_stage=current['stage'], _failed_cache_key=current.get('_active_call_key'), **recovery)
 
     def stage(self, run_id, stage):
         self.store.assert_running(run_id)
@@ -372,6 +372,7 @@ class Engine:
                     pending = ''
                     return
                 with self.store.transaction():
+                    self.store.append_model_output(run_id,fields['call_id'],pending)
                     for index in range(0, len(pending), 2048):
                         self.store.append_event(run_id, 'model_delta', {
                             'at': now(), 'run_id': run_id, 'call_id': fields['call_id'],

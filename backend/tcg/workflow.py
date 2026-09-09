@@ -1,8 +1,11 @@
 """Version 7 authoring graph: each durable transition has one responsibility."""
 import hashlib
+import copy
+import json
 from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
+from langgraph.errors import GraphInterrupt
 from .flow import FlowEngine
 from .graph import State
 from .schemas import DomainError, INTENTS, profile_config
@@ -49,6 +52,61 @@ class WorkflowEngine(FlowEngine):
         graph.add_edge('publish',END)
         return graph.compile(checkpointer=saver)
 
+    def stage(self, run_id, stage):
+        super().stage(run_id,stage)
+        names={'routing':'识别本次任务','input_check':'检查资料用途','requirement_analysis':'理解需求与业务图',
+            'applying_clarification':'保存澄清，沿用已有理解','strategy_review':'等待确认理解与方案',
+            'scenario_generation':'生成测试场景','case_generation':'生成测试用例','case_review':'评审并优化用例',
+            'learn_template':'读取 Excel 格式建议','modify':'修改选定结果','query':'回答你的问题','summarizing':'整理本轮总结'}
+        if stage in names:self.store.update_run(run_id,progress={'phase':stage,'completed':0,'total':1,'label':names[stage]})
+
+    def observed_node(self, name):
+        observed=super().observed_node(name)
+        async def wrapped(state):
+            rid=state['run_id']
+            try:
+                result=await observed(state)
+            except GraphInterrupt:raise
+            except Exception as exc:
+                self.store.update_run(rid,failed_node=name,validation_errors=getattr(exc,'errors',[]))
+                raise
+            if self.store.run(rid).get('graph_version')==7:
+                refs={k:v for k,v in result.items() if k.endswith('_ref') and isinstance(v,str)}
+                counts={k:len(self.store.get('artifact',v)['items']) for k,v in refs.items()}
+                self.trace('workflow.step_saved',rid,step=name,artifact_refs=refs,item_counts=counts)
+            return result
+        return wrapped
+
+    async def prepare_result(self, rid, task, context, result):
+        if task!='generate_scenarios' or not isinstance(result.get('items'),list):return result
+        requirements={r['id'] for r in context.get('analysis',[])}
+        rows=result['items']
+        if not rows or not all(isinstance(r,dict) and isinstance(r.get('id'),str) for r in rows):return result
+        def linked(row):
+            refs=row.get('requirement_ids')
+            return isinstance(refs,list) and bool(refs) and all(isinstance(ref,str) and ref in requirements for ref in refs)
+        if all(linked(r) for r in rows):return result
+        candidate_ids={r['id'] for r in rows}
+        if len(candidate_ids)!=len(rows):return result
+        link_context={'analysis':context['analysis'],'scenarios':rows,'evidence':context.get('evidence',[]),
+            'instruction':'只补场景到需求的关联，使用输入中的精确 ID；保留场景正文，不重新生成场景。根据业务含义判断，不可仅因引用同一段原文就关联所有需求。'}
+        def validate(value):
+            links=value.get('links')
+            if not isinstance(links,list):return [{'path':'links','code':'type','expected':'array'}]
+            if len(links)!=len(rows) or any(not isinstance(link,dict) or not isinstance(link.get('id'),str) or not linked(link) for link in links) or {link['id'] for link in links}!=candidate_ids:
+                return [{'path':'links','code':'trace_links','expected':{'scenario_ids':sorted(candidate_ids),'requirement_ids':sorted(requirements)}}]
+            return []
+        digest=hashlib.sha256(json.dumps(link_context,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        self.trace('scenarios.linking_started',rid,scenario_count=len(rows),requirement_count=len(requirements))
+        links=await self.validated(rid,'v7:links:'+digest,'link_scenarios',link_context,validate)
+        mapping={link['id']:link['requirement_ids'] for link in links['links']}
+        self.trace('scenarios.linking_complete',rid,scenario_count=len(rows))
+        return {**result,'items':[{**row,'requirement_ids':row['requirement_ids'] if linked(row) else mapping[row['id']]} for row in rows]}
+
+    def understanding_signature(self, source_ids, roles):
+        values=[(sid,roles.get(sid,self.store.get('source',sid)['role'])) for sid in source_ids]
+        return sorted((sid,role) for sid,role in values if role!='example')
+
     async def invoke_model(self, task, context, run_id=None):
         if run_id and self.store.run(run_id).get('graph_version')==7:
             # The stage contract, not the eventual user goal, owns this response.
@@ -57,7 +115,23 @@ class WorkflowEngine(FlowEngine):
                 context={**context,'user_goal':context.get('request',{}),
                     'request':{**context.get('request',{}),'intent':names[task]},
                     'current_stage':task,'stage_instruction':'只执行当前阶段的输出契约。最终用户目标不表示现在就生成最终用例或回答。'}
-        return await super().invoke_model(task,context,run_id)
+        original=context
+        hint_key='json_hint:'+hashlib.sha256(json.dumps(context,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        hint=self.store.cache_get(run_id,hint_key) if run_id else None
+        if hint:context={**original,'json_repair':hint}
+        for attempt in range(3):
+            try:
+                return await super().invoke_model(task,context,run_id)
+            except DomainError as exc:
+                if not hasattr(exc,'raw_response'):raise
+                hint={'previous_response_text':exc.raw_response,'parse_error':exc.parse_error,
+                    'instruction':'上次返回无法解析。保留业务内容，纠正 JSON 语法，只返回一个完整 JSON 对象；不要 Markdown。当前阶段不变，不重新分析需求。'}
+                if run_id:
+                    self.store.cache_set(run_id,hint_key,hint)
+                    self.trace('json.repair_started' if attempt<2 else 'json.repair_exhausted',run_id,repair_attempt=attempt+1,parse_error=exc.parse_error,response_characters=len(exc.raw_response))
+                if attempt==2:raise
+                context={**original,'json_repair':hint}
+
 
     async def paused_dialogue(self, run_id, content):
         run=self.store.run(run_id)
@@ -81,6 +155,8 @@ class WorkflowEngine(FlowEngine):
     async def node_dispatch(self,state):
         rid=state['run_id'];self.stage(rid,'routing')
         run=self.store.run(rid);intent=run['intent']
+        if intent=='auto' and run['_request']['content'].strip() in ('验证','检查','看看'):
+            intent='review_case' if (run.get('_artifact_snapshot') or {}).get('type')=='cases' else 'query'
         if intent=='auto':
             result=await self.validated(rid,'v7:route','route',self.routing_context(rid),
                 lambda r: [] if r.get('intent') in INTENTS and r['intent']!='auto' else [{'path':'intent','code':'intent','expected':sorted(set(INTENTS)-{'auto'})}])
@@ -135,7 +211,16 @@ class WorkflowEngine(FlowEngine):
         return 'understand'
 
     async def node_understand(self,state):
-        artifact=await self.analyze(state['run_id'],'v7:analysis')
+        rid=state['run_id'];run=self.store.run(rid)
+        signature=self.understanding_signature(run['_source_ids'],run['_source_roles'])
+        reusable=[a for a in self.store.list('artifact',chat_id=run['chat_id']) if a['type']=='analysis'
+            and self.understanding_signature(a['_source_ids'],a.get('_source_roles',{}))==signature]
+        if reusable:
+            artifact=max(reusable,key=lambda a:(a['created_at'],a['revision']))
+            self.trace('analysis.reused',rid,artifact_id=artifact['id'],revision=artifact['revision'],requirement_count=len(artifact['items']))
+            self.store.cache_set(rid,'v6:requirement_map',artifact.get('report',{}))
+        else:
+            artifact=await self.analyze(rid,'v7:analysis')
         return {'analysis_ref':artifact['id'],'output_ref':artifact['id']}
 
     def next_understanding(self,state):
@@ -160,7 +245,13 @@ class WorkflowEngine(FlowEngine):
                 source=self.store.add_source(run['chat_id'],'用户澄清','clarification',text,chunks)
                 saved=self.store.cache_set(rid,'v7:clarification_source',{'id':source['id']})
         self.store.update_run(rid,_source_ids=list(dict.fromkeys(run['_source_ids']+[saved['id']])),_source_roles={**run['_source_roles'],saved['id']:'clarification'})
-        artifact=await self.analyze(rid,'v7:clarified',answer)
+        artifact=self.store.get('artifact',state['analysis_ref'])
+        report={**artifact.get('report',{}),'clarification':answer,'questions':[],
+                'clarification_note':'已保存用户补充，场景与用例生成将结合原需求和此补充；没有重新生成需求理解。',
+                'previous_questions':state['clarification_questions']}
+        artifact=self.store.revise_artifact(artifact['id'],artifact['revision'],artifact['items'],
+            'apply_clarification',rid,'v7:clarification_applied',report=report)
+        self.trace('clarification.applied',rid,artifact_id=artifact['id'],revision=artifact['revision'],source_id=saved['id'])
         return {'analysis_ref':artifact['id'],'output_ref':artifact['id']}
 
     async def node_understanding_gate(self,state):
@@ -194,10 +285,42 @@ class WorkflowEngine(FlowEngine):
         return {'output_ref':artifact['id']}
 
     async def node_single(self,state):
-        if self.store.run(state['run_id']).get('graph_version')==7 and state['intent']=='modify' and not self.store.run(state['run_id']).get('_artifact_snapshot'):
-            artifact=self.answer(state['run_id'],'v7:no_target','当前还没有可修改的结果。请先生成或上传用例。')
+        rid=state['run_id'];run=self.store.run(rid)
+        if run.get('graph_version')==7 and state['intent']=='learn_template':
+            self.stage(rid,'learn_template')
+            context=self.context(rid)
+            if not context['evidence'] and not context.get('artifact'):
+                artifact=self.answer(rid,'v7:no_template','请上传 Excel 示例或选择当前用例后再学习格式。')
+                return {'output_ref':artifact['id']}
+            def validate(result):
+                try:
+                    if not isinstance(result.get('config'),dict):raise DomainError('config 必须为对象')
+                    normalized,notes=self.template_config(run['_profile'],result['config'])
+                    profile_config(normalized)
+                    return []
+                except DomainError as exc:
+                    return [{'path':'config','code':'profile','expected':str(exc)}]
+            result=await self.validated(rid,'v7:template','learn_template',context,validate)
+            config,notes=self.template_config(run['_profile'],result['config'])
+            summary=str(result.get('summary','已整理模板建议'))
+            if notes:summary+='\n'+ '；'.join(notes)
+            artifact=self.store.artifact(rid,'v7:template_proposal','proposal','Excel 格式建议',
+                [{'id':'template-proposal','title':'模板学习结果','description':summary,'refs':[]}],{'config':config,'notes':notes})
+            return {'output_ref':artifact['id']}
+        if run.get('graph_version')==7 and state['intent']=='modify' and not run.get('_artifact_snapshot'):
+            artifact=self.answer(rid,'v7:no_target','当前还没有可修改的结果。请先生成或上传用例。')
             return {'output_ref':artifact['id']}
         return await super().node_single(state)
+
+    def template_config(self, current, proposal):
+        config=dict(current);notes=[]
+        for key,value in proposal.items():
+            if value is None or (key=='excel_columns' and value==[]):
+                notes.append(f'{key} 未识别到有效值，保留当前设置')
+                continue
+            if key=='template_rules' and isinstance(value,list):value='\n'.join(str(item) for item in value)
+            config[key]=value
+        return profile_config(config),notes
 
     async def node_summarize(self,state):
         rid=state['run_id'];self.stage(rid,'summarizing');artifact=self.store.get('artifact',state['output_ref'])

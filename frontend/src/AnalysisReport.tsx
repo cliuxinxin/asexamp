@@ -16,6 +16,7 @@ export function AnalysisReport({report}:{report:Json}){
  const traceability:Array<Json>=Array.isArray(report.traceability)?report.traceability:[];
  const groups=[['questions','需要确认'],['assumptions','尚未确认的假设'],['issues','检查发现'],['limitations','范围限制'],['coverage','覆盖说明']] as const;
  return <div className="analysis-report">
+  {report.clarification&&<div className="report-findings"><strong>已记录的澄清</strong><p className="preserve">{report.clarification}</p><small>{report.clarification_note}</small></div>}
   {report.summary&&<p className="report-summary preserve">{describe(report.summary)}</p>}
   {strategy&&<div className="strategy-overview"><span className="depth-badge">{depthNames[strategy.depth as Depth]??'测试方案'}</span>{strategy.rationale&&<p>{strategy.rationale}</p>}{Array.isArray(strategy.scope)&&strategy.scope.length>0&&<p><strong>测试范围：</strong>{strategy.scope.map(describe).join('、')}</p>}{Array.isArray(strategy.techniques)&&strategy.techniques.length>0&&<div className="technique-tags">{strategy.techniques.map((method:unknown,index:number)=><span key={index}>{describe(method)}</span>)}</div>}</div>}
   {diagrams.map((diagram:Json,index:number)=><BusinessDiagram key={diagram.id??index} title={diagram.title??'业务流程图'} source={diagram.mermaid}/>)}
