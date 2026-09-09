@@ -94,6 +94,7 @@ class RestoreInput(BaseModel):
 
 
 class ResumeInput(BaseModel):
+    source_ids: list[str] | None = None
     depth: Literal['quick', 'standard', 'deep'] | None = None
     answer: str | None = Field(default=None, max_length=100_000)
     approved: bool | None = None

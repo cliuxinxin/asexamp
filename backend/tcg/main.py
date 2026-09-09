@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from .diagnostics import endpoint_origin, error_details
 from .documents import MAX_UPLOAD, classify_source, export_cases, parse_document, parse_text
 from .environment import runtime_value
-from .flow import FlowEngine as Engine
+from .workflow import WorkflowEngine as Engine
 from .model import LangChainGateway, Settings
 from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
 from .storage import DirectoryLock, Store, public, uid, now
@@ -68,7 +68,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.4.2', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.5.0', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -128,7 +128,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.4.2', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.5.0', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -336,7 +336,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.4.2', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.5.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
             'runtime': {'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
@@ -353,6 +353,10 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     @app.post('/api/runs/{run_id}/resume')
     async def run_resume(run_id: str, body: ResumeInput):
         return run_view(app.state.engine.resume(run_id, body.model_dump()))
+
+    @app.post('/api/runs/{run_id}/dialogue')
+    async def run_dialogue(run_id: str, body: WaitingEditInput):
+        return await app.state.engine.paused_dialogue(run_id, body.content)
 
     @app.post('/api/runs/{run_id}/instructions')
     async def run_instruction(run_id: str, body: WaitingEditInput):

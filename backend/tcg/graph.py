@@ -106,6 +106,7 @@ class Engine:
         builder.add_edge('single', 'finish')
         builder.add_edge('finish', END)
         self.graph = builder.compile(checkpointer=saver)
+        self.workflow = self.build_workflow(saver) if hasattr(self, "build_workflow") else self.graph
         from .agent import Agent
         self.agent = Agent(self, saver)
         self.diagnostics.record('service.ready', graph_nodes=10, history_limit=12)
@@ -214,7 +215,7 @@ class Engine:
             run = self.store.run(run_id)
             if run['status'] not in ('queued', 'running'):
                 return
-            graph = self.agent.graph if run.get('graph_version') == 2 else self.graph
+            graph = self.agent.graph if run.get('graph_version') == 2 else self.workflow if run.get('graph_version')==7 else self.graph
             self.store.update_run(run_id, status='running', error=None)
             self.trace('checkpoint.loading', run_id)
             snapshot = await graph.aget_state(self.config(run_id))
@@ -760,6 +761,10 @@ class Engine:
             if run['status'] != 'waiting':
                 raise DomainError('任务当前未等待人工输入', 409)
             kind = run['interrupt']['type']
+            if kind=='source_review':
+                selected=response.get('source_ids') or []
+                if not set(selected).issubset(set(run['_source_ids'])) or (not selected and not (response.get('answer') or '').strip()):
+                    raise DomainError('请选择本轮需求文件或输入需求正文')
             if kind == 'clarification' and (not response.get('answer') or not response['answer'].strip()):
                 raise DomainError('请输入澄清答案')
             if kind == 'scenario_review' and response.get('approved') is not True:

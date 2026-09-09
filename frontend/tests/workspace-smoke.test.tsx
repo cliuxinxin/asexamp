@@ -40,7 +40,7 @@ test('wide conversation shows inline results and explicit editing targets them',
   fireEvent.click(screen.getByRole('button',{name:'发送消息',exact:true}));
   await screen.findByText('Login');
   assert.equal(screen.queryByRole('region',{name:'用例工作区'}),null);
-  assert.equal(requests[0].intent,'auto');assert.equal(requests[0].as_requirement,true);
+  assert.equal(requests[0].intent,'auto');assert.equal(requests[0].as_requirement,false);
   fireEvent.click(screen.getByRole('button',{name:'让 AI 修改此结果'}));
   fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'修改标题'}});
   fireEvent.click(screen.getByRole('button',{name:'发送消息',exact:true}));
@@ -48,5 +48,18 @@ test('wide conversation shows inline results and explicit editing targets them',
   assert.equal(requests[1].intent,'modify');assert.equal(requests[1].artifact_id,'a1');
   fireEvent.click(screen.getByRole('button',{name:'导出 Excel'}));
   await screen.findByRole('button',{name:'下载 XLSX'});
+ }finally{cleanup();globalThis.fetch=originalFetch;}
+});
+
+test('source confirmation explicitly sends selected file IDs',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ const originalFetch=globalThis.fetch;let body:any;
+ globalThis.fetch=(async(url:any,init:any)=>{assert.equal(String(url),'/api/runs/r1/resume');body=JSON.parse(init.body);return new Response('{}',{status:200,headers:{'Content-Type':'application/json'}});}) as typeof fetch;
+ try{
+  render(<RunCard run={{id:'r1',status:'waiting',intent:'generate_case',mode:'hitp',stage:'source_review',updated_at:'2026-09-09',artifact_ids:[],experience:'reliable',graph_version:7,interrupt:{type:'source_review',message:'请选择需求文件',sources:[{id:'s1',name:'PHFSD.docx',role:'example'}]}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.equal(screen.getByRole('button',{name:'确认资料，继续当前任务'}).hasAttribute('disabled'),true);
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(screen.getByRole('button',{name:'确认资料，继续当前任务'}));
+  await waitFor(()=>assert.deepEqual(body.source_ids,['s1']));
  }finally{cleanup();globalThis.fetch=originalFetch;}
 });
