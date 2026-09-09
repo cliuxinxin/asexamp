@@ -177,9 +177,16 @@ def export_cases(artifact, layout='case', selected=None):
     profile = artifact.get('_profile', {})
     defaults = [{'field':k,'header':h} for k,h in [('id','Case ID'),('title','Title'),('type','Type'),('priority','Priority'),('preconditions','Preconditions'),('steps','Steps'),('expected','Expected Result')]]
     columns = profile.get('excel_columns') or defaults
+    from .case_fields import field_value, template_check, template_columns
     forbidden = {'refs','source_ids','source_hash','evidence','report','profile','run_id','requirement_ids'}
     if not isinstance(columns,list) or not columns or any(not isinstance(c,dict) or not isinstance(c.get('field'),str) or not isinstance(c.get('header'),str) or c['field'].startswith('_') or c['field'] in forbidden for c in columns):
         raise DomainError('Excel 列映射无效；只允许 Case 字段，不导出来源或内部记录。')
+    profile={**profile,'excel_columns':columns}
+    check=template_check(profile,items)
+    if check['missing']:
+        labels='、'.join(dict.fromkeys(g['header'] for g in check['missing']))
+        raise DomainError(f"所选模板缺少 {len(check['missing'])} 项必填内容：{labels[:250]}。请先补全模板字段；缺少业务依据时请按提示补充，不需要重新生成需求理解。",422)
+    columns=template_columns(profile)
     sheet.append([cell_safe(c['header']) for c in columns])
     for item in items:
         steps = item['steps']
@@ -192,7 +199,7 @@ def export_cases(artifact, layout='case', selected=None):
                     part = 'action' if field == 'steps' else 'expected'
                     value = '\n'.join(f'{row_index if layout == "step" else i}. {step[part]}' for i,step in enumerate(selected_steps,1))
                 else:
-                    value = item.get(field, '')
+                    value = field_value(item,column)
                     if isinstance(value,(dict,list)):
                         import json
                         value = json.dumps(value,ensure_ascii=False)

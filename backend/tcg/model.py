@@ -139,6 +139,35 @@ for format_task in ('generate_cases','review_cases','modify'):
     TASK_INSTRUCTIONS[format_task] += ' FORMAT: use profile.excel_columns definitions and profile.template_rules. Populate mapped custom Case fields from the current requirement, leaving unsupported facts unspecified. format_references are optional formatting examples/definitions only, never business evidence and never valid business refs. Core steps remains an array of {action,expected}; expected Excel cells are derived from steps[].expected by the exporter. Do not turn steps into a single string to imitate Excel.'
 TASK_INSTRUCTIONS['generate_scenarios'] += ' Generate scenarios only for in-scope business behavior; report.out_of_scope/global_requirement_map exclusions are not scenarios or coverage targets.'
 TASK_INSTRUCTIONS['review_cases'] += ' An out-of-scope scenario may lose all cases ONLY with report.scenario_exclusions:[{"scenario_id":"exact removed scenario ID","reason":"specific requirement exclusion","refs":["exact non-example evidence ID"]}]. Distinguish evidence-backed scope exclusions from accidental missing coverage; keep valid in-scope coverage.'
+TASK_INSTRUCTIONS['complete_case_fields'] = '''Return {"items":[{"id":"exact supplied case ID","fields":{"exact_requested_field":"value"},"unresolved":{"other_requested_field":"specific missing business evidence or definition"}}]}.
+For EACH supplied case, cover EXACTLY its missing_fields once, either in fields or unresolved.
+Use the dynamic columns' exact field keys and definitions; arbitrary custom fields are supported.
+Fill only requested keys. Never replace IDs, existing fields, steps, or generate another case.
+A description explains purpose, conditions and expected behavior; do not merely duplicate the title.
+Use the supplied case content and evidence. Examples define formatting only, not new business facts.
+Do not fabricate accounts, execution results or missing business rules. When evidence is insufficient,
+put a concrete clarification reason in unresolved instead of an invented value or generic filler.
+A lack of evidence is a valid unresolved result, not a JSON/schema failure. Use the requested language.
+Follow template_rules without changing this response schema. Numeric zero and boolean false are valid values.'''
+for template_task in ('generate_cases','import_cases','review_cases','modify','direct_cases'):
+    TASK_INSTRUCTIONS[template_task] += ''' TEMPLATE FIELD CONTRACT: template_contract defines each selected Excel column's
+exact field key, header, definition, value_source and required policy. Populate AI design fields from
+current evidence during this call, including arbitrary custom columns; do not assume a fixed list.
+Use canonical description for the legacy description aliases. Required means check for missing content;
+it does not authorize inventing facts. Leave unsupported business facts unspecified for clarification.
+manual fields are filled by users after actual execution; never invent or overwrite those values.
+default fields use configured default_value, including 0, false or empty string; do not infer a different value.
+derived steps / expected are produced from the canonical steps array by the exporter.
+Preserve valid existing custom fields and field notes during targeted reviews/edits.
+The output remains the CURRENT task schema: template columns describe case fields, not analysis or operations envelopes.'''
+TASK_INSTRUCTIONS['learn_template'] += ''' For EVERY column return {field,header,definition,value_source,required},
+with value_source ai (test-design content), derived (steps / expected), manual (actual results, execution
+status/date/person, defect ID, or other facts requiring human input), or default (an explicitly provided fixed
+value, also supply default_value). Required is a boolean for AI completeness before export; manual columns
+can remain blank until execution. Infer writing definitions from column instructions, not sample business
+facts. Preserve arbitrary custom field keys, column names and order. Map steps to steps, expected results to
+expected, and case description to description. For unclear columns describe what needs clarification;
+never invent their definition. Do not classify a case's EXPECTED result as an ACTUAL execution result.'''
 
 SYSTEM = '''You are TCG Case Agent, a local evidence-grounded test-design assistant.
 Return one JSON object only, no markdown fences, HTML or hidden reasoning.

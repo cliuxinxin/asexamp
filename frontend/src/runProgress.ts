@@ -1,6 +1,6 @@
 import type {Json} from './types';
 
-export const stageNames:Record<string,string>={dispatch:'识别本次任务',inputs:'检查资料用途',understand:'理解需求',clarification_gate:'收集你的补充',apply_answer:'保存澄清，沿用理解',understanding_gate:'确认理解与方案',conversation:'回答问题',summarize:'整理总结',summarizing:'整理总结',publish:'保存结果',link_scenarios:'补全场景关联',paused_edit:'修改待确认场景',queued:'等待执行',routing:'理解请求',route:'理解请求',requirement_analysis:'分析需求',analysis:'分析需求',applying_clarification:'应用澄清',clarify:'需求澄清',scenario_generation:'生成场景',scenarios:'生成场景',scenario_gate:'场景确认',scenario_review:'等待场景确认',case_generation:'生成用例',case_import:'导入用例',cases:'生成用例',case_review:'评审用例',review:'评审用例',finish:'保存结果',publishing:'保存结果',single:'处理请求',query:'证据问答',modify:'修改结果',learn_template:'学习模板'};
+export const stageNames:Record<string,string>={dispatch:'识别本次任务',inputs:'检查资料用途',understand:'理解需求',clarification_gate:'收集你的补充',apply_answer:'保存澄清，沿用理解',understanding_gate:'确认理解与方案',conversation:'回答问题',summarize:'整理总结',summarizing:'整理总结',publish:'保存结果',complete_case_fields:'补全模板字段',complete_case_descriptions:'补全用例描述',link_scenarios:'补全场景关联',paused_edit:'修改待确认场景',queued:'等待执行',routing:'理解请求',route:'理解请求',requirement_analysis:'分析需求',analysis:'分析需求',applying_clarification:'应用澄清',clarify:'需求澄清',scenario_generation:'生成场景',scenarios:'生成场景',scenario_gate:'场景确认',scenario_review:'等待场景确认',case_generation:'生成用例',case_import:'导入用例',cases:'生成用例',case_review:'评审用例',review:'评审用例',finish:'保存结果',publishing:'保存结果',single:'处理请求',query:'证据问答',modify:'修改结果',learn_template:'学习模板'};
 export type ModelOutput={id:string;node:string;task:string;label:string;text:string;status:string;at:string;elapsed?:number;attempt?:number;streaming?:boolean;requestAvailable?:boolean};
 export type ProgressEntry={id:number;at:string;text:string;tone:string;callId?:string};
 export type Feed={lastId:number;entries:ProgressEntry[];calls:Record<string,ModelOutput>;latest:Record<string,string>};
@@ -27,6 +27,8 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
  }else if(event==='model.waiting'&&call){next.calls[callId]={...call,elapsed:data.elapsed_ms};
  }else if(['model.complete','model.error','model.cancelled'].includes(event)&&call){
   if(['running','returned'].includes(call.status))next.calls[callId]={...call,status:event==='model.complete'?'returned':event==='model.error'?'failed':'cancelled',elapsed:data.elapsed_ms};
+ }else if(event==='case_fields.completion_started'){add(`正在补全 ${data.missing_count} 条用例的模板字段，保留已有内容`,'active');
+ }else if(event==='case_fields.completion_complete'){add(`已补全 ${data.completed_count} 项模板字段${data.unresolved_count?`；${data.unresolved_count} 项缺少依据，待补充`:''}`,data.unresolved_count?'waiting':'success');
  }else if(event==='analysis.reused'){add(`沿用已保存的需求理解 · ${data.requirement_count} 条 · v${data.revision}`,'success');
  }else if(event==='clarification.applied'){add('澄清已保存；需求 ID 和已有理解保持不变','success');
  }else if(event==='scenarios.linking_started'){add(`正在补全 ${data.scenario_count} 个场景的需求关联`,'active');

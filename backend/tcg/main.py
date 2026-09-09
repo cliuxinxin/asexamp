@@ -37,6 +37,12 @@ class WaitingEditInput(BaseModel):
     selected_ids: list[str] | None = None
 
 
+class CompleteDescriptionsInput(BaseModel):
+    expected_revision: int | None = None
+    profile_id: str | None = None
+    selected_ids: list[str] | None = Field(default=None,min_length=1)
+
+
 class MemoryInput(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
     kind: str = 'preference'
@@ -68,7 +74,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.5.4', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.5.6', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -128,7 +134,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.5.4', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.5.6', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -336,7 +342,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.5.4', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.5.6', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -475,7 +481,45 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     @app.get('/api/artifacts/{artifact_id}/export-options')
     def artifact_export_options(artifact_id: str):
         artifact = visible_artifact(artifact_id)
-        return {'snapshot': artifact.get('_profile',{}), 'profiles': app.state.store.list('profile',project_id=artifact['project_id'])}
+        from .case_fields import template_check
+        profiles=app.state.store.list('profile',project_id=artifact['project_id'])
+        return {'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
+                'profiles':[{**p,'field_check':template_check(p['config'],artifact['items'])} for p in profiles]}
+
+    async def schedule_field_completion(artifact_id,body,description_compat=False):
+        from .case_fields import description_column, template_check, materialize_fields
+        artifact=visible_artifact(artifact_id);store=app.state.store
+        if artifact['type']!='cases':raise DomainError('仅测试用例支持补全模板字段')
+        if body.expected_revision is not None and artifact['revision']!=body.expected_revision:
+            raise DomainError('用例已更新，请刷新后补全字段',409)
+        if body.selected_ids is not None and not set(body.selected_ids)<={r['id'] for r in artifact['items']}:
+            raise DomainError('所选用例不属于当前结果')
+        profile=artifact.get('_profile',{})
+        if body.profile_id:
+            chosen=store.get('profile',body.profile_id)
+            if chosen['project_id']!=artifact['project_id']:raise DomainError('Profile 不属于当前项目')
+            profile=chosen['config']
+        if description_compat and not description_column(profile):
+            profile={**profile,'excel_columns':[*profile.get('excel_columns',[]),{'field':'description','header':'用例描述'}]}
+        rows=[r for r in artifact['items'] if body.selected_ids is None or r['id'] in body.selected_ids]
+        gaps=template_check(profile,rows)['missing']
+        selected={g['id'] for g in gaps}
+        selected.update(r['id'] for r,updated in zip(rows,materialize_fields(rows,profile)) if r!=updated)
+        if not selected:return {'unchanged':True}
+        request=MessageInput(content='按所选模板补全缺失字段，保留已有内容；缺少业务依据时说明原因。',intent='modify',
+            experience='reliable',mode='auto',artifact_id=artifact_id,selected_ids=[r['id'] for r in rows if r['id'] in selected],profile_override=profile).model_dump()
+        request['complete_fields_only']=True
+        _,run=store.create_run(artifact['chat_id'],request)
+        app.state.engine.schedule(run['id'])
+        return {'run':run_view(run)}
+
+    @app.post('/api/artifacts/{artifact_id}/complete-fields')
+    async def complete_fields(artifact_id: str, body: CompleteDescriptionsInput):
+        return await schedule_field_completion(artifact_id,body)
+
+    @app.post('/api/artifacts/{artifact_id}/complete-descriptions')
+    async def complete_descriptions(artifact_id: str, body: CompleteDescriptionsInput):
+        return await schedule_field_completion(artifact_id,body,description_compat=True)
 
     @app.get('/api/artifacts/{artifact_id}/export')
     def artifact_export(artifact_id: str, layout: str | None = None, ids: str | None = None, profile_id: str | None = None):

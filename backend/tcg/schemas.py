@@ -128,6 +128,26 @@ def profile_config(config):
         raise DomainError('excel_columns 必须是包含 field/header 的非空数组')
     if columns and any('definition' in c and not isinstance(c['definition'],str) for c in columns):
         raise DomainError('Excel 列的 definition 必须为文本')
+    for column in columns or []:
+        source=column.get('value_source')
+        if source not in (None,'ai','manual','derived','default'):
+            raise DomainError('Excel 列的 value_source 必须为 ai/manual/derived/default')
+        if 'required' in column and not isinstance(column['required'],bool):
+            raise DomainError('Excel 列的 required 必须为布尔值')
+        if source=='derived' and column['field'] not in ('steps','expected'):
+            raise DomainError('自动汇总目前支持 steps / expected；其他列请选择 AI 生成、人工填写或固定默认值')
+        if column['field'] in ('steps','expected') and source not in (None,'derived'):
+            raise DomainError('steps / expected 必须从用例步骤自动汇总')
+        if source=='default' and ('default_value' not in column or column['default_value'] is None):
+            raise DomainError('固定默认值列需要填写 default_value（允许空字符串、0 和 false）')
+        if column['field'].startswith('_') or column['field'] in {'refs','source_ids','source_hash','evidence','report','profile','run_id','requirement_ids'}:
+            raise DomainError('Excel 列只能映射用例字段，不能映射来源或内部记录')
+    from .case_fields import template_columns
+    policies={}
+    for column in template_columns(result):
+        key=column['field'];policy={k:v for k,v in column.items() if k not in ('header','field')}
+        if key in policies and policies[key]!=policy:raise DomainError(f'同一字段 {key} 的多列定义或填写方式不一致')
+        policies[key]=policy
     if not isinstance(result.get('filename_pattern',''),str):
         raise DomainError('filename_pattern 必须为字符串')
     if len(json.dumps(result, ensure_ascii=False)) > 100_000:

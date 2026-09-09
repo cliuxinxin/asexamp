@@ -11,6 +11,8 @@ from .graph import State
 from .schemas import DomainError, INTENTS, profile_config
 from .documents import parse_text
 from .storage import public, uid, now
+from .case_fields import (template_columns, template_check, field_value, filled,
+    materialize_fields, protect_non_ai_fields, column_signature)
 
 
 class WorkflowState(State, total=False):
@@ -113,7 +115,7 @@ class WorkflowEngine(FlowEngine):
             rid=state['run_id'];run=self.store.run(rid)
             artifact=self.store.get('artifact',result['cases_ref'])
             usage={'profile_name':self.store.get('profile',run['_profile_id'])['name'],
-                   'columns':run['_profile'].get('excel_columns',[]),'rules':run['_profile'].get('template_rules',''),
+                   'columns':run['_profile'].get('excel_columns',[]),'field_contract':template_columns(run['_profile']),'rules':run['_profile'].get('template_rules',''),
                    'sheet_name':run['_profile'].get('sheet_name'),'layout':run['_profile'].get('excel_layout'),
                    'references':[{'id':sid,'name':self.store.get('source',sid)['name']} for sid in run['_source_ids'] if run['_source_roles'].get(sid)=='example'],
                    'note':'本轮已将上述定义及参考模板发送给生成与评审。导出采用本轮 Profile 快照；模板正文仅参考格式，上传文件不会自动覆盖列映射。'}
@@ -136,6 +138,30 @@ class WorkflowEngine(FlowEngine):
         return result
 
     async def prepare_result(self, rid, task, context, result):
+        profile=context.get('profile',{})
+        if task in ('generate_cases','import_cases') and isinstance(result.get('items'),list):
+            rows=result['items']
+            if all(isinstance(r,dict) for r in rows):rows=protect_non_ai_fields(rows,profile)
+            return {**result,'items':await self.complete_template_fields(rid,rows,context)}
+        if task in ('review_cases','modify') and template_columns(profile):
+            from .schemas import apply_operations
+            original=context.get('cases',[]) if task=='review_cases' else (context.get('artifact') or {}).get('items',[])
+            try:revised=apply_operations(original,result.get('operations'),context.get('selected_ids'))
+            except DomainError:return result
+            selected=context.get('selected_ids')
+            eligible=[r for r in revised if selected is None or r['id'] in selected or r['id'] not in {x['id'] for x in original}]
+            completed=await self.complete_template_fields(rid,protect_non_ai_fields(eligible,profile,original),context)
+            mapping={r['id']:r for r in completed}
+            operations=copy.deepcopy(result['operations']);handled=set()
+            for op in operations:
+                target=op.get('id') or (op.get('item') or {}).get('id')
+                if op.get('op') in ('add','update') and target in mapping:
+                    op['item']=mapping[target];handled.add(target)
+            for row in revised:
+                updated=mapping.get(row['id'])
+                if updated and updated!=row and row['id'] not in handled:
+                    operations.append({'op':'update','id':row['id'],'item':updated})
+            result={**result,'operations':operations}
         if task!='generate_scenarios' or not isinstance(result.get('items'),list):return result
         requirements={r['id'] for r in context.get('analysis',[])}
         rows=result['items']
@@ -161,6 +187,71 @@ class WorkflowEngine(FlowEngine):
         self.trace('scenarios.linking_complete',rid,scenario_count=len(rows))
         return {**result,'items':[{**row,'requirement_ids':row['requirement_ids'] if linked(row) else mapping[row['id']]} for row in rows]}
 
+    async def complete_template_fields(self,rid,rows,context,retry_unresolved=False):
+        profile=context.get('profile',{})
+        columns=template_columns(profile)
+        if not columns:return rows
+        from .schemas import validate_items
+        try:validate_items('cases',rows,{e['id']:e for e in context.get('evidence',[])})
+        except DomainError:
+            if retry_unresolved:raise
+            return rows  # Repair core case structure before any field completion.
+        rows=materialize_fields(rows,profile)
+        gaps=template_check(profile,rows)['missing']
+        requested={}
+        for gap in gaps:
+            # A known missing business fact is not a formatting failure or another review pass.
+            if retry_unresolved or not gap['reason']:requested.setdefault(gap['id'],[]).append(gap['field'])
+        if not requested:return rows
+        missing=[r for r in rows if r['id'] in requested]
+        fields={f for values in requested.values() for f in values}
+        definitions=list({c['field']:c for c in columns if c['field'] in fields}.values())
+        refs={ref for r in missing for ref in r.get('refs',[])}
+        evidence=[e for e in context.get('evidence',[]) if e['role']!='example' and e['id'] in refs]
+        def build(group):
+            ids={r['id'] for r in group};own_refs={ref for r in group for ref in r.get('refs',[])}
+            needed={f for cid in ids for f in requested[cid]}
+            return {'language':profile.get('language','中文'),'template_rules':profile.get('template_rules',''),
+                    'columns':[c for c in definitions if c['field'] in needed],
+                    'cases':[{k:v for k,v in r.items() if not k.startswith('_')} for r in group],
+                    'missing_fields':{cid:requested[cid] for cid in requested if cid in ids},
+                    'evidence':[e for e in evidence if e['id'] in own_refs]}
+        replacements={}
+        self.trace('case_fields.completion_started',rid,fields=sorted(fields),missing_count=len(missing),field_count=sum(map(len,requested.values())))
+        for group in self.capacity_groups('complete_case_fields',missing,build):
+            payload=build(group);wanted=payload['missing_fields']
+            def validate(value):
+                values=value.get('items')
+                expected={'case_ids':list(wanted),'allowed_fields':wanted,'instruction':'每个缺失字段只能在 fields 或 unresolved 中出现一次；后者填写缺少什么业务依据。不得覆盖其他字段。'}
+                bad=[{'path':'items','code':'template_fields','expected':expected}]
+                if not isinstance(values,list) or len(values)!=len(wanted):return bad
+                seen=set()
+                for item in values:
+                    if not isinstance(item,dict) or not isinstance(item.get('id'),str) or item['id'] not in wanted or item['id'] in seen:return bad
+                    seen.add(item['id']);values_map=item.get('fields',{});unresolved=item.get('unresolved',{})
+                    if not isinstance(values_map,dict) or not isinstance(unresolved,dict):return bad
+                    if set(values_map)&set(unresolved) or set(values_map)|set(unresolved)!=set(wanted[item['id']]):return bad
+                    if any(not filled(v) for v in values_map.values()):return bad
+                    if any(not isinstance(v,str) or not v.strip() for v in unresolved.values()):return bad
+                    for field,value in values_map.items():
+                        if field in ('id','title','description','type','priority','scenario_id','preconditions') and not isinstance(value,str):return bad
+                return []
+            key='v7:template_fields:'+hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+            result=await self.validated(rid,key,'complete_case_fields',payload,validate)
+            replacements.update({v['id']:v for v in result['items']})
+        policies={c['field']:c for c in definitions}
+        for row in rows:
+            if row['id'] not in replacements:continue
+            result=replacements[row['id']];row.update(result.get('fields',{}))
+            notes=row.setdefault('_template_field_notes',{})
+            for field in result.get('fields',{}):notes.pop(field,None)
+            for field,reason in result.get('unresolved',{}).items():
+                notes[field]={'reason':reason,'contract':column_signature(policies[field])}
+            if not notes:row.pop('_template_field_notes',None)
+        remaining=template_check(profile,rows)['missing']
+        self.trace('case_fields.completion_complete',rid,completed_count=sum(len(v.get('fields',{})) for v in replacements.values()),unresolved_count=len(remaining))
+        return rows
+
     def understanding_signature(self, source_ids, roles):
         values=[(sid,roles.get(sid,self.store.get('source',sid)['role'])) for sid in source_ids]
         return sorted((sid,role) for sid,role in values if role!='example')
@@ -179,6 +270,8 @@ class WorkflowEngine(FlowEngine):
                 context['profile']={k:v for k,v in context.get('profile',{}).items() if k in ('language','scope','scenario_level')}
                 context['request']={**context['request'],'content':'提取需求中的业务规则、范围和歧义，绘制业务图。本阶段不编写测试用例。'}
                 context.pop('format_references',None)
+        if task in ('generate_cases','import_cases','review_cases','modify','direct_cases'):
+            context={**context,'template_contract':template_columns(context.get('profile',{}))}
         original=context
         hint_key='json_hint:'+hashlib.sha256(json.dumps(context,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         hint=self.store.cache_get(run_id,hint_key) if run_id else None
@@ -350,6 +443,15 @@ class WorkflowEngine(FlowEngine):
 
     async def node_single(self,state):
         rid=state['run_id'];run=self.store.run(rid)
+        if run['_request'].get('complete_fields_only') or run['_request'].get('complete_descriptions_only'):
+            self.stage(rid,'modify')
+            artifact=run['_artifact_snapshot'];selected=set(run['_request']['selected_ids'])
+            context=self.context(rid)
+            rows=await self.complete_template_fields(rid,[r for r in artifact['items'] if r['id'] in selected],context,retry_unresolved=True)
+            mapping={r['id']:r for r in rows}
+            updated=self.store.revise_artifact(artifact['id'],artifact['revision'],[mapping.get(r['id'],r) for r in artifact['items']],
+                'complete_template_fields',rid,'v7:template_fields_applied')
+            return {'output_ref':updated['id']}
         if run.get('graph_version')==7 and state['intent']=='learn_template':
             self.stage(rid,'learn_template')
             context=self.context(rid)
@@ -374,6 +476,22 @@ class WorkflowEngine(FlowEngine):
         if run.get('graph_version')==7 and state['intent']=='modify' and not run.get('_artifact_snapshot'):
             artifact=self.answer(rid,'v7:no_target','当前还没有可修改的结果。请先生成或上传用例。')
             return {'output_ref':artifact['id']}
+        if run.get('graph_version')==7 and state['intent']=='modify' and run['_artifact_snapshot']['type']=='cases':
+            from .schemas import apply_operations, validate_items
+            self.stage(rid,'modify');snapshot=run['_artifact_snapshot'];context=self.context(rid)
+            if not run['_request'].get('profile_override') and not run['_request'].get('profile_id'):
+                context['profile']=snapshot.get('_profile',context['profile'])
+            evidence={e['id']:e for e in context['evidence']}
+            def validate(result):
+                try:
+                    rows=apply_operations(snapshot['items'],result.get('operations'),context.get('selected_ids'))
+                    validate_items('cases',rows,evidence)
+                    return []
+                except DomainError as exc:return [getattr(exc,'issue',{'path':'operations','code':'case_edit','expected':str(exc)})]
+            result=await self.validated(rid,'v7:case_edit','modify',context,validate)
+            rows=apply_operations(snapshot['items'],result['operations'],context.get('selected_ids'))
+            artifact=self.store.revise_artifact(snapshot['id'],snapshot['revision'],rows,'ai_modify',rid,'v7:case_edit_applied')
+            return {'output_ref':artifact['id']}
         return await super().node_single(state)
 
     def template_config(self, current, proposal):
@@ -388,6 +506,12 @@ class WorkflowEngine(FlowEngine):
 
     async def node_summarize(self,state):
         rid=state['run_id'];self.stage(rid,'summarizing');artifact=self.store.get('artifact',state['output_ref'])
+        request=self.store.run(rid)['_request']
+        if request.get('complete_fields_only') or request.get('complete_descriptions_only'):
+            rows=[r for r in artifact['items'] if r['id'] in request['selected_ids']]
+            missing=template_check(self.store.run(rid)['_profile'],rows)['missing']
+            note=f'仍有 {len(missing)} 项缺少依据，请在导出窗口查看原因并补充。' if missing else '可以按所选模板导出。'
+            return {'summary':f'已检查 {len(rows)} 条用例的模板字段，保留原用例与已有内容。'+note}
         if artifact['type'] in ('answer','proposal'):
             return {'summary':'\n'.join(i.get('description','') for i in artifact['items'])}
         reports=self.store.cache_get(rid,'v4:review_reports') or []
@@ -403,6 +527,8 @@ class WorkflowEngine(FlowEngine):
             # A presentation failure never discards already validated business results.
             narrative='AI 总结暂不可用，已保存的结果可继续查看、修改和导出。'
         labels={'analysis':'需求分析','scenarios':'测试场景','cases':'测试用例'}
+        missing=template_check(self.store.run(rid)['_profile'],artifact['items'])['missing'] if artifact['type']=='cases' else []
+        if missing:narrative+=f'\n模板中有 {len(missing)} 项字段缺少业务依据，导出窗口可查看具体原因并补充。'
         title=f'已保存{labels.get(artifact["type"],artifact["type"])}，共 {len(artifact["items"])} 条。'
         if artifact['type']=='cases':title+='已完成一轮 AI 评审。用例尚未实际执行。' if reports else '用例尚未实际执行。'
         self.store.cache_set(rid,'v7:summary',title+'\n'+narrative)
