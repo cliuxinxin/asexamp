@@ -15,9 +15,11 @@ flowchart TD
     E --> A
     D -->|"小组结果"| F["校验并保存草稿，推送 SSE"]
     F --> A
-    D -->|"格式错误"| G["仅修复错误字段，最多两次"]
+    D -->|"校验错误"| G["批量修复错误字段，重新校验"]
     G --> F
-    G -->|"仍失败"| H["保留进度，显示错误和重试入口"]
+    G -->|"连续无进展"| R["携带错误重新处理当前工作项"]
+    R --> D
+    G -->|"恢复额度耗尽"| H["保留进度，显示错误和重试入口"]
     H -->|"重试当前工作"| C
     B -->|"确认、暂停或缺业务输入"| I["gate：持久等待"]
     I -->|"继续或补充"| A
@@ -48,7 +50,7 @@ flowchart TD
 
 ## 工具与过程展示
 
-模型通过普通 JSON 返回 `kind: need_context`，可使用 `search_evidence`、`read_evidence`、`list_sections`、`list_units`、`get_facts`、`get_dependencies`、`get_artifact_items`、`get_coverage_gaps`、`get_profile_fields`。不要求内网模型支持原生 function calling。
+模型通过普通 JSON 返回 `kind: need_context`，可使用 `search_evidence`、`read_evidence`、`read_tool_result`、`list_sections`、`list_units`、`get_facts`、`get_dependencies`、`get_artifact_items`、`get_coverage_gaps`、`get_profile_fields`。不要求内网模型支持原生 function calling。
 
 每轮最多四个只读请求，连续八轮仍无成果会出现可继续的查阅暂停。相同请求无进展重复出现则报告原因；继续可增加查阅轮次，有限字段修复不会变成无限循环。
 
@@ -97,3 +99,15 @@ npm run build
 前端区分“修正已应用”和“工作项已通过完整校验”；后续字段报错不再把已应用的上一条修复标成同一次失败。过程、具体原因及模型发送内容可继续在 SSE 时间线查看。证据修复片段总预算 5500 字符；截断有明确标记，不发送整个文档。
 
 回归入口：`tests/test_incremental_recovery.py`，覆盖多处引用、自动重新处理、按需补查、重启接续、无法修复时的边界、越界补丁及上下文预算。受控模型验证恢复机制，不代表内网模型一定能生成正确业务结果。
+
+## 补读结果的统一预算与接续（2026-09-09）
+
+模型工作上下文上限仍为 16,000 个 JSON 序列化字符，完整提示另受 24,000 字符上限约束。这是程序的字符预算，不是上游实际 Token 数或模型长度限制。
+
+- 必要工作内容先占预算：当前分组原文、已接受规则、业务数据、相关配置和补充指令不截断。补读原文、目录、搜索和其他工具结果共享剩余空间。
+- 合并会超限时，后台自动发送完整条目组成的小页；已取得的完整工具结果保存在当前工作项的本地会话。模型通过 `read_tool_result {result_id,cursor}` 获取剩余条目；`result.page.next_cursor` 指向下一页，`context_window.evidence_page` 指向未装入上下文的补读原文。未发送的内容不算模型已经阅读。
+- 同一段落的分组原文与新读 excerpt 分别保留，不能用后读片段覆盖原始待分析部分。模型输出只允许引用实际发送的 evidence。
+- 每次执行（包括重启后重试）重新分配上下文，避免重复加载同一份超限内容直接失败；模型调用缓存键包含上下文摘要。SSE 显示“已按总预算分页补充资料”，诊断记录 `context.paged` 和实际字符数。
+- 纯封面、目录、版本元数据可归类为 context/non_requirement 并完成当前组；调度器继续处理后续正文。实质业务变更仍要提取，缺失条件记为问题，不能编造规则或按标题自动跳过。
+
+回归入口：`tests/test_incremental_context_recovery.py`。覆盖补读后连续三个搜索的完整生成、持久会话重启重试、完整取回分页数据、稳定续读游标、原始业务约束保留及元数据分组推进。模型能力、真实内网等待时间，以及必要工作内容本身过大的场景，不由这一补读分页修复保证。

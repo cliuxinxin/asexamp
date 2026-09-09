@@ -17,6 +17,10 @@ TASKS = {
     'work_template': '''Infer reusable formatting preferences from the current samples, not their business values. Return {kind:"patch",config:{additional_rules:"formatting preferences",case_types:["Business"],case_level:"standard"},summary:"proposal"}. This proposes configuration, never persists a Profile without the user's choice.''',
 }
 
+TOOLS += ''' Tool results share a TOTAL context budget with the current work. A result.page has result_id, cursor and next_cursor. To read omitted entries, request {tool:"read_tool_result",result_id:"provided result_id",cursor:next_cursor}. context_window.evidence_page locates locally retained read bodies; request it only if needed. Paged/omitted entries are NOT already read. Original business paragraphs and other work units remain local and will be processed by the scheduler. Never fetch the entire document merely because this group contains no business rules.'''
+
+TASKS['work_analyze'] += ''' Complete THIS evidence group, not the whole document. When it consists only of a cover, title, owner/date, table of contents or administrative version metadata, return items:[],nodes:[],edges:[] and an evidence_review entry for EVERY provided ID (context/non_requirement with a reason). This is a successful analysis; the scheduler automatically advances to the next group. Do not search for later chapters just to manufacture rules for a metadata group. A substantive business change in a version table is still a rule or uncertainty, not disposable metadata. Extract what it explicitly states, record missing details as questions/uncertain, and request focused evidence only when necessary to interpret that rule.'''
+
 for name in TASKS:
     if name not in ('work_route', 'work_impact', 'work_intake'):
         TASKS[name] = COMMON + TASKS[name] + '\n' + TOOLS
@@ -24,4 +28,3 @@ for name in TASKS:
 
 def install(instructions):
     instructions.update(TASKS)
-
