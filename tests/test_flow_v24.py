@@ -80,3 +80,28 @@ def test_explicit_review_preserves_target_and_records_changes(tmp_path):
         after=client.get('/api/artifacts/'+aid).json()
         assert after['revision']>before['revision']
         assert after['report']['review_reports'][0]['changes']['update']==1
+
+
+def test_clarification_retry_reuses_answer(tmp_path):
+    class RecoverModel(FlowModel):
+        broken=True
+        async def generate(self,task,context):
+            result=await super().generate(task,context)
+            if task=='analyze_requirement' and context.get('clarification') and self.broken:
+                result['report']['diagrams']=[]
+            return result
+    model=RecoverModel(questions=['允许哪些角色？'])
+    with TestClient(create_app(tmp_path,model)) as client:
+        _,chat,_=setup_chat(client)
+        run=until(client,start(client,chat,experience='reliable',mode='hitp'))
+        client.post('/api/runs/'+run['id']+'/resume',json={'answer':'注册用户'})
+        run=until(client,run)
+        assert run['status']=='failed',run
+        model.broken=False
+        assert client.post('/api/runs/'+run['id']+'/retry',json={}).status_code==200
+        run=until(client,run)
+        assert run['status']=='waiting' and run['interrupt']['type']=='strategy_review',run
+        sources=client.get('/api/chats/'+chat['id']).json()['sources']
+        assert len([s for s in sources if s['role']=='clarification'])==1
+        last=[c for t,c in model.calls if t=='analyze_requirement'][-1]
+        assert 'validation_repair' in last

@@ -786,7 +786,7 @@ class Engine:
             committed_review = failed_key == 'case_review' and self.store.cache_get(run_id, 'review_applied')
             if failed_key and not committed_review:
                 self.store.cache_delete(run_id, failed_key)
-            run.update(status='queued', stage='retrying', error=None)
+            run.update(status='queued', stage='retrying', error=None, _resume=None)
             self.store.save_run(run)
         self.trace('run.retried', run_id)
         self.schedule(run_id)

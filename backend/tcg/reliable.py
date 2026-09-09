@@ -189,7 +189,10 @@ class ReliableEngine(Engine):
                 if row['key'].startswith(prefix + ':'):
                     self.store.cache_delete(run_id, row['key'])
         self.store.cache_set(run_id, prefix + ':context', digest)
-        result = await self.call(run_id, prefix + ':raw', task, context)
+        recovery_key='recovery_hint:'+prefix
+        hint=self.store.cache_get(run_id,recovery_key)
+        request_context={**context, **({'validation_repair':hint} if hint else {})}
+        result = await self.call(run_id, prefix + ':raw', task, request_context)
         original = copy.deepcopy(result)
         original_errors = validator(original)
         valid_original = {}
@@ -204,16 +207,18 @@ class ReliableEngine(Engine):
         for attempt in range(3):
             errors = validator(result)
             if attempt and isinstance(result.get('items'), list) and isinstance(original.get('items'), list):
-                original_ids = {i.get('id') for i in original['items'] if isinstance(i, dict) and isinstance(i.get('id'), str)}
-                result_by_id = {i.get('id'): i for i in result['items'] if isinstance(i, dict) and isinstance(i.get('id'), str)}
-                if not original_ids <= result_by_id.keys():
-                    errors.append({'path': 'items', 'code': 'repair_deleted_items', 'expected': '保留已有条目ID'})
-                for key, item in valid_original.items():
-                    if result_by_id.get(key) != item:
-                        errors.append({'path': f'items.{key}', 'code': 'repair_changed_valid_item', 'expected': '保持原先合法条目不变'})
+                # Preserve accepted rows locally; the model only repairs invalid rows/report.
+                result = copy.deepcopy(result)
+                result_by_id = {i.get('id'): i for i in result['items'] if isinstance(i, dict)}
+                for row in original['items']:
+                    if isinstance(row, dict) and row.get('id') not in result_by_id:
+                        result['items'].append(copy.deepcopy(row))
+                result['items'] = [copy.deepcopy(valid_original.get(row.get('id'), row)) if isinstance(row,dict) else row for row in result['items']]
+                errors = validator(result)
             if not errors:
                 return self.store.cache_set(run_id, prefix + ':accepted', result)
             self.trace('batch.validation_failed', run_id, errors=errors, repair_attempt=attempt)
+            self.store.cache_set(run_id,recovery_key,{'errors':errors,'previous_response':result,'instruction':'上次输出未通过。换一种表达修复这些具体错误；只输出符合任务契约的 JSON，不编造来源。'})
             if attempt == 2:
                 raise ContractFailure(errors)
             repair = {**context, 'validation_repair': {'errors': errors, 'previous_response': result,

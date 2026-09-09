@@ -63,6 +63,9 @@ class FlowEngine(DirectEngine):
         return context
 
     async def analyze(self, run_id, key, clarification=''):
+        saved = self.store.cache_get(run_id, key+':artifact')
+        if saved:
+            return self.store.get('artifact', saved['id'])
         evidence = [e for e in self.all_evidence(run_id) if e['role'] != 'example']
         def build(values):
             return {**self.small_context(run_id, clarification=clarification,
@@ -118,6 +121,11 @@ class FlowEngine(DirectEngine):
             self.store.publish(run_id,[analysis['id']],'先核对我的需求理解与业务图，以下问题会影响后续场景。',waiting=True)
             answer=interrupt({'type':'clarification','artifact_id':analysis['id'],'questions':analysis['report']['questions']})
             key=f'v6:clarification:{round_index}'
+            import hashlib
+            answer_key='clarification_answer:'+hashlib.sha256(answer['answer'].strip().encode()).hexdigest()
+            previous_answer=self.store.cache_get(run_id,answer_key)
+            if previous_answer:
+                self.store.cache_set(run_id,key,previous_answer)
             if not self.store.cache_get(run_id,key):
                 text,chunks=parse_text(answer['answer'])
                 with self.store.transaction():
@@ -125,6 +133,7 @@ class FlowEngine(DirectEngine):
                     current=self.store.run(run_id)
                     self.store.update_run(run_id,_source_ids=current['_source_ids']+[source['id']],_source_roles={**current['_source_roles'],source['id']:'clarification'})
                     self.store.cache_set(run_id,key,{'id':source['id']})
+                    self.store.cache_set(run_id,answer_key,{'id':source['id']})
             analysis=await self.analyze(run_id,key+':analysis',answer['answer'])
             round_index+=1
         if state['intent']!='review_requirement':
