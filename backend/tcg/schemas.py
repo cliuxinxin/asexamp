@@ -126,6 +126,8 @@ def profile_config(config):
     columns = result.get('excel_columns')
     if columns is not None and (not isinstance(columns,list) or not columns or any(not isinstance(c,dict) or not isinstance(c.get('field'),str) or not c['field'] or not isinstance(c.get('header'),str) for c in columns)):
         raise DomainError('excel_columns 必须是包含 field/header 的非空数组')
+    if columns and any('definition' in c and not isinstance(c['definition'],str) for c in columns):
+        raise DomainError('Excel 列的 definition 必须为文本')
     if not isinstance(result.get('filename_pattern',''),str):
         raise DomainError('filename_pattern 必须为字符串')
     if len(json.dumps(result, ensure_ascii=False)) > 100_000:

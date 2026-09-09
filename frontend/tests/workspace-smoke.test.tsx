@@ -34,10 +34,11 @@ test('wide conversation shows inline results and explicit editing targets them',
   if(path==='/api/settings')return response({provider:'openai',model:'smoke'});
   if(path.endsWith('/profiles'))return response([{id:'profile',name:'Default',config:{}}]);
   if(path==='/api/projects/p1/chats')return response([{id:'c1',project_id:'p1',title:'Smoke'}]);
-  if(path==='/api/chats/c1')return response({chat:{id:'c1',title:'Smoke'},sources:[],runs:[],messages:generated?[{id:'m1',role:'assistant',content:'已完成',metadata:{artifact_ids:['a1']}}]:[]});
+  if(path==='/api/chats/c1')return response({chat:{id:'c1',title:'Smoke'},sources:[],runs:generated?[{id:'r1',status:'completed',experience:'reliable'}]:[],messages:generated?[{id:'stage1',role:'assistant',content:'需求理解与业务图已完成',metadata:{run_id:'r1',stage:'understand',stage_artifact_id:'analysis1',stage_revision:1}},{id:'m1',role:'assistant',content:'已完成',metadata:{run_id:'r1',artifact_ids:['a1']}}]:[]});
   if(path==='/api/chats/c1/messages'){const body=JSON.parse(init.body);requests.push(body);if(generated){modified=true;artifact.revision++;artifact.items[0].title='Updated login';}generated=true;return response({});}
   if(path==='/api/artifacts/a1/export-options')return response({snapshot:{},profiles:[]});
   if(path==='/api/artifacts/a1')return response(artifact);
+  if(path==='/api/artifacts/analysis1/revisions/1')return response({id:'analysis1',type:'analysis',title:'需求理解',revision:1,items:[{id:'REQ1',title:'历史登录规则'}],report:{summary:'阶段摘要'}});
   throw new Error('Unexpected API '+path);
  }) as typeof fetch;
  try{
@@ -50,6 +51,10 @@ test('wide conversation shows inline results and explicit editing targets them',
   await waitFor(()=>assert.equal(screen.getByRole('button',{name:'发送消息',exact:true}).hasAttribute('disabled'),false));
   fireEvent.click(screen.getByRole('button',{name:'发送消息',exact:true}));
   await screen.findByText('Login');
+  assert.equal(screen.getByRole('button',{name:/执行过程/}).getAttribute('aria-expanded'),'true');
+  const stage=screen.getByText('查看需求理解与业务图 · v1').closest('details')!;
+  stage.open=true;fireEvent(stage,new Event('toggle'));
+  await screen.findByText('历史登录规则');
   assert.equal(screen.queryByRole('region',{name:'用例工作区'}),null);
   assert.equal(requests[0].intent,'auto');assert.equal(requests[0].as_requirement,false);
   fireEvent.click(screen.getByRole('button',{name:'让 AI 修改此结果'}));
@@ -74,4 +79,14 @@ test('source confirmation explicitly sends selected file IDs',async()=>{
   fireEvent.click(screen.getByRole('button',{name:'确认资料，继续当前任务'}));
   await waitFor(()=>assert.deepEqual(body.source_ids,['s1']));
  }finally{cleanup();globalThis.fetch=originalFetch;}
+});
+
+
+test('template column definition can be edited without losing its header',async()=>{
+ const {ProfileEditor}=await import('../src/ProfileEditor');let saved:any;
+ try{
+  render(<ProfileEditor value={JSON.stringify({excel_columns:[{field:'test_data',header:'测试数据',definition:'原定义'}]})} onChange={v=>{saved=JSON.parse(v);}}/>);
+  fireEvent.change(screen.getByLabelText('第 1 列定义'),{target:{value:'字段=值'}});
+  assert.deepEqual(saved.excel_columns,[{field:'test_data',header:'测试数据',definition:'字段=值'}]);
+ }finally{cleanup();}
 });

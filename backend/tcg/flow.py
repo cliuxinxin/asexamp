@@ -78,6 +78,9 @@ class FlowEngine(DirectEngine):
             refs = {e['id']: e for e in group}
             def validate(result):
                 errors = item_errors('analysis', result.get('items'), refs)
+                for i,row in enumerate(result.get('items',[]) if isinstance(result.get('items'),list) else []):
+                    if isinstance(row,dict) and any(k in row for k in ('steps','expected','preconditions','scenario_id')):
+                        errors.append({'path':f'items[{i}]','code':'wrong_stage','expected':'需求规则对象，仅 id/title/description/refs；移除用例步骤、预期和前置条件，保留真实业务规则'})
                 report = result.get('report')
                 if not isinstance(report, dict):
                     return errors + [{'path':'report','code':'type','expected':'object'}]

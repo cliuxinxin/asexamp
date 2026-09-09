@@ -360,6 +360,8 @@ class Engine:
             fields['previous_items'] = len(context.get('previous_items', []))
         started = time.monotonic()
         with self.diagnostics.bind(**fields):
+            call_key=self.diagnostics.context.get().get('call_key')
+            if run_id and call_key:self.store.cache_set(run_id,'call_id:'+call_key,fields['call_id'])
             self.diagnostics.record('model.start', streaming=hasattr(self.gateway, 'generate_stream'))
             pending = ''
             last_flush = 0.0

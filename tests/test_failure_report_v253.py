@@ -74,7 +74,7 @@ def test_failed_step_download_contains_three_calls_but_not_large_inputs(tmp_path
             assert 'JSON syntax requirements' in text
             assert f'"position": {error_position}' in text
             assert 'mindmap' in text and 'root((登录))' in text
-            assert '不是模型返回被截断' in text
+            assert '仅为日志节选' in text
             assert 'previous_response_text' not in text
             calls=app.state.store.db.execute('SELECT call_id,payload FROM model_requests WHERE run_id=?',(run['id'],)).fetchall()
             ids=[row['call_id'] for row in calls if json.loads(row['payload'])['node']=='understand']

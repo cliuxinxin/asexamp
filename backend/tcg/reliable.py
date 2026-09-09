@@ -195,7 +195,8 @@ class ReliableEngine(Engine):
         recovery_key='recovery_hint:'+prefix
         hint=self.store.cache_get(run_id,recovery_key)
         request_context={**context, **({'validation_repair':hint} if hint else {})}
-        result = await self.call(run_id, prefix + ':raw', task, request_context)
+        result_key=prefix+':raw'
+        result = await self.call(run_id, result_key, task, request_context)
         result = await self.prepare_result(run_id, task, context, result)
         self.store.update_run(run_id,_reliable_active_prefix=prefix)
         original = copy.deepcopy(result)
@@ -222,13 +223,17 @@ class ReliableEngine(Engine):
                 errors = validator(result)
             if not errors:
                 return self.store.cache_set(run_id, prefix + ':accepted', result)
-            self.trace('batch.validation_failed', run_id, errors=errors, repair_attempt=attempt)
+            self.trace('batch.validation_failed', run_id, errors=errors, repair_attempt=attempt,
+                       call_key=result_key,call_id=self.store.cache_get(run_id,'call_id:'+result_key))
             self.store.cache_set(run_id,recovery_key,{'errors':errors,'previous_response':result,'instruction':'上次输出未通过。换一种表达修复这些具体错误；只输出符合任务契约的 JSON，不编造来源。'})
             if attempt == 2:
                 raise ContractFailure(errors)
             repair = {**context, 'validation_repair': {'errors': errors, 'previous_response': result,
                       'instruction': '一次修复列表中的全部错误。返回完整结果，保留合法条目和稳定ID；不可删除条目或编造证据来通过校验。'}}
-            result = await self.call(run_id, prefix + f':repair:{attempt}', task, repair)
+            if task=='review_cases':
+                repair['validation_repair']['instruction']='按照 errors 修复整组评审操作，不重做业务评审。保留合法 ADD/UPDATE/DELETE；如果删除项对应范围排除，应补充场景排除理由和引用；范围内的真实覆盖缺失须恢复。不得伪造引用。'
+            result_key=prefix+f':repair:{attempt}'
+            result = await self.call(run_id, result_key, task, repair)
             result = await self.prepare_result(run_id, task, context, result)
             self.store.update_run(run_id,_reliable_active_prefix=prefix)
         raise AssertionError('unreachable')
@@ -471,7 +476,7 @@ class ReliableEngine(Engine):
             scenarios = [s for s in scenario_items if s['id'] in ids]
             context = self.with_evidence(run_id, {'cases': group, 'scenarios': scenarios})
             evidence = {e['id']: e for e in context['evidence']}
-            context['output_contract'] = '一次逻辑审核的当前批次。只做ADD/UPDATE/DELETE局部修改；保留每个场景至少一个有效用例，不扩大类型范围。'
+            context['output_contract'] = '一次逻辑审核的当前批次。只做ADD/UPDATE/DELETE局部修改，不扩大类型范围。有效范围内的场景须保留用例；若需求明确排除某场景，允许删除其全部用例，但须在report.scenario_exclusions提供scenario_id、具体reason及非模板需求refs。不能无依据删除覆盖。'
             def operations_for(result):
                 operations = result.get('operations')
                 # Check the model's local contract before assigning server IDs.
@@ -499,8 +504,20 @@ class ReliableEngine(Engine):
                 except OutputValidationError as exc:
                     return [exc.issue]
                 errors = item_errors('cases', revised, evidence, ids if scenarios else None)
-                if ids - {i.get('scenario_id') for i in revised if isinstance(i.get('scenario_id'), str)}:
-                    errors.append({'path': 'operations', 'code': 'lost_scenario_coverage', 'expected': sorted(ids)})
+                missing=ids - {i.get('scenario_id') for i in revised if isinstance(i.get('scenario_id'), str)}
+                exclusions=result.get('report',{}).get('scenario_exclusions',[]) if isinstance(result.get('report'),dict) else []
+                excluded=set()
+                if not isinstance(exclusions,list):
+                    errors.append({'path':'report.scenario_exclusions','code':'type','expected':'array'});exclusions=[]
+                for j,exclusion in enumerate(exclusions):
+                    if (isinstance(exclusion,dict) and isinstance(exclusion.get('scenario_id'),str) and exclusion['scenario_id'] in missing
+                        and isinstance(exclusion.get('reason'),str) and exclusion['reason'].strip()
+                        and isinstance(exclusion.get('refs'),list) and exclusion['refs']
+                        and all(isinstance(ref,str) and ref in evidence and evidence[ref]['role']!='example' for ref in exclusion['refs'])):
+                        excluded.add(exclusion['scenario_id'])
+                    else:errors.append({'path':f'report.scenario_exclusions[{j}]','code':'invalid_exclusion','expected':'已删除覆盖的场景ID、非空排除理由及有效需求引用'})
+                if missing-excluded:
+                    errors.append({'path': 'operations', 'code': 'lost_scenario_coverage', 'expected': {'missing_scenario_ids':sorted(missing-excluded),'resolution':'恢复范围内场景的用例；若原场景不在需求范围，提供report.scenario_exclusions:[{scenario_id,reason,refs}]'}})
                 allowed = self.store.run(run_id)['_profile']['case_types']
                 if state['intent'] != 'review_case' and any(i.get('type') not in allowed for i in revised):
                     errors.append({'path': 'operations', 'code': 'unselected_type', 'expected': allowed})

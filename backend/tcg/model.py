@@ -37,7 +37,7 @@ from cryptography.fernet import Fernet
 from .diagnostics import error_details
 from .environment import model_environment, runtime_value
 from .schemas import DomainError
-from .json_output import parse_model_object, parse_issue
+from .json_output import parse_model_object, parse_issue, close_finished_containers
 
 MODEL_TIMEOUT_SECONDS = 300
 MAX_MODEL_TIMEOUT_SECONDS = 3600
@@ -133,6 +133,12 @@ TASK_INSTRUCTIONS.update({
 
 TASK_INSTRUCTIONS['modify'] += ' For an analysis artifact, when the user asks to change its understanding or diagrams, return report_patch with the changed report fields (such as summary or diagrams) alongside operations. Preserve other content and evidence.'
 TASK_INSTRUCTIONS['learn_template'] += ' Extract excel_columns as ordered objects {field,header}, excel_layout (case|step), sheet_name, filename_pattern, template_rules, scenario_level and case_level. Sample business facts are not reusable rules. Return a configuration proposal, never persist it.'
+TASK_INSTRUCTIONS['learn_template'] += ' Preserve a column definition as optional definition text inside each excel_columns object. Explain what that column contains, not sample business facts.'
+TASK_INSTRUCTIONS['analyze_requirement'] += ' STAGE BOUNDARY: items are business requirements, never test cases. Use id/title/description/refs only, with REQ IDs for new objects; preserve existing IDs during validation repair. Do not output steps, expected, preconditions, scenario_id or case formatting. Put exclusions in report.out_of_scope rather than turning them into testable requirements. Excel format rules apply only to later case authoring. strategy.depth must be quick, standard or deep, not localized key names or standard-plus.'
+for format_task in ('generate_cases','review_cases','modify'):
+    TASK_INSTRUCTIONS[format_task] += ' FORMAT: use profile.excel_columns definitions and profile.template_rules. Populate mapped custom Case fields from the current requirement, leaving unsupported facts unspecified. format_references are optional formatting examples/definitions only, never business evidence and never valid business refs. Core steps remains an array of {action,expected}; expected Excel cells are derived from steps[].expected by the exporter. Do not turn steps into a single string to imitate Excel.'
+TASK_INSTRUCTIONS['generate_scenarios'] += ' Generate scenarios only for in-scope business behavior; report.out_of_scope/global_requirement_map exclusions are not scenarios or coverage targets.'
+TASK_INSTRUCTIONS['review_cases'] += ' An out-of-scope scenario may lose all cases ONLY with report.scenario_exclusions:[{"scenario_id":"exact removed scenario ID","reason":"specific requirement exclusion","refs":["exact non-example evidence ID"]}]. Distinguish evidence-backed scope exclusions from accidental missing coverage; keep valid in-scope coverage.'
 
 SYSTEM = '''You are TCG Case Agent, a local evidence-grounded test-design assistant.
 Return one JSON object only, no markdown fences, HTML or hidden reasoning.
@@ -411,6 +417,11 @@ class LangChainGateway:
             raise
         except (json.JSONDecodeError, ValueError) as exc:
             issue=parse_issue(exc)
+            repaired=close_finished_containers(content) if isinstance(content,str) and finish_reason=='stop' else None
+            if repaired:
+                if self.diagnostics:
+                    self.diagnostics.record('model.json_local_repair',parse_error=issue,appended_closers=repaired[1])
+                return repaired[0]
             if self.diagnostics:
                 self.diagnostics.record('model.invalid_json', level='ERROR', parse_error=issue, **error_details(exc))
             where=f"（第 {issue['line']} 行，第 {issue['column']} 列）" if issue['line'] is not None else ''

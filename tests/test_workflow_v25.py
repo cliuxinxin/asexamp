@@ -54,7 +54,7 @@ def test_auto_keeps_stages_and_no_pauses(tmp_path):
         assert run['status']=='completed',run
         assert [t for t,_ in model.calls]==['analyze_requirement','generate_scenarios','generate_cases','review_cases','summarize']
         visible=client.get('/api/chats/'+chat['id']).json()['messages']
-        assert len([m for m in visible if m['role']=='assistant'])==1
+        assert [m['metadata']['stage'] for m in visible if m.get('metadata',{}).get('stage_artifact_id')]==['understand','scenarios','cases','review']
         assert client.get('/api/artifacts/'+run['artifact_ids'][0]+'/export').status_code==200
 
 

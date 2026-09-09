@@ -34,6 +34,7 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
  }else if(event==='workflow.step_saved'){
   const count=Math.max(0,...Object.values(data.item_counts??{}).map(v=>Number(v)));
   if(count)add(`${stageNames[data.step]??'当前阶段'}已保存 · ${count} 条`,'success');
+ }else if(event==='model.json_local_repair'){add('已补齐 JSON 结束括号，继续校验；无需重新请求模型','success');
  }else if(event==='json.repair_started'){add(`返回格式需要修正，正在自动修复 · 第 ${data.repair_attempt} 次`,'waiting');
  }else if(event==='node.start'){add(`开始${stageNames[node]??label}`,'active');
  }else if(event==='node.complete'){
@@ -45,7 +46,7 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
  }else if(event==='node.interrupted'){add('等待你的补充或确认','waiting');
  }else if(event.endsWith('.validation_failed')){
   if(call)next.calls[callId]={...call,status:'invalid'};
-  const issue=data.validation_error??data.errors?.[0]??data.validation_errors?.[0];add(`校验未通过${issue?`：${issue.path}，期望 ${issue.expected}，实际 ${issue.actual}`:''}`,'error');
+  const issue=data.validation_error??data.errors?.[0]??data.validation_errors?.[0];add(`校验未通过${issue?`：${issue.path} · ${issue.code??'字段错误'}，${typeof issue.expected==='string'?issue.expected:JSON.stringify(issue.expected)}${issue.actual?'，实际 '+issue.actual:''}`:''}`,'error');
  }else if(event.endsWith('.repair_started')){add('正在根据校验反馈修正格式','waiting');
  }else if(event.endsWith('.repair_complete')){add('格式修正已通过校验','success');
  }else if(event==='node.error'){

@@ -1,6 +1,7 @@
 import {useEffect,useState} from 'react';
 import {Check,ChevronDown,ChevronUp,Download,FileText,History,MessageSquare,PenLine,Plus,Trash2} from 'lucide-react';
 import {AnalysisReport} from './AnalysisReport';
+import {TemplateUsage} from './TemplateUsage';
 import {canEditItems,ItemEditor} from './ItemEditor';
 import {api,downloadArtifact,errText} from './api';
 import {Dialog,ErrorBox,Spinner,TextValue} from './ui';
@@ -27,6 +28,7 @@ export function ArtifactCard({id,refreshKey,onTarget,onChanged,compact=false,onO
  return <section className="artifact" aria-label={data.title}>
   <div className="artifact-head"><div><h3>{data.title}</h3><span className="muted small-text">{data.items.length} 条 · v{data.revision}</span></div><div className="actions"><button onClick={()=>{setReportDraft(data.report??{});setDraft(JSON.stringify(data.items,null,2));setBaseRevision(data.revision);setEditorMode(canEditItems(data.items,data.type)?'form':'json');setEditor(true);setError('');}}><PenLine size={16}/>编辑</button><button onClick={showHistory}><History size={16}/>历史版本</button>{data.type==='cases'&&<button className="text-accent" onClick={()=>{setScope(selected.length?'selected':'all');setExporting(true);}}><Download size={16}/>导出 Excel</button>}</div></div>
   <ErrorBox message={error}/>
+  {data.report?.template_usage&&<TemplateUsage usage={data.report.template_usage}/>}
   {['cases','scenarios'].includes(data.type)?<div className="table-scroll"><table><thead><tr><th className="select-col"><input type="checkbox" aria-label="选择全部条目" checked={!!data.items.length&&selected.length===data.items.length} onChange={e=>setSelected(e.target.checked?data.items.map(item=>item.id):[])}/></th><th>编号</th><th>标题</th><th>类型</th><th>优先级</th><th aria-label="展开"/></tr></thead><tbody>{data.items.map(item=><ArtifactRow key={item.id} item={item} checked={selected.includes(item.id)} expanded={expanded===item.id} onCheck={()=>setSelected(old=>old.includes(item.id)?old.filter(x=>x!==item.id):[...old,item.id])} onExpand={()=>setExpanded(expanded===item.id?undefined:item.id)} onEvidence={()=>showEvidence(item.refs??[])}/>)}</tbody></table></div>:<div className="artifact-content">{data.items.map((item,index)=><div key={item.id??index} className="analysis-item"><strong>{item.title??item.id??'结果'}</strong><p><TextValue value={item.description??item.answer??item.content??item}/></p>{item.refs?.length>0&&<button className="text-accent" onClick={()=>showEvidence(item.refs)}><FileText size={14}/>需求依据 · {item.refs.length}</button>}</div>)}</div>}
   {data.report&&Object.keys(data.report).length>0&&<details className="coverage-details"><summary>需求理解、覆盖说明与待确认项{data.report.unresolved_rows?.length?` · ${data.report.unresolved_rows.length} 条待修复`:""}</summary><AnalysisReport report={data.report}/></details>}
   <div className="artifact-foot"><button className="text-accent" disabled={!allRefs.length||loading} onClick={()=>showEvidence(allRefs)}><FileText size={16}/>查看需求依据</button><button disabled={!data.items.length} onClick={()=>onTarget(data,selected)}><MessageSquare size={15}/>{selected.length?`让 AI 修改选中 ${selected.length} 条`:'让 AI 修改此结果'}</button></div>

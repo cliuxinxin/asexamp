@@ -74,8 +74,66 @@ class WorkflowEngine(FlowEngine):
                 refs={k:v for k,v in result.items() if k.endswith('_ref') and isinstance(v,str)}
                 counts={k:len(self.store.get('artifact',v)['items']) for k,v in refs.items()}
                 self.trace('workflow.step_saved',rid,step=name,artifact_refs=refs,item_counts=counts)
+                self.publish_stage(rid,name,refs)
             return result
         return wrapped
+
+    def publish_stage(self,rid,step,refs):
+        run=self.store.run(rid)
+        if run['mode']!='auto' or step not in ('understand','scenarios','cases','review') or not refs:return
+        key='v7:stage_message:'+step
+        with self.store.transaction():
+            if self.store.cache_get(rid,key):return
+            artifact=self.store.get('artifact',next(iter(refs.values())))
+            if artifact['type'] not in ('analysis','scenarios','cases'):return
+            artifact['_visible']=True;self.store.put('artifact',artifact)
+            label={'understand':'需求理解与业务图','scenarios':'测试场景','cases':'用例草稿','review':'用例评审'}[step]
+            report=artifact.get('report',{})
+            narrative=report.get('summary') or '、'.join(str(i['title']) for i in artifact['items'][:3])
+            if step=='review':
+                narrative='\n'.join(str(r.get('summary','')) for r in (self.store.cache_get(rid,'v4:review_reports') or []))
+            content=f'{label}已完成 · {len(artifact["items"])} 条。\n'+str(narrative)
+            self.store.put('message',{'id':uid('msg_'),'project_id':run['project_id'],'chat_id':run['chat_id'],
+                'role':'assistant','content':content,'created_at':now(),'metadata':{'run_id':rid,'stage':step,
+                'stage_artifact_id':artifact['id'],'stage_revision':artifact['revision']}})
+            self.store.cache_set(rid,key,{'done':True})
+            self.store.update_run(rid)
+
+    def small_context(self,run_id,**extra):
+        context=super().small_context(run_id,**extra)
+        # Formatting examples are separate from business evidence and only sent to authoring/review.
+        if self.store.run(run_id).get('graph_version')==7 and ('scenarios' in extra or 'cases' in extra):
+            context['format_references']=[e for e in self.all_evidence(run_id) if e['role']=='example']
+            context['format_instruction']='采用当前 Profile 的字段定义、template_rules 和写作规范；format_references 仅补充格式定义，不作为业务事实或 refs。内部 steps 始终是 action/expected 对象数组；Excel 列顺序、标题与单元格换行由导出器处理。'
+        return context
+
+    async def node_cases(self,state):
+        result=await super().node_cases(state)
+        if result.get('cases_ref'):
+            rid=state['run_id'];run=self.store.run(rid)
+            artifact=self.store.get('artifact',result['cases_ref'])
+            usage={'profile_name':self.store.get('profile',run['_profile_id'])['name'],
+                   'columns':run['_profile'].get('excel_columns',[]),'rules':run['_profile'].get('template_rules',''),
+                   'sheet_name':run['_profile'].get('sheet_name'),'layout':run['_profile'].get('excel_layout'),
+                   'references':[{'id':sid,'name':self.store.get('source',sid)['name']} for sid in run['_source_ids'] if run['_source_roles'].get(sid)=='example'],
+                   'note':'本轮已将上述定义及参考模板发送给生成与评审。导出采用本轮 Profile 快照；模板正文仅参考格式，上传文件不会自动覆盖列映射。'}
+            self.save_report(artifact,{'template_usage':usage})
+        return result
+
+    def save_report(self,artifact,fields):
+        from .storage import dump
+        with self.store.transaction():
+            artifact['report']={**artifact.get('report',{}),**fields}
+            self.store.put('artifact',artifact)
+            self.store.db.execute('UPDATE revisions SET payload=? WHERE artifact_id=? AND revision=?',(dump(artifact),artifact['id'],artifact['revision']))
+
+    async def node_review(self,state):
+        result=await super().node_review(state)
+        if result.get('output_ref'):
+            artifact=self.store.get('artifact',result['output_ref'])
+            reports=self.store.cache_get(state['run_id'],'v4:review_reports') or []
+            self.save_report(artifact,{'review_reports':reports})
+        return result
 
     async def prepare_result(self, rid, task, context, result):
         if task!='generate_scenarios' or not isinstance(result.get('items'),list):return result
@@ -115,6 +173,12 @@ class WorkflowEngine(FlowEngine):
                 context={**context,'user_goal':context.get('request',{}),
                     'request':{**context.get('request',{}),'intent':names[task]},
                     'current_stage':task,'stage_instruction':'只执行当前阶段的输出契约。最终用户目标不表示现在就生成最终用例或回答。'}
+            if task=='analyze_requirement':
+                context['analysis_focus']={'guidance':context.get('profile',{}).get('additional_rules',''),
+                    'instruction':'本阶段仅采用其中的业务范围与关注点；字段、编号和步骤写作规范留给用例阶段。'}
+                context['profile']={k:v for k,v in context.get('profile',{}).items() if k in ('language','scope','scenario_level')}
+                context['request']={**context['request'],'content':'提取需求中的业务规则、范围和歧义，绘制业务图。本阶段不编写测试用例。'}
+                context.pop('format_references',None)
         original=context
         hint_key='json_hint:'+hashlib.sha256(json.dumps(context,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         hint=self.store.cache_get(run_id,hint_key) if run_id else None

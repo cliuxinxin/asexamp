@@ -33,3 +33,27 @@ def parse_issue(exc):
     return {'type':type(exc).__name__,'message':getattr(exc,'msg',str(exc)),
             'line':getattr(exc,'lineno',None),'column':getattr(exc,'colno',None),
             'position':getattr(exc,'pos',None)}
+
+
+def close_finished_containers(raw):
+    """Close containers only after complete nested values, never complete a value."""
+    text=raw.rstrip()
+    if not text.startswith('{') or not text.endswith(('}',']')):return None
+    try:parse_model_object(text);return None
+    except json.JSONDecodeError as exc:
+        if exc.pos!=len(text):return None
+    except ValueError:return None
+    stack=[];quoted=False;escaped=False
+    for char in text:
+        if quoted:
+            if escaped:escaped=False
+            elif char=='\\':escaped=True
+            elif char=='"':quoted=False
+        elif char=='"':quoted=True
+        elif char in '{[':stack.append('}' if char=='{' else ']')
+        elif char in '}]':
+            if not stack or stack.pop()!=char:return None
+    if quoted or not stack or len(stack)>16:return None
+    suffix=''.join(reversed(stack))
+    try:return parse_model_object(text+suffix),suffix
+    except ValueError:return None
