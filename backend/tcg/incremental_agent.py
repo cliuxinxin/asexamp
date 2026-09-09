@@ -586,21 +586,19 @@ class IncrementalAgent(Agent):
         if 'evidence' not in data:
             # Accepted business facts already carry their text. Do not resend documents.
             data['evidence'] = evidence_view([evidence[r] for r in refs if r in evidence], text=False)
-        current_ids = {e['id'] for e in data.get('evidence', [])}
-        supplied = data.get('evidence', [])
-        for extra_evidence in session['evidence']:
-            supplied = [e for e in supplied if e['id'] != extra_evidence['id']]
-            supplied.append(extra_evidence)
-        data['evidence'] = supplied
-        if session['observations']:
-            data['observations'] = session['observations']
         record = self.workspace.get(run_id, key)
         if record is None or record['status'] != 'running':
             self.workspace.begin(run_id, key, task, job['title'], [e['id'] for e in data['evidence']])
         self.engine.stage(run_id, task)
         self.sync(run_id)
         try:
-            context = self.bounded_context(run, task, data)
+            context = self.bounded_context(run, task, data, session=session)
+            self.store.cache_set(run_id, session_key, session)
+            window = context.get('context_window')
+            if window and session.get('window_notice_round') != session['round']:
+                self.insight(run_id, '已按总预算分页补充资料；完整结果保存在本地，需要时可继续读取。', [], 'decision')
+                session['window_notice_round'] = session['round']
+                self.store.cache_set(run_id, session_key, session)
             cache_id = self.reuse_key(run, task, context, key) if task in ('work_analyze', 'work_scenarios', 'work_cases') else None
             reused = self.reused(cache_id) if cache_id else None
             if reused is not None:
@@ -613,13 +611,13 @@ class IncrementalAgent(Agent):
                     self.insight(run_id, '复用已校验的当前规则和配置结果，无需再次请求模型。', list(refs), 'decision')
                     self.sync(run_id)
                 return {}
-            raw = await self.engine.call(run_id, key + ':call:' + str(session['round']), task, context)
+            raw = await self.engine.call(run_id, key + ':call:' + str(session['round']) + ':' + fingerprint(context)[:12], task, context)
             self.current(state)
             if raw.get('kind') == 'need_context':
                 self.read_tools(state, key, raw, session, evidence)
                 self.store.cache_set(run_id, session_key, session)
                 return {}
-            available = {e['id']: e for e in data['evidence']}
+            available = {e['id']: e for e in context['evidence']}
             result = await self.validate_reply(state, job, context, raw, available, session['round'])
             if result.get('kind') == 'need_context':
                 self.read_tools(state, key, result, session, evidence)
@@ -647,7 +645,7 @@ class IncrementalAgent(Agent):
             raise
         return {}
 
-    def bounded_context(self, run, task, data):
+    def bounded_context(self, run, task, data, session=None):
         from .model import SYSTEM, TASK_INSTRUCTIONS
         overhead = len(SYSTEM) + len(TASK_INSTRUCTIONS[task])
         data=copy.deepcopy(data)
@@ -661,7 +659,15 @@ class IncrementalAgent(Agent):
             else:
                 data['latest_instruction']={'refs':latest['refs'],'characters':len(instruction),
                     'instruction':'完整补充要求已保存为来源，请按需读取这些引用。'}
-        context = self.workspace.model_context(run, task, data, min(self.CONTEXT_BUDGET, 24000-overhead))
+        budget = min(self.CONTEXT_BUDGET, 24000-overhead)
+        context = self.workspace.model_context(run, task, data, budget)
+        if session is not None:
+            from .incremental_context import fit_context
+            context = fit_context(context, session, budget)
+            if context.get('context_window'):
+                self.engine.trace('context.paged', run['id'], task=task,
+                                  context_characters=size(context), budget=budget,
+                                  omitted_evidence=context['context_window']['omitted_evidence'])
         self.engine.trace('context.selected', run['id'], task=task, context_characters=size(context),
                           complete_prompt_characters=size(context)+overhead,
                           token_estimate=size(context)+overhead, token_estimate_method='conservative_characters_not_usage')
@@ -696,7 +702,14 @@ class IncrementalAgent(Agent):
             if signature in session['seen']:
                 raise DomainError('模型重复请求相同资料且未产生新结果；请核查当前问题或重试该工作项。')
             tool = request.get('tool')
-            if tool == 'search_evidence':
+            if tool == 'read_tool_result':
+                from .incremental_context import result_page
+                result_id = request.get('result_id')
+                contract.require(isinstance(result_id, str), 'requests.result_id', 'provided_result_id')
+                result = result_page(session, result_id, request.get('cursor', 0), budget=8000)
+                tool = session['tool_results'][result_id]['tool']
+                read += result.get('evidence', [])
+            elif tool == 'search_evidence':
                 result = self.documents.search(sorted({e['source_id'] for e in evidence.values()}), request.get('query'))
                 # Search previews are locators, not substituted full evidence.
                 result['matches'] = result['matches'][:6]
@@ -794,14 +807,12 @@ class IncrementalAgent(Agent):
             self.insight(state['run_id'], {'search_evidence':'检索相关段落','read_evidence':'读取所需原文','list_sections':'查看文档目录','get_facts':'读取已确认规则','list_units':'查看规则分组','get_dependencies':'查看关联业务图','get_artifact_items':'读取相关成果','get_coverage_gaps':'查看覆盖缺口','get_profile_fields':'读取所需配置'}[tool] + '：' + str(raw.get('summary') or '补充当前工作项所需资料。'), [e['id'] for e in result.get('evidence', [])], 'tool')
         previous={fingerprint(e):e for e in session['evidence']}
         for e in read:
-            previous[fingerprint(e)]=e
-        # Keep the newest requested evidence; old bodies remain addressable by ref.
-        retained=[]
-        for e in reversed(list(previous.values())):
-            if size(retained+[e])>6000:
-                break
-            retained.insert(0,e)
-        session.update(round=session['round']+1, observations=observations, evidence=retained)
+            signature = fingerprint(e)
+            previous.pop(signature, None)
+            previous[signature]=e
+        # Local storage can retain reads. The outgoing context has one shared
+        # budget; never silently discard read bodies while claiming they were sent.
+        session.update(round=session['round']+1, observations=observations, evidence=list(previous.values()))
 
     async def validate_reply(self, state, job, context, raw, evidence, round_number):
         task, key = job['task'], job['key']
@@ -1131,4 +1142,3 @@ class IncrementalAgent(Agent):
             self.sync(run_id)
             self.store.publish(run_id,[artifact['id']],summary,proposal=artifact.get('report',{}).get('config') if intent=='learn_template' else None)
         return {'done':True}
-
