@@ -24,7 +24,8 @@ export function RequestInspector({runId,callId,onClose}:{runId:string;callId:str
  },[path,runId,callId,identity,retry]);
  const current=snapshot?._identity===identity?snapshot:null;
  const full=current?Object.fromEntries(Object.entries(current).filter(([key])=>key!=='_identity')):null;
- const message=current?.messages?.find((m:Json)=>m.role===(tab==='system'?'system':'user'))?.content??'';
+ const rawMessage=current?.messages?.find((m:Json)=>m.role===(tab==='system'?'system':'user'))?.content??'';
+ const message=Array.isArray(rawMessage)?rawMessage.map((block:Json|string)=>typeof block==='string'?block:typeof block?.text==='string'?block.text:JSON.stringify(block)).join('\n'):String(rawMessage);
  let content=message;
  if(tab==='context'){try{content=JSON.stringify(JSON.parse(message),null,2);}catch{}}
  if(tab==='record')content=JSON.stringify(full,null,2);

@@ -12,7 +12,6 @@ MODEL_ENV = {
     'TCG_MODEL_NAME': 'model', 'TCG_MODEL_TIMEOUT_SECONDS': 'timeout_seconds',
     'TCG_API_KEY': 'api_key',
     'TCG_MODEL_HEADERS_JSON': 'headers_json', 'TCG_MODEL_AUTH_MODE': 'auth_mode',
-    'TCG_MODEL_REQUEST_MODE': 'request_mode',
 }
 
 
@@ -45,3 +44,17 @@ def model_environment(directory):
                 values[MODEL_ENV[name]] = parts[0] if parts else ''
     process = {field: os.environ[name] for name, field in MODEL_ENV.items() if name in os.environ}
     return path, (values, process)
+
+
+def runtime_value(directory, name, default):
+    """Read a non-secret runtime option with the same file/process precedence."""
+    if name in os.environ:
+        return os.environ[name]
+    path, _ = model_environment(directory)
+    if path:
+        for line in reversed(path.read_text(encoding='utf-8-sig').splitlines()):
+            match = re.fullmatch(r'(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.*)', line.strip())
+            if match and match[1] == name:
+                parts = shlex.split(match[2], comments=True, posix=True)
+                return parts[0] if parts else ''
+    return str(default)

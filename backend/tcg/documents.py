@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .schemas import DomainError
 
-MAX_UPLOAD = 15 * 1024 * 1024
+MAX_UPLOAD = 100 * 1024 * 1024
 MAX_TEXT = 2_000_000
 ALLOWED = {'.txt', '.md', '.csv', '.docx', '.pdf', '.xlsx', '.xls'}
 
@@ -35,12 +35,52 @@ def parse_text(text):
     return split_parts([(f'段落 {i}', value) for i, value in enumerate(re.split(r'\n\s*\n', text), 1)])
 
 
-def parse_document(name, data):
+def classify_source(name, text):
+    """Conservative, explainable provisional role; user correction remains authoritative."""
+    title = Path(name).stem.lower()
+    for role, words in [('example', ('样例', '示例', 'sample', 'example')),
+                        ('change', ('变更', '修订说明', 'change', 'release note')),
+                        ('clarification', ('澄清', 'clarification')),
+                        ('supplement', ('补充', 'supplement')),
+                        ('knowledge', ('知识', '操作手册', 'knowledge', 'handbook'))]:
+        if any(word in title for word in words):
+            return role, {'label': role, 'reason': '根据文件标题识别用途，请确认是否正确', 'provisional': True}
+    return 'primary', {'label': 'primary', 'reason': '暂归主要需求；无法仅凭内容可靠确定权威性，请按实际用途确认', 'provisional': True}
+
+
+def parse_with_docling(name, data):
+    """Optional local parser; weights must be installed before an offline demonstration."""
+    import tempfile
+    try:
+        from docling.document_converter import DocumentConverter
+    except ImportError:
+        raise DomainError('尚未安装Docling。请安装requirements-docling.txt并准备模型，或使用原生解析支持的文本文件') from None
+    with tempfile.TemporaryDirectory(prefix='tcg-docling-') as directory:
+        path = Path(directory) / Path(name).name
+        path.write_bytes(data)
+        result = DocumentConverter().convert(path)
+        status = getattr(result.status, 'value', str(result.status))
+        if status != 'success':
+            raise DomainError('Docling未完整解析该文件；未接受部分解析结果，请检查扫描质量或转换文件')
+        parts = []
+        for index, (item, _) in enumerate(result.document.iterate_items(), 1):
+            if hasattr(item, 'export_to_markdown'):
+                text = item.export_to_markdown(doc=result.document)
+            else:
+                text = getattr(item, 'text', '')
+            if not text:
+                continue
+            pages = sorted({p.page_no for p in getattr(item, 'prov', [])})
+            parts.append((f'Docling 区块 {index}' + (f' · 页 {pages}' if pages else ''), text))
+        return split_parts(parts)
+
+
+def parse_document(name, data, max_upload=MAX_UPLOAD, parser='native'):
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED:
         raise DomainError('不支持此格式；请上传 DOCX、文本 PDF、XLSX、XLS、CSV、TXT 或 MD')
-    if len(data) > MAX_UPLOAD:
-        raise DomainError('文件超过 15 MB 限制', 413)
+    if len(data) > max_upload:
+        raise DomainError(f'文件超过 {max_upload // (1024 * 1024)} MB 限制', 413)
     if suffix in ('.docx', '.xlsx'):
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -49,6 +89,8 @@ def parse_document(name, data):
         except zipfile.BadZipFile:
             raise DomainError('文件不是有效的 Office 文档') from None
     try:
+        if parser == 'docling' and suffix in ('.pdf', '.docx', '.xlsx'):
+            return parse_with_docling(name, data)
         if suffix in ('.txt', '.md', '.csv'):
             try:
                 text = data.decode('utf-8-sig')

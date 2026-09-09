@@ -106,10 +106,9 @@ def streaming_server(provider):
         server.server_close()
 
 
-@pytest.mark.parametrize('provider', ['openai','ollama'])
-def test_real_langchain_stream_delivers_text_before_response_completes(tmp_path, provider):
-    with streaming_server(provider) as (endpoint, release, captured):
-        gateway = LangChainGateway(saved(tmp_path, endpoint, provider))
+def test_real_ollama_stream_delivers_text_before_response_completes(tmp_path):
+    with streaming_server('ollama') as (endpoint, release, captured):
+        gateway = LangChainGateway(saved(tmp_path, endpoint, 'ollama'))
         async def exercise():
             first = asyncio.Event()
             pieces = []

@@ -54,7 +54,7 @@ def test_waiting_model_reports_heartbeat_and_cancel_is_visible(tmp_path):
         assert value['stage'] == 'requirement_analysis'
         detail = value['diagnostic']
         assert detail['batch_index'] == 1 and detail['batch_count'] == 1
-        assert detail['elapsed_ms'] >= 0 and detail['timeout_seconds'] == 3600
+        assert detail['elapsed_ms'] >= 0 and detail['timeout_seconds'] == 300
         assert detail['attempt'] == 1 and detail['max_attempts'] == 2
         assert client.post('/api/runs/' + run['id'] + '/cancel').status_code == 200
         events = client.get('/api/runs/' + run['id'] + '/diagnostics').json()['events']

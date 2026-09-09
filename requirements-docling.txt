@@ -1,0 +1,3 @@
+# Optional OCR/layout parser. Not needed for native text documents.
+# Install and provision model assets separately before offline deployment.
+docling>=2,<3

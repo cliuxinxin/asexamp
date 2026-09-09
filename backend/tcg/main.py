@@ -1,5 +1,6 @@
 """Same-origin FastAPI service, local static frontend and dependency injection."""
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -13,11 +14,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from .diagnostics import endpoint_origin, error_details
-from .documents import MAX_UPLOAD, export_cases, parse_document, parse_text
-from .graph import Engine
+from .documents import MAX_UPLOAD, classify_source, export_cases, parse_document, parse_text
+from .environment import runtime_value
+from .reliable import ReliableEngine as Engine
 from .model import LangChainGateway, Settings
 from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
-from .storage import DirectoryLock, Store, public, uid
+from .storage import DirectoryLock, Store, public, uid, now
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -33,6 +35,15 @@ def message_public(value):
 class WaitingEditInput(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
     selected_ids: list[str] | None = None
+
+
+class MemoryInput(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    kind: str = 'preference'
+
+
+class SourceRoleInput(BaseModel):
+    role: str
 
 
 def create_app(data_dir: Path | str | None = None, model_gateway=None):
@@ -53,9 +64,11 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
             finally:
                 if engine:
                     await engine.stop()
+                if 'gateway' in locals() and hasattr(gateway, 'close'):
+                    await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.1.0', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.2.0', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -115,7 +128,48 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.1.0', 'storage': 'local', 'model_configured': configured(), 'runtime': app.state.engine.runtime}
+        return {'status': 'ok', 'version': '2.2.0', 'storage': 'local', 'model_configured': configured()}
+
+    @app.get('/api/projects/{project_id}/memory')
+    def memory_list(project_id: str):
+        app.state.store.get('project', project_id)
+        return [public(m) for m in app.state.store.list('memory', project_id=project_id) if m.get('active', True)]
+
+    @app.post('/api/projects/{project_id}/memory')
+    def memory_add(project_id: str, body: MemoryInput):
+        store = app.state.store
+        store.get('project', project_id)
+        if body.kind not in ('preference', 'business') or not body.content.strip():
+            raise DomainError('请选择偏好或已确认业务规则，并填写内容')
+        with store.transaction():
+            previous = memory_list(project_id)
+            if len(previous) >= 50:
+                raise DomainError('项目确认记忆最多50条，请删除过期规则')
+            if sum(len(m['content']) for m in previous) + len(body.content) > 8000:
+                raise DomainError('项目确认记忆超过8000字符，请编辑或删除过期规则')
+            return store.put('memory', {'id': uid('mem_'), 'project_id': project_id, 'content': body.content.strip(),
+                                       'kind': body.kind, 'active': True, 'created_at': now()})
+
+    @app.delete('/api/projects/{project_id}/memory/{memory_id}')
+    def memory_delete(project_id: str, memory_id: str):
+        store = app.state.store
+        with store.transaction():
+            item = store.get('memory', memory_id)
+            if item['project_id'] != project_id:
+                raise DomainError('记忆不属于当前项目', 404)
+            return store.put('memory', {**item, 'active': False})
+
+    @app.put('/api/sources/{source_id}/role')
+    def source_role(source_id: str, body: SourceRoleInput):
+        if body.role not in ROLES:
+            raise DomainError('来源角色无效')
+        store = app.state.store
+        with store.transaction():
+            source = store.get('source', source_id)
+            if store.runs(chat_id=source['chat_id'], statuses=('queued', 'running', 'waiting')):
+                raise DomainError('请在运行结束后修改来源角色；已有任务保留原分类', 409)
+            return public(store.put('source', {**source, 'role': body.role,
+                'classification': {'label': body.role, 'reason': '用户已确认', 'provisional': False}}))
 
     @app.get('/api/settings')
     def settings_get():
@@ -187,18 +241,37 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         return {'chat': chat, 'memory': chat.get('memory'), 'messages': [message_public(m) for m in sorted(store.list('message', chat_id=chat_id), key=lambda m: m['created_at'])], 'sources': [public(s) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
 
     @app.post('/api/chats/{chat_id}/sources')
-    async def sources_upload(chat_id: str, file: UploadFile = File(...), role: str = Form('primary')):
+    async def sources_upload(chat_id: str, file: UploadFile = File(...), role: str = Form('auto')):
         store = app.state.store
         store.get('chat', chat_id)
-        if role not in ROLES:
+        if role not in ROLES and role != 'auto':
             raise DomainError('来源 role 无效')
-        data = await file.read(MAX_UPLOAD + 1)
-        if len(data) > MAX_UPLOAD:
-            raise DomainError('文件超过 15 MB 限制', 413)
+        try:
+            max_mb = int(runtime_value(directory, 'TCG_MAX_UPLOAD_MB', '100'))
+            if not 1 <= max_mb <= 500:
+                raise ValueError()
+        except ValueError:
+            raise DomainError('TCG_MAX_UPLOAD_MB 必须在1至500之间') from None
+        limit = max_mb * 1024 * 1024
+        data = await file.read(limit + 1)
+        if len(data) > limit:
+            raise DomainError(f'文件超过 {max_mb} MB 限制', 413)
         name = Path((file.filename or 'document.txt').replace('\\', '/')).name[:200]
+        digest = hashlib.sha256(data).hexdigest()
+        existing = next((s for s in store.list('source', chat_id=chat_id) if s.get('_active') and s.get('_sha256') == digest
+                         and (role == 'auto' or s['role'] == role)), None)
+        if existing:
+            return public(existing)
         started = time.monotonic()
         app.state.engine.diagnostics.record('source.parse_start', chat_id=chat_id, file_type=Path(name).suffix.lower(), bytes=len(data))
-        text, chunks = await asyncio.to_thread(parse_document, name, data)
+        parser = runtime_value(directory, 'TCG_DOCUMENT_PARSER', 'native')
+        if parser not in ('native', 'docling'):
+            raise DomainError('TCG_DOCUMENT_PARSER 必须为native或docling')
+        text, chunks = await asyncio.to_thread(parse_document, name, data, limit, parser)
+        if role == 'auto':
+            role, classification = classify_source(name, text)
+        else:
+            classification = {'label': role, 'reason': '用户指定', 'provisional': False}
         app.state.engine.diagnostics.record('source.parse_complete', chat_id=chat_id, chunks=len(chunks), characters=len(text), elapsed_ms=round((time.monotonic() - started) * 1000))
         source_id = uid('src_')
         upload_dir = directory / 'uploads'
@@ -206,7 +279,13 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         path = upload_dir / (source_id + Path(name).suffix.lower())
         await asyncio.to_thread(path.write_bytes, data)
         try:
-            source = store.add_source(chat_id, name, role, text, chunks, str(path.relative_to(directory)), source_id)
+            with store.transaction():
+                existing = next((s for s in store.list('source', chat_id=chat_id) if s.get('_active') and s.get('_sha256') == digest and s['role'] == role), None)
+                if existing:
+                    path.unlink(missing_ok=True)
+                    return public(existing)
+                source = store.add_source(chat_id, name, role, text, chunks, str(path.relative_to(directory)), source_id)
+                source = store.put('source', {**source, '_sha256': digest, 'classification': classification})
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -251,36 +330,16 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     def run_get(run_id: str):
         return run_view(app.state.store.run(run_id))
 
-    @app.get('/api/runs/{run_id}/work')
-    def run_work(run_id: str, cursor: int = 0, limit: int = 20):
-        if cursor < 0 or not 1 <= limit <= 100:
-            raise DomainError('cursor 必须非负，limit 必须为 1–100')
-        view = app.state.engine.agent.workspace.view(run_id)
-        all_items = view['items']
-        return {**view, 'items': all_items[cursor:cursor+limit],
-                'next_cursor': cursor+limit if cursor+limit < len(all_items) else None}
-
-    @app.post('/api/runs/{run_id}/pause')
-    def run_pause(run_id: str):
-        store = app.state.store
-        with store.transaction():
-            run = store.run(run_id)
-            if run.get('graph_version') != 3 or run['status'] not in ('running', 'queued'):
-                raise DomainError('只有正在进行的新版任务可以暂停', 409)
-            store.update_run(run_id, _pause_requested=True)
-            app.state.engine.agent.update(run_id, pause_requested=True)
-        return run_view(store.run(run_id))
-
     @app.get('/api/runs/{run_id}/diagnostics')
     def run_diagnostics(run_id: str, download: bool = False):
         engine, store = app.state.engine, app.state.store
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.1.0', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.2.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
-            'runtime': {**engine.runtime, 'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
+            'runtime': {'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
             'context': {'conversation_messages': history, 'history_limit': 12,
                         'history_omitted': max(0, run.get('_history_total', history) - history),
                         'source_count': len(run.get('_source_ids', [])),
@@ -354,10 +413,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/artifacts/{artifact_id}')
     def artifact_get(artifact_id: str):
-        artifact = app.state.store.get('artifact', artifact_id)
-        if not artifact.get('_visible') and not artifact.get('_preview_run_id'):
-            raise DomainError('未找到可查看的 Artifact', 404)
-        return {**public(artifact), 'preview': not artifact.get('_visible', False)}
+        return public(visible_artifact(artifact_id))
 
     @app.put('/api/artifacts/{artifact_id}')
     def artifact_put(artifact_id: str, body: RevisionInput):

@@ -173,26 +173,17 @@ class Store:
                 self.put('chunk', {'id': f'{source_id}#P{index}', 'project_id': chat['project_id'], 'chat_id': chat_id, 'source_id': source_id, 'role': role, **chunk})
         return source
 
-    def evidence(self, source_ids):
-        sources = [self.get('source', source_id) for source_id in source_ids]
-        chunks_by_source = {source_id: [] for source_id in source_ids}
-        # Filter in SQLite before deserializing. Unselected documents may be
-        # large and must not be loaded just to read one authorized source.
-        with self.lock:
-            for source in sources:
-                rows = self.db.execute(
-                    "SELECT payload FROM objects WHERE kind='chunk' AND project_id=? "
-                    "AND json_extract(payload, '$.source_id')=?",
-                    (source['project_id'], source['id'])).fetchall()
-                chunks_by_source[source['id']] = [json.loads(row['payload']) for row in rows]
-
-        def paragraph_key(chunk):
-            _, marker, number = chunk.get('id', '').rpartition('#P')
-            return (0, int(number)) if marker and number.isdigit() else (1, chunk.get('id', ''))
-
-        for chunks in chunks_by_source.values():
-            chunks.sort(key=paragraph_key)
-        return [chunk for source_id in source_ids for chunk in chunks_by_source[source_id]]
+    def evidence(self, source_ids, role_snapshot=None):
+        evidence = []
+        by_chat = {}
+        for source_id in source_ids:
+            source = self.get('source', source_id)
+            chat_id = source['chat_id']
+            if chat_id not in by_chat:
+                by_chat[chat_id] = self.list('chunk', chat_id=chat_id)
+            role = (role_snapshot or {}).get(source_id, source['role'])
+            evidence.extend({**c, 'role': role} for c in by_chat[chat_id] if c['source_id'] == source_id)
+        return evidence
 
     def deactivate_source(self, source_id):
         with self.transaction():
@@ -224,8 +215,6 @@ class Store:
                 artifact = self.get('artifact', request['artifact_id'])
                 if artifact['project_id'] != chat['project_id'] or artifact['chat_id'] != chat_id:
                     raise DomainError('Artifact 不属于当前对话')
-                if not artifact.get('_visible'):
-                    raise DomainError('阶段草稿仅供查看；请等待最终成果后再创建修改或评审任务。')
             elif request['intent'] in ('auto', 'query', 'modify', 'review_case', 'learn_template'):
                 visible = [a for a in self.list('artifact', chat_id=chat_id) if a.get('_visible')]
                 if request['intent'] == 'review_case':
@@ -244,8 +233,18 @@ class Store:
             # an operation on a historical artifact or a fresh generation.
             run['_history_total'] = len(history)
             run['_artifact_source_ids'] = artifact.get('_source_ids', []) if artifact else []
+            if request.get('experience') == 'reliable':
+                depth = request.get('depth', 'standard')
+                depth = depth if depth in ('quick', 'standard', 'deep') else 'standard'
+                config = dict(profile['config'], case_level=depth, scenario_level=depth)
+                if request.get('case_types'):
+                    config['case_types'] = list(dict.fromkeys(request['case_types']))
+                run.update(experience='reliable', graph_version=4, _profile=config,
+                           _memory=[m for m in self.list('memory', project_id=chat['project_id']) if m.get('active', True)],
+                           _source_roles={sid: self.get('source', sid)['role'] for sid in sources},
+                           progress={'phase': 'queued', 'completed': 0, 'total': 0, 'label': '准备任务'})
             if request.get('experience') == 'agent':
-                run.update(experience='agent', graph_version=3, _instruction_version=0, _applied_instruction_version=0, _instructions=[],
+                run.update(experience='agent', graph_version=2, _instruction_version=0, _applied_instruction_version=0, _instructions=[],
                            agent={'depth': request.get('depth') if request.get('depth') in ('quick', 'standard', 'deep') else 'standard', 'rationale': '', 'plan': [], 'insights': [], 'pending_instructions': 0})
             self.db.execute('INSERT INTO runs VALUES(?,?,?,?,?)', (run_id, chat_id, chat['project_id'], 'queued', dump(run)))
             chat['updated_at'] = now()
@@ -339,9 +338,9 @@ class Store:
             if existing:
                 return self.get('artifact', existing['id'])
             run = self.run(run_id)
-            evidence = {e['id']: e for e in self.evidence(run['_source_ids'])}
+            evidence = {e['id']: e for e in self.evidence(run['_source_ids'], run.get('_source_roles'))}
             validate_items(kind, items, evidence)
-            value = {'id': uid('art_'), 'chat_id': run['chat_id'], 'project_id': run['project_id'], 'type': kind, 'title': title, 'revision': 1, 'items': items, 'created_at': now(), '_source_ids': run['_source_ids'], '_profile': run['_profile'], '_visible': False}
+            value = {'id': uid('art_'), 'chat_id': run['chat_id'], 'project_id': run['project_id'], 'type': kind, 'title': title, 'revision': 1, 'items': items, 'created_at': now(), '_source_ids': run['_source_ids'], '_source_roles': run.get('_source_roles', {}), '_profile': run['_profile'], '_visible': False}
             if report is not None:
                 value['report'] = report
             self.put('artifact', value)
@@ -360,15 +359,17 @@ class Store:
             if previous['revision'] != expected_revision:
                 raise DomainError('Artifact 已更新，请刷新后重试', 409)
             source_ids = previous['_source_ids']
+            roles = dict(previous.get('_source_roles', {}))
             if run_id:
                 source_ids = list(dict.fromkeys(source_ids + self.run(run_id)['_source_ids']))
-            validate_items(previous['type'], items, {e['id']: e for e in self.evidence(source_ids)})
+                roles.update(self.run(run_id).get('_source_roles', {}))
+            validate_items(previous['type'], items, {e['id']: e for e in self.evidence(source_ids, roles)})
             before, after = {i['id']: i for i in previous['items']}, {i['id']: i for i in items}
             diff = {'added': [i for i in after if i not in before], 'deleted': [i for i in before if i not in after], 'updated': [i for i in after if i in before and before[i] != after[i]]}
-            result = {**previous, 'items': items, 'revision': expected_revision + 1, '_source_ids': source_ids}
+            result = {**previous, 'items': items, 'revision': expected_revision + 1, '_source_ids': source_ids, '_source_roles': roles}
             if previous.get('report'):
                 from .agent_contracts import refreshed_report
-                result['report'] = refreshed_report(previous['type'], items, previous['report'], {e['id']: e for e in self.evidence(source_ids)})
+                result['report'] = refreshed_report(previous['type'], items, previous['report'], {e['id']: e for e in self.evidence(source_ids, roles)})
             self.put('artifact', result)
             self.db.execute('INSERT INTO revisions VALUES(?,?,?,?,?,?)', (artifact_id, result['revision'], dump(result), now(), reason, dump(diff)))
             self.audit(artifact_id, reason, {'revision': result['revision'], 'diff': diff})

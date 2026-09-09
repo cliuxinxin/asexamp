@@ -59,7 +59,8 @@ class TextInput(NameInput):
 
 
 class MessageInput(BaseModel):
-    experience: Literal['legacy', 'agent'] = 'legacy'
+    experience: Literal['legacy', 'agent', 'reliable'] = 'legacy'
+    case_types: list[Literal['Business', 'Negative', 'Boundary', 'Security']] | None = Field(default=None, min_length=1, max_length=4)
     depth: Literal['auto', 'quick', 'standard', 'deep'] = 'auto'
     confirm_strategy: bool = True
     content: str = Field(min_length=1, max_length=100_000)
@@ -92,7 +93,6 @@ class RestoreInput(BaseModel):
 class ResumeInput(BaseModel):
     answer: str | None = Field(default=None, max_length=100_000)
     approved: bool | None = None
-    proceed: bool = False
 
 
 class SettingsInput(BaseModel):
@@ -104,7 +104,6 @@ class SettingsInput(BaseModel):
     headers: dict[str, str] | None = None
     clear_headers: bool = False
     auth_mode: Literal['bearer', 'headers'] = 'bearer'
-    request_mode: Literal['standard', 'minimal'] | None = None
     timeout_seconds: int = Field(default=3600, ge=5, le=3600)
 
 

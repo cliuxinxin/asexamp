@@ -8,12 +8,12 @@ from fastapi.testclient import TestClient
 from tcg.main import create_app
 from tcg.model import LangChainGateway, Settings
 from test_backend_api import Model, setup_chat, start, until
-from test_backend_model import saved
+from test_backend_model import completion_server, saved
 from test_sse_progress import streaming_server
 
 
 @pytest.mark.parametrize('source', ['default', 'saved', 'env', 'process'])
-def test_legacy_timeout_configuration_runs_with_sixty_minutes(tmp_path, monkeypatch, source):
+def test_timeout_configuration_is_preserved(tmp_path, monkeypatch, source):
     if source == 'saved':
         (tmp_path / 'settings.json').write_text(json.dumps({'timeout_seconds':120, 'model':'existing'}))
     if source == 'env':
@@ -21,38 +21,52 @@ def test_legacy_timeout_configuration_runs_with_sixty_minutes(tmp_path, monkeypa
     if source == 'process':
         monkeypatch.setenv('TCG_MODEL_TIMEOUT_SECONDS', '300')
     settings = Settings(tmp_path)
-    assert settings.value['timeout_seconds'] == 3600
-    assert settings.public()['timeout_policy'] == 'fixed_60_minutes'
+    expected = {'default': 300, 'saved': 120, 'env': 120, 'process': 300}[source]
+    assert settings.value['timeout_seconds'] == expected
+    assert settings.public()['timeout_policy'] == 'configured_per_attempt'
     if source in ('saved', 'env'):
         assert settings.public()['model'] == 'existing'
 
 
-def test_settings_api_accepts_hour_and_normalizes_old_ui_payload(tmp_path):
+def test_settings_api_preserves_configured_timeout(tmp_path):
     with TestClient(create_app(tmp_path, Model())) as client:
         for seconds in (3600,120):
             response = client.put('/api/settings', json={'provider':'ollama','base_url':'http://127.0.0.1:11434','model':'local','timeout_seconds':seconds})
             assert response.status_code == 200, response.text
-            assert response.json()['timeout_seconds'] == 3600
+            assert response.json()['timeout_seconds'] == seconds
         _, chat, _ = setup_chat(client)
         run = until(client, start(client, chat, intent='query'))
         events = client.get('/api/runs/' + run['id'] + '/diagnostics').json()['events']
-        assert all(e['timeout_seconds'] == 3600 for e in events if e['event'] == 'model.start')
+        assert all(e['timeout_seconds'] == 120 for e in events if e['event'] == 'model.start')
 
 
-@pytest.mark.parametrize('provider', ['openai','ollama'])
-def test_gateway_records_exact_messages_before_stream_finishes_and_uses_hour_timeouts(tmp_path, monkeypatch, provider):
-    with streaming_server(provider) as (endpoint, release, captured):
-        settings = saved(tmp_path, endpoint, provider)
+def test_openai_gateway_records_exact_wire_messages_and_configured_timeout(tmp_path):
+    with completion_server({'ok': True}) as (endpoint, captured):
+        settings = saved(tmp_path, endpoint)
+        gateway = LangChainGateway(settings)
+        snapshots = []
+        gateway.request_recorder = lambda snapshot: snapshots.append(json.loads(json.dumps(snapshot)))
+        context = {'request': {'content': 'VERIFY-EXACT-INPUT'},
+                   'validation_repair': {'previous_response': {'invalid': True}}}
+        asyncio.run(gateway.generate_stream('connection_test', context, lambda text: asyncio.sleep(0)))
+        assert snapshots[0]['messages'] == captured[0]['messages']
+        assert json.loads(snapshots[0]['messages'][1]['content'][0]['text']) == context
+        assert snapshots[0]['timeout_seconds'] == 5
+        assert snapshots[0]['parameters'] == {}
+        context['request']['content'] = 'LATER-CHANGE'
+        assert 'LATER-CHANGE' not in json.dumps(snapshots[0])
+        asyncio.run(gateway.close())
+
+
+def test_ollama_records_exact_messages_before_stream_finishes(tmp_path, monkeypatch):
+    with streaming_server('ollama') as (endpoint, release, captured):
+        settings = saved(tmp_path, endpoint, 'ollama')
         gateway = LangChainGateway(settings)
         snapshots = []
         gateway.request_recorder = lambda snapshot: snapshots.append(json.loads(json.dumps(snapshot)))
         constructors = []
-        if provider == 'openai':
-            import langchain_openai as module
-            name = 'ChatOpenAI'
-        else:
-            import langchain_ollama as module
-            name = 'ChatOllama'
+        import langchain_ollama as module
+        name = 'ChatOllama'
         original = getattr(module, name)
         def construct(**kwargs):
             constructors.append(kwargs)
@@ -70,9 +84,9 @@ def test_gateway_records_exact_messages_before_stream_finishes_and_uses_hour_tim
                 assert len(snapshots) == 1
                 assert snapshots[0]['messages'] == captured[0]['messages']
                 assert json.loads(snapshots[0]['messages'][1]['content']) == context
-                assert snapshots[0]['timeout_seconds'] == 3600
+                assert snapshots[0]['timeout_seconds'] == 5
                 kwargs = constructors[0]
-                assert (kwargs['timeout'] if provider == 'openai' else kwargs['client_kwargs']['timeout']) == 3600
+                assert kwargs['client_kwargs']['timeout'] == 5
                 context['request']['content'] = 'LATER-CHANGE'
                 assert 'LATER-CHANGE' not in json.dumps(snapshots[0])
             finally:

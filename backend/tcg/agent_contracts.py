@@ -1,5 +1,4 @@
 """Strict, evidence-grounded contracts for the version 2 design agent."""
-import hashlib
 import re
 
 from .schemas import OutputValidationError, validate_items
@@ -10,21 +9,6 @@ DEPTH_GUIDANCE = {
     'deep': 'Cover all confirmed requirements and branches plus interacting rules, boundary neighbors, transition sequences, recovery paths and cross-module dependencies. Use decision tables, state-transition and combination techniques where applicable.',
 }
 
-GRAPH_ID = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,79}')
-
-
-def valid_graph_id(value):
-    return isinstance(value, str) and GRAPH_ID.fullmatch(value) is not None
-
-
-def namespaced_id(prefix, identifier, max_length):
-    """Add a stable namespace without exceeding the receiving contract."""
-    combined = prefix + identifier
-    if len(combined) <= max_length:
-        return combined
-    digest = hashlib.sha256(combined.encode()).hexdigest()[:12]
-    return combined[:max_length - len(digest) - 1] + '_' + digest
-
 
 def require(condition, path, expected='valid agent contract'):
     if not condition:
@@ -32,17 +16,14 @@ def require(condition, path, expected='valid agent contract'):
 
 
 def strings(value, path, nonempty=False):
-    require(isinstance(value, list), path, 'array_of_nonempty_strings')
+    require(isinstance(value, list) and all(isinstance(x, str) and x.strip() for x in value), path, 'array_of_nonempty_strings')
     require(not nonempty or bool(value), path, 'nonempty_array')
-    for index, item in enumerate(value):
-        require(isinstance(item, str) and bool(item.strip()), f'{path}[{index}]', 'nonempty_string')
     return value
 
 
 def refs(value, evidence, path):
     strings(value, path, True)
-    for index, ref in enumerate(value):
-        require(ref in evidence and evidence[ref]['role'] != 'example', f'{path}[{index}]', 'provided_non_example_evidence_id')
+    require(all(r in evidence and evidence[r]['role'] != 'example' for r in value), path, 'provided_non_example_evidence_ids')
 
 
 def text(value, path):
@@ -50,7 +31,7 @@ def text(value, path):
     return value
 
 
-def plan(result, available, evidence, requested, allow_examples=False, require_insight_refs=False):
+def plan(result, available, evidence, requested, allow_examples=False):
     require(result.get('depth') in DEPTH_GUIDANCE, 'depth', 'quick|standard|deep')
     require(requested == 'auto' or requested == result['depth'], 'depth', 'requested_depth')
     text(result.get('rationale'), 'rationale')
@@ -58,84 +39,63 @@ def plan(result, available, evidence, requested, allow_examples=False, require_i
     steps = result.get('plan')
     require(isinstance(steps, list) and 1 <= len(steps) <= 12, 'plan', '1..12_steps')
     ids = set()
-    for index, step in enumerate(steps):
-        path = f'plan[{index}]'
-        require(isinstance(step, dict), path, 'object')
-        identifier = text(step.get('id'), path + '.id')
-        require(identifier not in ids, path + '.id', 'unique_id')
+    for step in steps:
+        require(isinstance(step, dict), 'plan.step', 'object')
+        identifier = text(step.get('id'), 'plan.id')
+        require(identifier not in ids, 'plan.id', 'unique_id')
         ids.add(identifier)
-        text(step.get('title'), path + '.title')
+        text(step.get('title'), 'plan.title')
     insight = result.get('insight')
     require(isinstance(insight, dict), 'insight', 'object')
     text(insight.get('summary'), 'insight.summary')
     if allow_examples:
         strings(insight.get('refs'), 'insight.refs')
-        for index, ref in enumerate(insight['refs']):
-            require(ref in evidence, f'insight.refs[{index}]', 'provided_sample_evidence_id')
-    elif insight.get('refs'):
+        require(all(r in evidence for r in insight['refs']), 'insight.refs', 'provided_sample_evidence_ids')
+    elif any(e['role'] != 'example' for e in evidence.values()):
         refs(insight.get('refs'), evidence, 'insight.refs')
-    elif require_insight_refs:
-        require(False, 'insight.refs', 'nonempty_evidence_refs_for_grounded_insight')
     else:
-        require(insight.get('refs') == [], 'insight.refs', 'empty_or_provided_evidence_refs')
+        require(insight.get('refs') == [], 'insight.refs', 'empty_without_evidence')
     return result
 
 
-def analysis(result, evidence, depth, allow_empty=False):
+def analysis(result, evidence, depth):
     items = result.get('items')
     validate_items('analysis', items, evidence)
-    require(bool(items) or allow_empty, 'items', 'nonempty_requirements')
-    for index, item in enumerate(items):
-        require(not item.get('assumption'), f'items[{index}].assumption', 'assumptions_separate_from_requirements')
+    require(bool(items), 'items', 'nonempty_requirements')
+    require(not any(i.get('assumption') for i in items), 'items.assumption', 'assumptions_separate_from_requirements')
     supplied = {r for r, e in evidence.items() if e['role'] in ('primary', 'change', 'supplement', 'clarification')}
+    require(supplied <= {r for i in items for r in i['refs']}, 'items.refs', 'all_supplied_business_evidence_analyzed')
     report = result.get('report')
     require(isinstance(report, dict), 'report', 'object')
-    review = report.get('evidence_review', [])
-    require(isinstance(review, list), 'report.evidence_review', 'array')
-    reviewed = set()
-    for index, entry in enumerate(review):
-        path = f'report.evidence_review[{index}]'
-        require(isinstance(entry, dict), path, 'object')
-        require(entry.get('ref') in evidence and entry.get('ref') not in reviewed, path + '.ref', 'unique_provided_evidence_id')
-        require(entry.get('classification') in ('context', 'non_requirement', 'uncertain'), path + '.classification', 'context|non_requirement|uncertain')
-        text(entry.get('reason'), path + '.reason')
-        reviewed.add(entry['ref'])
-    require(supplied <= {r for i in items for r in i['refs']} | reviewed, 'items.refs', 'all_supplied_business_evidence_analyzed')
-    strings(report.get('questions', []), 'report.questions')
-    strings(report.get('assumptions', []), 'report.assumptions')
+    strings(report.get('questions', []), 'questions')
+    strings(report.get('assumptions', []), 'assumptions')
     model = report.get('business_model')
-    require(isinstance(model, dict), 'report.business_model', 'object')
+    require(isinstance(model, dict), 'business_model', 'object')
     nodes, edges = model.get('nodes'), model.get('edges')
-    require(isinstance(nodes, list), 'report.business_model.nodes', 'array')
-    require(1 <= len(nodes) <= 500, 'report.business_model.nodes', '1..500_nodes')
-    require(isinstance(edges, list), 'report.business_model.edges', 'array')
-    require(len(edges) <= 1000, 'report.business_model.edges', '0..1000_edges')
+    require(isinstance(nodes, list) and 1 <= len(nodes) <= 500 and isinstance(edges, list) and len(edges) <= 1000, 'business_model', 'bounded_nodes_and_edges')
     ids = set()
-    for field, collection in (('nodes', nodes), ('edges', edges)):
-        for index, item in enumerate(collection):
-            path = f'report.business_model.{field}[{index}]'
-            require(isinstance(item, dict), path, 'object')
+    for collection in (nodes, edges):
+        for item in collection:
+            require(isinstance(item, dict), 'business_model.item', 'object')
             identifier = item.get('id')
-            require(valid_graph_id(identifier) and identifier not in ids, path + '.id', 'unique_stable_graph_id')
+            require(isinstance(identifier, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,79}', identifier) is not None and identifier not in ids, 'business_model.id', 'unique_stable_graph_id')
             ids.add(identifier)
-            text(item.get('label'), path + '.label')
-            refs(item.get('refs'), evidence, path + '.refs')
+            text(item.get('label'), 'business_model.label')
+            refs(item.get('refs'), evidence, 'business_model.refs')
     node_ids = {n['id'] for n in nodes}
-    for index, edge in enumerate(edges):
-        for field in ('from', 'to'):
-            require(edge.get(field) in node_ids, f'report.business_model.edges[{index}].{field}', 'existing_node_ids')
+    for edge in edges:
+        require(edge.get('from') in node_ids and edge.get('to') in node_ids, 'business_model.edge', 'existing_node_ids')
     strategy = report.get('strategy')
-    require(isinstance(strategy, dict), 'report.strategy', 'object')
-    require(strategy.get('depth') == depth, 'report.strategy.depth', 'resolved_depth')
-    text(strategy.get('rationale'), 'report.strategy.rationale')
-    strings(strategy.get('techniques'), 'report.strategy.techniques', True)
-    strings(strategy.get('scope'), 'report.strategy.scope', True)
+    require(isinstance(strategy, dict) and strategy.get('depth') == depth, 'strategy.depth', 'resolved_depth')
+    text(strategy.get('rationale'), 'strategy.rationale')
+    strings(strategy.get('techniques'), 'strategy.techniques', True)
+    strings(strategy.get('scope'), 'strategy.scope', True)
     # Render only our validated structured model; arbitrary model Mermaid is never executed.
     def label(value):
         return re.sub(r'[^\w\s.,:()/\u4e00-\u9fff-]', ' ', value)[:160].replace('\n', ' ')
     mermaid = 'flowchart TD\n' + '\n'.join(f'  {n["id"]}["{label(n["label"])}"]' for n in nodes)
     mermaid += '\n' + '\n'.join(f'  {e["from"]} -->|"{label(e["label"])}"| {e["to"]}' for e in edges)
-    require(len(mermaid) <= 30000, 'report.diagrams', 'max_30000_characters')
+    require(len(mermaid) <= 30000, 'diagrams', 'max_30000_characters')
     report['diagrams'] = [{'id': 'business-model', 'title': '业务模型', 'mermaid': mermaid}]
     return result
 
@@ -146,16 +106,13 @@ def generated(result, kind, evidence, analysis_items, model, scenarios=None):
     require(isinstance(result.get('has_more'), bool), 'has_more', 'boolean')
     requirements, branches = {i['id'] for i in analysis_items}, {e['id'] for e in model['edges']}
     by_scenario = {s['id']: s for s in scenarios or []}
-    for index, item in enumerate(items):
-        path = f'items[{index}]'
-        reqs = strings(item.get('requirement_ids'), path + '.requirement_ids', True)
-        paths = strings(item.get('branch_ids'), path + '.branch_ids')
-        require(set(reqs) <= requirements, path + '.requirement_ids', 'confirmed_requirement_ids')
-        require(set(paths) <= branches, path + '.branch_ids', 'confirmed_branch_ids')
+    for item in items:
+        reqs = strings(item.get('requirement_ids'), 'requirement_ids', True)
+        paths = strings(item.get('branch_ids'), 'branch_ids')
+        require(set(reqs) <= requirements and set(paths) <= branches, 'traceability', 'confirmed_requirement_and_branch_ids')
         if scenarios is not None:
             scenario = by_scenario[item['scenario_id']]
-            require(set(reqs) <= set(scenario['requirement_ids']), path + '.requirement_ids', 'case_links_within_parent_scenario')
-            require(set(paths) <= set(scenario['branch_ids']), path + '.branch_ids', 'case_links_within_parent_scenario')
+            require(set(reqs) <= set(scenario['requirement_ids']) and set(paths) <= set(scenario['branch_ids']), 'traceability', 'case_links_within_parent_scenario')
     return result
 
 

@@ -48,7 +48,7 @@ def test_launcher_serves_prebuilt_ui_and_local_api_with_optional_env_file(tmp_pa
             if env_configured:
                 settings = client.get('/api/settings')
                 assert settings.json()['model'] == 'test-env'
-                assert settings.json()['timeout_seconds'] == 3600
+                assert settings.json()['timeout_seconds'] == 300
                 assert settings.json()['has_api_key'] is True
                 assert 'LAUNCHER-TEST-KEY' not in settings.text
             html = client.get('/')

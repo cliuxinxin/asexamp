@@ -27,29 +27,6 @@
 .advanced-task-options label{font-size:12px;margin:5px 0;min-width:140px}
 .agent-panel{margin:18px 0 8px;display:flex;flex-direction:column;gap:20px;font-size:13px}
 .agent-intro{font-size:13px;margin-top:18px}
-.work-panel{min-width:0}
-.work-panel progress{display:block;width:100%;height:6px;border:0;border-radius:4px;overflow:hidden;accent-color:var(--accent);background:#e2ebe5;margin:0 0 14px}
-.work-panel progress::-webkit-progress-bar{background:#e2ebe5;border-radius:4px}
-.work-panel progress::-webkit-progress-value{background:var(--accent);border-radius:4px}
-.work-panel progress::-moz-progress-bar{background:var(--accent)}
-.work-current strong{font-size:13px;font-weight:550;overflow-wrap:anywhere}
-.work-current>p{margin:6px 0}
-.work-inventory,.work-previews{margin-top:14px;padding-top:11px;border-top:1px solid var(--line)}
-.work-inventory>summary,.work-previews>summary{font-size:12px;color:#35664f;cursor:pointer;padding:3px 0}
-.work-inventory ol{padding:0;margin:12px 0;list-style:none}
-.work-item{padding:11px 0;border-bottom:1px solid var(--line)}
-.work-item-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-.work-item-heading>strong{font-size:12px;line-height:1.6;font-weight:500;overflow-wrap:anywhere;min-width:0}
-.work-item-heading>span{flex-shrink:0;color:var(--muted);font-size:11px}
-.work-item.completed .work-item-heading>span{color:#39735a}
-.work-item.failed .work-item-heading>span{color:#a04434}
-.work-inventory>button{font-size:12px;color:var(--accent);border:1px solid var(--line);margin-top:8px}
-.work-failure{background:#fff4ef;border:1px solid #edcfc5;border-radius:8px;padding:11px;margin:12px 0;overflow-wrap:anywhere}
-.work-failure strong{font-size:12px;color:#934a38}
-.work-failure p{margin:5px 0}
-.work-pause{font-size:13px;margin-top:12px}
-.work-pause p{margin-bottom:10px}
-@media(max-width:700px){.work-item-heading{flex-wrap:wrap;gap:3px 10px}.work-item-heading>span{font-size:10px}.work-current .inline{align-items:flex-start}.work-current .spin{flex-shrink:0;margin-top:3px}}
 .strategy-caption{display:flex;align-items:flex-start;gap:10px}
 .strategy-caption p{line-height:1.7;flex:1;color:#51655f}
 .depth-badge{display:inline-flex;flex:none;background:#e4f1eb;color:#326756;border:1px solid #cfe4d9;border-radius:20px;font-size:11px;font-weight:600;padding:4px 10px;white-space:nowrap}
@@ -153,5 +130,5 @@
 .branch-covered{color:var(--accent);font-size:12px}.branch-gap{color:#936324;font-size:12px}.branch-evidence li{flex-wrap:wrap}.traceability-report{margin:16px 0}.traceability-report table{width:100%;border-collapse:collapse;font-size:12px}.traceability-report th,.traceability-report td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}
 
 .mobile-workspace{padding:0}.mobile-workspace .artifact-card{margin-top:0}
-
-.clarification-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.clarification-actions>button:not(.primary){border:1px solid var(--accent);color:var(--accent)}
+.topbar-actions{display:flex;align-items:center;gap:5px}.case-type-options,.mode-options{border:0;padding:0;margin:13px 0;display:flex;gap:14px;flex-wrap:wrap}.case-type-options legend,.mode-options legend{font-size:12px;font-weight:600;width:100%}.case-type-options .check-label,.mode-options .check-label{margin:0}.memory-list{margin:15px 0}.memory-row{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line)}.memory-row strong{font-size:11px;color:var(--accent)}.memory-row p{font-size:13px}.count-progress{margin-top:13px;padding:11px 13px;border-radius:8px;background:#fff;border:1px solid var(--line)}.count-progress>div{display:flex;justify-content:space-between;font-size:12px}.count-progress progress{width:100%;accent-color:var(--accent);margin-top:8px}.count-progress .error-text{margin-top:6px}
+.upload-results{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px;font-size:11px}.upload-results span{padding:5px 8px;border-radius:6px;background:#f4f7f6}.source-row select{max-width:120px;font-size:11px;padding:7px}

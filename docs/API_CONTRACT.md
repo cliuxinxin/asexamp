@@ -1,3 +1,5 @@
+> 本文保留自 v2.1 基线，包含旧 Agent 和旧超时行为。v2.2 的启动、能力与限制以根目录 README.md 为准。
+
 # Chat application API contract
 
 All JSON UTF-8. FastAPI errors return `{detail: string}` (or standard validation detail). Datetimes ISO8601. IDs strings. REST responses below are unwrapped unless stated. Local single-user, no account setup. Mutation routes reject Origin from another host; no broad CORS. Production static app served same port. Dev server proxies /api to Python.

@@ -1,6 +1,6 @@
 import type {Json} from './types';
 
-export const stageNames:Record<string,string>={agent_repair:'修复出错字段',agent_repair_batch:'集中修复引用',paused_edit:'修改待确认场景',queued:'等待执行',routing:'理解请求',route:'理解请求',requirement_analysis:'分析需求',analysis:'分析需求',applying_clarification:'应用澄清',clarify:'需求澄清',scenario_generation:'生成场景',scenarios:'生成场景',scenario_gate:'场景确认',scenario_review:'等待场景确认',case_generation:'生成用例',case_import:'导入用例',cases:'生成用例',case_review:'评审用例',review:'评审用例',finish:'保存结果',publishing:'保存结果',single:'处理请求',query:'证据问答',modify:'修改结果',learn_template:'学习模板'};
+export const stageNames:Record<string,string>={paused_edit:'修改待确认场景',queued:'等待执行',routing:'理解请求',route:'理解请求',requirement_analysis:'分析需求',analysis:'分析需求',applying_clarification:'应用澄清',clarify:'需求澄清',scenario_generation:'生成场景',scenarios:'生成场景',scenario_gate:'场景确认',scenario_review:'等待场景确认',case_generation:'生成用例',case_import:'导入用例',cases:'生成用例',case_review:'评审用例',review:'评审用例',finish:'保存结果',publishing:'保存结果',single:'处理请求',query:'证据问答',modify:'修改结果',learn_template:'学习模板'};
 export type ModelOutput={id:string;node:string;task:string;label:string;text:string;status:string;at:string;elapsed?:number;attempt?:number;streaming?:boolean;requestAvailable?:boolean};
 export type ProgressEntry={id:number;at:string;text:string;tone:string;callId?:string};
 export type Feed={lastId:number;entries:ProgressEntry[];calls:Record<string,ModelOutput>;latest:Record<string,string>};
@@ -15,7 +15,7 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
   return next;
  }
  if(kind!=='progress')return next;
- const event=data.event as string;const node=data.node??'';const label=stageNames[data.task]??(node==='paused_edit'?stageNames[node]:(stageNames[data.stage]??stageNames[node]??data.task??'处理任务'));
+ const event=data.event as string;const node=data.node??'';const label=node==='paused_edit'?stageNames[node]:(stageNames[data.stage]??stageNames[node]??data.task??'处理任务');
  const callId=data.call_id??next.latest[node];const call=next.calls[callId];
  const finalize=(status:string)=>{for(const output of Object.values(next.calls))if(['running','returned'].includes(output.status))next.calls[output.id]={...output,status};};
  const add=(text:string,tone='neutral',outputId?:string)=>{next.entries=[...next.entries,{id,at:data.at,text,tone,callId:outputId}];};
@@ -35,17 +35,11 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
   if(call&&['running','returned'].includes(call.status))next.calls[callId]={...call,status:'cancelled'};
   add(`${stageNames[node]??label}已停止`,'waiting');
  }else if(event==='node.interrupted'){add('等待你的补充或确认','waiting');
- }else if(event==='agent.repair_applied'){
-  if(call)next.calls[callId]={...call,status:'applied'};
-  add(`已应用 ${data.field_count??1} 个字段的修正，正在校验当前工作项`,'active');
- }else if(event==='agent.repair_rejected'){
-  if(call)next.calls[callId]={...call,status:'invalid'};
-  add('修复回复未符合指定字段要求，未应用；继续调整修复方式','waiting');
  }else if(event.endsWith('.validation_failed')){
-  if(call&&call.status!=='applied')next.calls[callId]={...call,status:'invalid'};
-  const issue=data.validation_error;const reference=issue&&String(issue.expected).includes('evidence_id');add(reference?`引用校验未通过：${issue.path} 不属于当前可用的业务证据，正在核对引用与原文`:`校验未通过${issue?`：${issue.path}，期望 ${issue.expected}，实际 ${issue.actual}`:''}`,'error');
+  if(call)next.calls[callId]={...call,status:'invalid'};
+  const issue=data.validation_error;add(`校验未通过${issue?`：${issue.path}，期望 ${issue.expected}，实际 ${issue.actual}`:''}`,'error');
  }else if(event.endsWith('.repair_started')){add('正在根据校验反馈修正格式','waiting');
- }else if(event.endsWith('.repair_complete')){add('当前工作项修复后已通过完整校验，继续后续流程','success');
+ }else if(event.endsWith('.repair_complete')){add('格式修正已通过校验','success');
  }else if(event==='node.error'){
   if(call&&call.status==='returned')next.calls[callId]={...call,status:'failed'};
   add(`${stageNames[node]??label}失败${data.validation_error?`：${data.validation_error.path}`:''}`,'error');
@@ -62,4 +56,3 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
  }else if(event==='run.suspended'){finalize('cancelled');add('服务已暂停，重启后可恢复任务','waiting');}
  return next;
 }
-

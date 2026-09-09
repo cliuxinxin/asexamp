@@ -87,8 +87,6 @@ class Engine:
         self.stopping = False
         self.saver_context = None
         self.graph = None
-        from .runtime_version import runtime_version
-        self.runtime = runtime_version()
 
     async def start(self):
         self.saver_context = AsyncSqliteSaver.from_conn_string(str(self.store.directory / 'checkpoints.sqlite3'))
@@ -108,9 +106,9 @@ class Engine:
         builder.add_edge('single', 'finish')
         builder.add_edge('finish', END)
         self.graph = builder.compile(checkpointer=saver)
-        from .incremental_agent import IncrementalAgent
-        self.agent = IncrementalAgent(self, saver)
-        self.diagnostics.record('service.ready', graph_nodes=4, legacy_graph_nodes=9, history_limit=12, **self.runtime)
+        from .agent import Agent
+        self.agent = Agent(self, saver)
+        self.diagnostics.record('service.ready', graph_nodes=10, history_limit=12)
         # Lifespan already holds the exclusive data-directory OS lock. Any
         # persisted edit token therefore belongs to a request in a dead process;
         # invalidate it without advancing the real interrupt or changing items.
@@ -216,9 +214,7 @@ class Engine:
             run = self.store.run(run_id)
             if run['status'] not in ('queued', 'running'):
                 return
-            if run.get('graph_version') == 2 and getattr(self.agent, 'supported_graph_version', 2) != 2:
-                raise DomainError('此任务来自旧版 Agent；本次版本不迁移旧检查点。请新建任务，已有来源、模型配置和成果保留。')
-            graph = self.agent.graph if run.get('graph_version', 0) >= 2 else self.graph
+            graph = self.agent.graph if run.get('graph_version') == 2 else self.graph
             self.store.update_run(run_id, status='running', error=None)
             self.trace('checkpoint.loading', run_id)
             snapshot = await graph.aget_state(self.config(run_id))
@@ -232,7 +228,7 @@ class Engine:
                 argument = {'run_id': run_id, 'intent': run['intent'], 'analysis_batch': 0, 'scenario_page': 0, 'case_page': 0}
             if snapshot.values and not snapshot.next and not snapshot.interrupts:
                 # Handles process death after final checkpoint but before status update.
-                if run.get('graph_version', 0) < 2:
+                if run.get('graph_version') != 2:
                     await self.node_finish(snapshot.values)
             else:
                 self.trace('graph.invoking', run_id, resuming=isinstance(argument, Command))
@@ -245,18 +241,15 @@ class Engine:
                 paused = snapshot.interrupts[0]
                 with self.store.transaction():
                     current = self.store.run(run_id)
-                    agent_run = current.get('graph_version', 0) >= 2
-                    changed = agent_run and current.get('_instruction_version', 0) != snapshot.values.get('epoch', 0)
-                    continued = agent_run and self.agent.continuation(current) and paused.value.get('artifact_id') and paused.value['type'] in ('clarification', 'strategy_review')
-                    if changed or continued:
+                    if current.get('graph_version') == 2 and current.get('_instruction_version', 0) != snapshot.values.get('epoch', 0):
                         # Accepted during the tiny call→interrupt boundary:
                         # consume this graph's actual persisted interrupt and
-                        # apply the durable epoch or a just-arrived continuation.
+                        # let the next safe boundary apply the durable epoch.
                         self.store.update_run(run_id, status='queued', stage='applying_instruction', _interrupt_id=paused.id,
-                            _resume={'interrupt_id': paused.id, 'value': {'instruction': True} if changed else {'proceed': True}})
+                            _resume={'interrupt_id': paused.id, 'value': {'instruction': True}})
                     else:
                         self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=paused.value, _interrupt_id=paused.id, _resume=None)
-            elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version', 0) < 2:
+            elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version') != 2:
                 await self.node_finish(snapshot.values)
         except asyncio.CancelledError:
             # Shutdown preserves queued/running records for the next process.
@@ -767,18 +760,13 @@ class Engine:
             if run['status'] != 'waiting':
                 raise DomainError('任务当前未等待人工输入', 409)
             kind = run['interrupt']['type']
-            agent_gate = run.get('graph_version', 0) >= 2 and kind in ('clarification', 'strategy_review') and bool(run['interrupt'].get('artifact_id'))
-            if response.get('proceed') and not agent_gate and kind != 'work_pause':
-                raise DomainError('请先提供业务规则并完成初步分析，才能按当前信息继续')
-            has_answer = isinstance(response.get('answer'), str) and bool(response['answer'].strip())
-            if kind == 'clarification' and not has_answer and not (agent_gate and response.get('proceed')):
+            if kind == 'clarification' and (not response.get('answer') or not response['answer'].strip()):
                 raise DomainError('请输入澄清答案')
             if kind == 'scenario_review' and response.get('approved') is not True:
                 raise DomainError('请确认场景后继续生成用例')
-            if kind == 'strategy_review' and response.get('approved') is not True and not (agent_gate and (has_answer or response.get('proceed'))):
+            if kind == 'strategy_review' and response.get('approved') is not True:
                 raise DomainError('请确认策略后继续，或使用补充指令修订策略')
-            run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None,
-                       _gate_feedback_pending=agent_gate)
+            run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
             run.pop('interrupt', None)
             self.store.save_run(run)
         self.trace('run.resumed', run_id)

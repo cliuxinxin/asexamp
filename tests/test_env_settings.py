@@ -20,7 +20,7 @@ def test_data_env_survives_new_settings_instances_without_exposing_key(tmp_path)
         settings = Settings(tmp_path)
         assert settings.configured()
         assert settings.public()['provider'] == 'openai'
-        assert settings.public()['timeout_seconds'] == 3600
+        assert settings.public()['timeout_seconds'] == 300
         assert settings.secret() == 'TEST-${LITERAL}-KEY'
         assert settings.public()['has_api_key'] is True
         assert settings.public()['environment_managed'] is True

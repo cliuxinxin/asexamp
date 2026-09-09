@@ -17,32 +17,6 @@ const {ArtifactCard}=await import('../src/ArtifactCard');
 const {SettingsDialog}=await import('../src/SettingsDialog');
 afterEach(()=>cleanup());
 
-test('clarification allows continuing with unresolved questions and preserves typed answers',async()=>{
- const {RunCard}=await import('../src/RunCard');const requests:any[]=[];
- globalThis.fetch=async(input:any,init:any)=>{requests.push({url:String(input),body:JSON.parse(init?.body??'{}')});return new Response('{}',{status:200});};
- const run:any={id:'run-clarify',experience:'agent',graph_version:2,status:'waiting',stage:'requirement_analysis',updated_at:'2026-09-08',artifact_ids:[],interrupt:{type:'clarification',artifact_id:'analysis-1',questions:['锁定阈值是多少？']}};
- render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
- fireEvent.change(screen.getByRole('textbox',{name:'回答澄清问题'}),{target:{value:'连续失败4次锁定30分钟'}});
- fireEvent.click(screen.getByRole('button',{name:'按当前信息继续'}));
- await waitFor(()=>assert.equal(requests.length,1));
- assert.equal(requests[0].url,'/api/runs/run-clarify/resume');
- assert.deepEqual(requests[0].body,{proceed:true,answer:'连续失败4次锁定30分钟'});
-});
-
-test('missing requirement intake offers no proceed bypass',async()=>{
- const {RunCard}=await import('../src/RunCard');
- render(<RunCard run={{id:'run-empty',experience:'agent',status:'waiting',stage:'requirement_analysis',updated_at:'2026-09-08',artifact_ids:[],interrupt:{type:'clarification',questions:['请提供业务规则']}} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
- assert.equal(screen.queryByRole('button',{name:'按当前信息继续'}),null);
-});
-
-test('continued artifact displays deferred questions as retained uncertainties',async()=>{
- const {AnalysisReport}=await import('../src/AnalysisReport');
- render(<AnalysisReport report={{deferred_questions:['短信验证是否在范围内？'],assumptions:['暂未提供短信服务规则'],clarification_decision:{mode:'proceed'}}}/>);
- assert.ok(screen.getByText('短信验证是否在范围内？'));
- assert.ok(screen.getByText('已保留的未决问题'));
- assert.ok(screen.getByText('暂未提供短信服务规则'));
-});
-
 function streamingFixture(){
  const previous=(globalThis as any).EventSource;
  const instances:FakeSource[]=[];
@@ -117,7 +91,7 @@ test('permanently closed SSE offers reconnect using the saved cursor',async()=>{
 });
 test('actual request input loads only when opened and stays separate from streamed output',async()=>{
  const {RunTimeline}=await import('../src/RunTimeline');const stream=streamingFixture();const reads:string[]=[];
- globalThis.fetch=async(input:any)=>{reads.push(String(input));return json({run_id:'inspect-run',call_id:'inspect-call',model:'test',base_url:'http://localhost:1234/v1',timeout_seconds:3600,messages:[{role:'system',content:'EXACT SYSTEM CONTRACT'},{role:'user',content:JSON.stringify({evidence:[{text:'<img src=x onerror=alert(1)> FULL SOURCE'}],validation_repair:{previous_response:'REJECTED JSON'}})}],parameters:{stream:true}});};
+ globalThis.fetch=async(input:any)=>{reads.push(String(input));return json({run_id:'inspect-run',call_id:'inspect-call',model:'test',base_url:'http://localhost:1234/v1',timeout_seconds:3600,messages:[{role:'system',content:[{type:'text',text:'EXACT SYSTEM CONTRACT'}]},{role:'user',content:[{type:'text',text:JSON.stringify({evidence:[{text:'<img src=x onerror=alert(1)> FULL SOURCE'}],validation_repair:{previous_response:'REJECTED JSON'}})}]}],parameters:{stream:true}});};
  try{
   render(<RunTimeline runId="inspect-run"/>);
   act(()=>{stream.instances[0].emit('progress',1,{event:'model.start',run_id:'inspect-run',node:'cases',call_id:'inspect-call',at:'2026-09-07T01:00:00Z'});stream.instances[0].emit('progress',2,{event:'model.request_saved',run_id:'inspect-run',call_id:'inspect-call',request_available:true});});
@@ -130,22 +104,6 @@ test('actual request input loads only when opened and stays separate from stream
   await screen.findByText('INCREMENTAL ANSWER');assert.ok(screen.getByText(/FULL SOURCE/));
   fireEvent.click(screen.getByRole('button',{name:'关闭',exact:true}));assert.equal(screen.queryByRole('dialog'),null);
  }finally{stream.restore();}
-});
-
-test('minimal gateway request inspector displays readable context and exact content-block HTTP body',async()=>{
- const {RequestInspector}=await import('../src/RequestInspector');
- const messages=[{role:'system',content:'MINIMAL SYSTEM CONTRACT'},{role:'user',content:JSON.stringify({requirement:'核查内网请求'})}];
- const body={model:'gpt-5',messages:messages.map(m=>({...m,content:[{type:'text',text:m.content}]}))};
- globalThis.fetch=async()=>json({run_id:'minimal-run',call_id:'minimal-call',model:'gpt-5',timeout_seconds:3600,request_mode:'minimal',messages,headers:{'X-API-Key':'••••••'},parameters:{},http_request:{method:'POST',url:'http://localhost:1234/api/v1/chat/completions',body}});
- render(<RequestInspector runId="minimal-run" callId="minimal-call" onClose={()=>{}}/>);
- await screen.findByText('MINIMAL SYSTEM CONTRACT');
- fireEvent.click(screen.getByRole('button',{name:'任务上下文'}));
- assert.equal(JSON.parse(screen.getByLabelText('发送内容').textContent!).requirement,'核查内网请求');
- fireEvent.click(screen.getByRole('button',{name:'请求记录',exact:true}));
- const record=JSON.parse(screen.getByLabelText('发送内容').textContent!);
- assert.equal(record.request_mode,'minimal');assert.deepEqual(record.http_request.body,body);
- fireEvent.click(screen.getByRole('button',{name:'请求头（脱敏）'}));
- assert.deepEqual(JSON.parse(screen.getByLabelText('发送内容').textContent!),{'X-API-Key':'••••••'});
 });
 
 test('input inspector ignores a late response after switching calls',async()=>{
@@ -222,6 +180,12 @@ test('Enter cannot submit while requirement upload is unfinished',async()=>{
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'生成用例'}});fireEvent.keyDown(screen.getByLabelText('聊天输入'),{key:'Enter',code:'Enter'});
  assert.equal(state.calls.filter(c=>c.path.endsWith('/messages')).length,0);
  await act(async()=>pending.resolve(json({id:'s1'})));
+});
+
+test('multi-file upload continues after one failure and reports every result',async()=>{
+ const uploaded:string[]=[];fixture((path,init)=>{if(path==='/chats/c1/sources'){const file=(init.body as FormData).get('file') as File;uploaded.push(file.name);return file.name==='bad.txt'?Promise.resolve(json({detail:'文件无法解析'},400)):Promise.resolve(json({id:'source-'+file.name}));}});
+ render(<App/>);await ready();const files=[new File(['bad'],'bad.txt'),new File(['good'],'good.txt')];fireEvent.change(document.querySelector('input[type=file]')!,{target:{files}});
+ await screen.findByText('bad.txt：文件无法解析');await screen.findByText('good.txt：上传成功');assert.deepEqual(uploaded,['bad.txt','good.txt']);
 });
 
 test('delayed send cannot replace another project sidebar or draft',async()=>{
@@ -309,7 +273,7 @@ test('backend stage names and slow model progress are visible with a diagnostic 
  assert.equal(screen.queryByText('正在处理'),null);
 });
 
-test('agent composer hides task selectors and sends the chosen design depth',async()=>{
+test('reliable composer hides task selectors and sends the chosen design depth',async()=>{
  let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
  render(<App/>);await ready();
  assert.ok(screen.queryByLabelText('任务目标')===null, 'Task selectors must be collapsed by default');
@@ -317,94 +281,39 @@ test('agent composer hides task selectors and sends the chosen design depth',asy
  fireEvent.change(screen.getByLabelText('测试设计深度'),{target:{value:'deep'}});
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'关注退款与支付状态'}});
  fireEvent.click(screen.getByLabelText('发送消息'));
- await waitFor(()=>assert.equal(submitted?.experience,'agent'));
- assert.equal(submitted.depth,'deep');assert.equal(submitted.confirm_strategy,false);assert.equal(submitted.mode,'auto');
+ await waitFor(()=>assert.equal(submitted?.experience,'reliable'));
+ assert.equal(submitted.depth,'deep');assert.equal(submitted.mode,'auto');
 });
 
-test('default Auto runs without a confirmation gate and preserves automatic depth',async()=>{
- let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
- render(<App/>);await ready();
- fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'根据需求生成用例'}});fireEvent.click(screen.getByLabelText('发送消息'));
- await waitFor(()=>assert.ok(submitted));
- assert.equal(submitted.mode,'auto');assert.equal(submitted.confirm_strategy,false);assert.equal(submitted.depth,'auto');
-});
-
-test('explicit strategy confirmation submits human confirmation mode',async()=>{
+test('reliable submissions expose depth case types and explicit Auto or HITP mode',async()=>{
  let submitted:any;fixture((path,init)=>path==='/chats/c1/messages'?(submitted=JSON.parse(String(init.body)),Promise.resolve(json({run:{id:'r'}}))):undefined);
  render(<App/>);await ready();fireEvent.click(screen.getByRole('button',{name:/本次方案/}));
- const confirmation=screen.getByLabelText('生成用例前，先与我确认业务图和测试方向') as HTMLInputElement;
- assert.equal(confirmation.checked,false);fireEvent.click(confirmation);
- fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'先检查测试方向'}});fireEvent.click(screen.getByLabelText('发送消息'));
- await waitFor(()=>assert.ok(submitted));assert.equal(submitted.mode,'hitp');assert.equal(submitted.confirm_strategy,true);
+ assert.equal((screen.getByLabelText('测试设计深度') as HTMLSelectElement).value,'standard');
+ assert.equal((screen.getByLabelText('Business') as HTMLInputElement).checked,true);
+ assert.equal((screen.getByLabelText('Negative') as HTMLInputElement).checked,true);
+ assert.equal((screen.getByLabelText('Boundary') as HTMLInputElement).checked,true);
+ assert.equal((screen.getByLabelText('Security') as HTMLInputElement).checked,false);
+ fireEvent.click(screen.getByLabelText('Security'));fireEvent.click(screen.getByLabelText('人工确认关键节点'));
+ fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'生成可靠用例'}});fireEvent.click(screen.getByLabelText('发送消息'));
+ await waitFor(()=>assert.ok(submitted));assert.equal(submitted.experience,'reliable');assert.equal(submitted.mode,'hitp');assert.equal(submitted.depth,'standard');assert.deepEqual(submitted.case_types,['Business','Negative','Boundary','Security']);
+ assert.equal(Object.hasOwn(submitted,'confirm_strategy'),false);
 });
 
-const workItem=(id:string,status='completed')=>({id,key:'analysis:'+id,kind:'analysis',title:'分析 '+id,status,refs:[],artifact_id:null,attempt:1,error:null});
-
-test('incremental work streams counts, failures and retries without opening call details',async()=>{
- const {RunCard}=await import('../src/RunCard');const stream=streamingFixture();
- const first=workItem('登录规则');const second={...workItem('退款规则','running'),refs:['s1#P1']};
- const run:any={id:'r-work',graph_version:3,status:'running',stage:'work',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:1,total:2,current:second,items:[first,second]}}};
- fixture(path=>path==='/sources/s1'?Promise.resolve(json({id:'s1',name:'退款需求',chunks:[{id:'s1#P1',text:'退款申请必须关联原订单'}]})):undefined);
- try{
-  render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
-  assert.ok(screen.getByText(/已完成 1 \/ 2 项/));assert.ok(screen.getByText(/正在处理：分析 退款规则/));
-  fireEvent.click(screen.getByRole('button',{name:'查看依据 · 1'}));await screen.findByText('退款申请必须关联原订单');fireEvent.click(screen.getByRole('button',{name:'关闭',exact:true}));
-  const failed={...second,status:'failed',error:'模型连接中断'};
-  act(()=>stream.instances[0].emit('agent_work',1,{run_id:run.id,work:{completed:1,total:2,current:null,items:[first,failed]}}));
-  await screen.findByText('模型连接中断');assert.equal(screen.queryByText(/正在处理：分析 退款规则/),null);
-  act(()=>stream.instances[0].emit('agent_work',2,{run_id:run.id,work:{completed:1,total:2,current:{...second,attempt:2},items:[first,{...second,attempt:2}]}}));
-  await screen.findByText(/重试中.*第 2 次/);assert.equal(screen.queryByText('模型连接中断'),null);
-  assert.ok(screen.getByRole('button',{name:/查看调用详情/}));
- }finally{stream.restore();}
+test('run progress shows durable counts including failures and retry scope',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ render(<RunCard run={{id:'r-count',experience:'reliable',status:'failed',intent:'generate_case',mode:'auto',stage:'case_generation',updated_at:'2026-09-09',artifact_ids:[],progress:{phase:'case_generation',completed:17,total:24,label:'生成用例'},error:'第 3 批失败'} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
+ assert.ok(screen.getByText(/已完成 17 \/ 24/));assert.ok(screen.getByText(/失败.*第 3 批/));assert.ok(screen.getByRole('button',{name:/重试当前批次/}));
 });
 
-test('partial artifacts are labeled drafts and readable before the run completes',async()=>{
- const {RunCard}=await import('../src/RunCard');const stream=streamingFixture();const reads:string[]=[];
- fixture(path=>{if(path==='/artifacts/preview-1'){reads.push(path);return Promise.resolve(json({id:'preview-1',type:'cases',title:'退款用例草稿',revision:1,items:[{id:'TC-1',title:'退款失败可再次提交',steps:[],refs:[]}]}));}});
- try{
-  render(<RunCard run={{id:'r-preview',graph_version:3,status:'running',stage:'cases',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:1,total:3,current:null,items:[]}}} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
-  act(()=>stream.instances[0].emit('agent',1,{run_id:'r-preview',agent:{preview_ids:['preview-1'],work:{completed:1,total:3,current:null,items:[]}}}));
-  const drafts=await screen.findByText('工作草稿 · 1 份');assert.equal(reads.length,0);
-  fireEvent.click(drafts);await screen.findByText('退款失败可再次提交');assert.ok(screen.getByText(/尚未完成全部分析与评审/));
-  assert.ok(screen.getByRole('button',{name:'查看需求依据'}));
- }finally{stream.restore();}
-});
-
-test('pause waits for a safe boundary and work pause resumes with proceed',async()=>{
- const {RunCard}=await import('../src/RunCard');const requests:{path:string;body:any}[]=[];
- fixture((path,init)=>{if(init.method==='POST'){requests.push({path,body:JSON.parse(String(init.body))});return Promise.resolve(json({}));}});
- const run:any={id:'r-pause',graph_version:3,status:'running',stage:'cases',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:1,total:2,current:workItem('退款规则','running'),items:[]}}};
- const view=render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
- fireEvent.click(screen.getByRole('button',{name:'暂停'}));await waitFor(()=>assert.equal(requests.length,1));
- assert.equal(requests[0].path,'/runs/r-pause/pause');assert.ok(await screen.findByText(/当前工作完成后暂停/));
- assert.equal((screen.getByRole('button',{name:'正在暂停'}) as HTMLButtonElement).disabled,true);
- view.rerender(<RunCard run={{...run,status:'waiting',interrupt:{type:'work_pause'}}} onChanged={()=>{}} onTarget={()=>{}}/>);
- assert.ok(screen.getByText('任务已暂停'));assert.equal(screen.queryByText('需要你确认'),null);assert.equal(screen.queryByText(/正在处理：/),null);
- fireEvent.click(screen.getByRole('button',{name:'继续执行'}));await waitFor(()=>assert.equal(requests.length,2));
- assert.deepEqual(requests[1],{path:'/runs/r-pause/resume',body:{proceed:true}});
-});
-
-test('full work inventory is lazy, paginated and deduplicated against live snapshots',async()=>{
- const {RunCard}=await import('../src/RunCard');const reads:string[]=[];
- const first=workItem('登录规则');const second=workItem('退款规则');
- fixture(path=>{if(path.startsWith('/runs/r-inventory/work')){reads.push(path);return Promise.resolve(json(path.includes('cursor=1')?{completed:2,total:2,current:null,items:[second],next_cursor:null}:{completed:2,total:2,current:null,items:[first],next_cursor:1}));}});
- render(<RunCard run={{id:'r-inventory',graph_version:3,status:'failed',stage:'work',updated_at:'2026-09-08',artifact_ids:[],agent:{work:{completed:2,total:2,current:null,items:[second]}}} as any} onChanged={()=>{}} onTarget={()=>{}}/>);
- assert.equal(reads.length,0);fireEvent.click(screen.getByText('查看全部工作'));
- await screen.findByText('分析 登录规则');fireEvent.click(screen.getByRole('button',{name:'加载更多工作'}));await waitFor(()=>assert.equal(reads.length,2));
- await waitFor(()=>assert.equal(screen.queryByRole('button',{name:'加载更多工作'}),null));
- assert.deepEqual(reads,['/runs/r-inventory/work?cursor=0&limit=20','/runs/r-inventory/work?cursor=1&limit=20']);
- assert.equal(screen.getAllByText('分析 退款规则').length,1);
-});
-
-test('nonstreaming calls explain upstream waiting until real output arrives',async()=>{
- const {RunTimeline}=await import('../src/RunTimeline');const stream=streamingFixture();
- try{
-  render(<RunTimeline runId="r-nonstream"/>);
-  act(()=>stream.instances[0].emit('progress',1,{event:'model.start',run_id:'r-nonstream',node:'cases',call_id:'c',streaming:false,at:'2026-09-08'}));
-  await screen.findByText(/上游未开启流式返回/);
-  act(()=>stream.instances[0].emit('model_delta',2,{run_id:'r-nonstream',call_id:'c',text:'已收到的业务结论'}));
-  await screen.findByText('已收到的业务结论');assert.equal(screen.queryByText(/上游未开启流式返回/),null);
- }finally{stream.restore();}
+test('project memory can be added and deleted by the user',async()=>{
+ let created:any;let deleted='';fixture((path,init)=>{
+  if(path==='/projects/p1/memory'&&(!init.method||init.method==='GET'))return Promise.resolve(json([{id:'mem-1',content:'退款需原路返回',kind:'business',active:true}]));
+  if(path==='/projects/p1/memory'&&init.method==='POST'){created=JSON.parse(String(init.body));return Promise.resolve(json({id:'mem-2',...created,active:true}));}
+  if(path==='/projects/p1/memory/mem-1'&&init.method==='DELETE'){deleted=path;return Promise.resolve(json({ok:true}));}
+ });
+ render(<App/>);await ready();fireEvent.click(screen.getByRole('button',{name:'项目记忆'}));await screen.findByText('退款需原路返回');
+ fireEvent.change(screen.getByLabelText('记忆内容'),{target:{value:'优先覆盖资金风险'}});fireEvent.change(screen.getByLabelText('记忆类型'),{target:{value:'preference'}});fireEvent.click(screen.getByRole('button',{name:'保存记忆'}));
+ await waitFor(()=>assert.deepEqual(created,{content:'优先覆盖资金风险',kind:'preference'}));fireEvent.click(screen.getByRole('button',{name:'删除 退款需原路返回'}));await waitFor(()=>assert.equal(deleted,'/projects/p1/memory/mem-1'));
 });
 
 test('running agent accepts a supplemental instruction instead of starting a second run',async()=>{
@@ -518,17 +427,11 @@ test('switching workspace artifact discards old editors before new data arrives'
  await act(async()=>pending.resolve(json({...a,id:'a2',title:'用例乙',items:[]})));
 });
 
-test('stage drafts stay readonly after completion and superseded work remains identifiable',async()=>{
- const {WorkPanel}=await import('../src/WorkPanel');
- const draft={id:'draft-only',preview:true,type:'cases',title:'阶段登录用例',revision:1,items:[{id:'C-DRAFT',title:'核查登录规则',type:'Business',priority:'P1',steps:[],refs:[]}]};
- const old={id:'work-old',key:'old',kind:'work_analyze',title:'旧登录规则',status:'superseded',refs:[],attempt:1};
- fixture(path=>path==='/artifacts/draft-only'?Promise.resolve(json(draft)):path.startsWith('/runs/r-draft/work')?Promise.resolve(json({completed:0,total:0,current:null,items:[old],next_cursor:null})):undefined);
- render(<WorkPanel runId="r-draft" runStatus="completed" work={{completed:0,total:0,current:null,items:[old]}} previewIds={['draft-only']}/>);
- fireEvent.click(screen.getByText('工作草稿 · 1 份'));
- await screen.findByText('核查登录规则');
- assert.ok(screen.getByText(/阶段草稿 · 仅供核查/));
- for(const name of ['编辑','历史版本','导出 Excel','让 AI 修改此结果'])assert.equal(screen.queryByRole('button',{name,exact:true}),null);
- assert.equal(screen.queryByRole('checkbox',{name:'选择全部条目'}),null);
- fireEvent.click(screen.getByText('查看全部工作'));
- await screen.findByText('已被后续规则替代');
+test('switching to private gateway seeds documented endpoint and displays actual timeout',async()=>{
+ globalThis.fetch=async()=>json({provider:'ollama',base_url:'http://localhost:11434',model:'local',has_api_key:false,timeout_seconds:300});
+ render(<SettingsDialog projectId="p1" profiles={profiles} activeProfileId="pf1" onClose={()=>{}} onSaved={()=>{}}/>);
+ fireEvent.change(await screen.findByLabelText('模型服务'),{target:{value:'openai'}});
+ assert.equal((screen.getByLabelText('服务地址') as HTMLInputElement).value,'http://10.206.3.151:8000/api/v1');
+ assert.ok(screen.getByText('请求等待时间 · 300 秒'));
+ assert.ok(screen.getByRole('option',{name:'API Key · X-API-Key'}));
 });

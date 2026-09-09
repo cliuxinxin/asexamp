@@ -25,7 +25,7 @@ def error_details(exc):
         types.append(type(exc).__name__)
         if isinstance(exc, OutputValidationError) and validation_error is None:
             validation_error = exc.issue
-        remote = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+        remote = getattr(exc, 'status_code', None)
         local = getattr(exc, 'status', None)
         if isinstance(remote, int):
             provider_status = remote
