@@ -12,6 +12,16 @@ dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
 const React=await import('react');
 const {render,fireEvent,screen,waitFor,cleanup,within}=await import('@testing-library/react');
 const {App}=await import('../src/App');
+test('failed task exposes the small log without opening run details',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ try{
+  render(<RunCard run={{id:'failed-run',status:'failed',intent:'generate_case',mode:'auto',stage:'failed',updated_at:'2026-09-09',artifact_ids:[],experience:'reliable',graph_version:7,error:'JSON 语法错误'}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  const link=screen.getByRole('link',{name:/下载失败步骤日志/});
+  assert.equal(link.getAttribute('href'),'/api/runs/failed-run/failed-step');
+  assert.equal(link.hasAttribute('download'),true);
+  assert.equal(link.closest('details'),null);
+ }finally{cleanup();}
+});
 // This narrow component smoke uses deterministic API state, without browser/network dependencies.
 test('wide conversation shows inline results and explicit editing targets them',async()=>{
  let generated=false,modified=false;const requests:any[]=[];

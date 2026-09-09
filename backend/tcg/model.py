@@ -37,6 +37,7 @@ from cryptography.fernet import Fernet
 from .diagnostics import error_details
 from .environment import model_environment, runtime_value
 from .schemas import DomainError
+from .json_output import parse_model_object, parse_issue
 
 MODEL_TIMEOUT_SECONDS = 300
 MAX_MODEL_TIMEOUT_SECONDS = 3600
@@ -142,6 +143,16 @@ Evidence priority: explicit user clarification > change > supplement/clarificati
 Examples supply formatting only, never business requirements. References must be exact provided chunk IDs.
 Never invent an evidence ID or conceal missing coverage. Do not output chain-of-thought.
 '''
+
+
+SYSTEM += r"""
+JSON syntax requirements: use double quotes for every key and string. No comments,
+trailing commas, extra JSON objects or text outside the object. Inside any string,
+escape a quotation mark as \", a backslash as \\, and a line break as \n.
+Mermaid source MUST be a JSON string with escaped line breaks, not literal newlines.
+Valid example: {"mermaid":"mindmap\n  root((Login))\n    Success\n    Failure"}
+Keep diagrams concise and complete. Check JSON syntax before returning.
+"""
 
 
 class Settings:
@@ -393,32 +404,20 @@ class LangChainGateway:
                 self.diagnostics.record('model.transport_response', finish_reason=finish_reason, response_characters=len(content), input_tokens=usage.get('input_tokens') or usage.get('prompt_tokens'), output_tokens=usage.get('output_tokens') or usage.get('completion_tokens'))
             if finish_reason in ('length', 'max_tokens'):
                 raise DomainError('模型输出达到长度限制；请提高服务输出预算或拆分需求后重试，未接受截断结果')
-            content = content.strip()
-            if content.startswith('```'):
-                lines = content.splitlines()
-                content = '\n'.join(lines[1:-1])
-            try:
-                result = json.loads(content)
-            except json.JSONDecodeError:
-                # Accept a single JSON object wrapped in explanatory prose.
-                start = content.find('{')
-                if start < 0: raise
-                result, end = json.JSONDecoder().raw_decode(content[start:])
-                if '{' in content[start+end:]: raise ValueError('Multiple JSON objects')
-            if not isinstance(result, dict):
-                raise ValueError('Expected JSON object')
-            return result
+            return parse_model_object(content)
         except asyncio.CancelledError:
             raise
         except DomainError:
             raise
         except (json.JSONDecodeError, ValueError) as exc:
+            issue=parse_issue(exc)
             if self.diagnostics:
-                self.diagnostics.record('model.invalid_json', level='ERROR', **error_details(exc))
-            error = DomainError('模型未返回有效 JSON；请使用支持结构化输出的指令模型，然后重试失败节点')
+                self.diagnostics.record('model.invalid_json', level='ERROR', parse_error=issue, **error_details(exc))
+            where=f"（第 {issue['line']} 行，第 {issue['column']} 列）" if issue['line'] is not None else ''
+            error = DomainError('模型返回 JSON 无法解析'+where+'；已保留原始返回，可下载失败步骤日志定位')
             error.retryable, error.category = False, 'protocol'
             error.raw_response = content
-            error.parse_error = {'type':type(exc).__name__,'line':getattr(exc,'lineno',None),'column':getattr(exc,'colno',None),'position':getattr(exc,'pos',None)}
+            error.parse_error = issue
             raise error from None
         except Exception as exc:
             if self.diagnostics:
@@ -476,11 +475,10 @@ class LangChainGateway:
             content = choice['message']['content']
             if not isinstance(content, (str, list)):
                 raise ValueError('Invalid content')
-        except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+        except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             error = DomainError('模型服务返回了无效或不完整的响应协议')
             error.retryable, error.category = False, 'protocol'
-            error.raw_response = content
-            error.parse_error = {'type':type(exc).__name__,'line':getattr(exc,'lineno',None),'column':getattr(exc,'colno',None),'position':getattr(exc,'pos',None)}
+            error.parse_error = {**parse_issue(exc),'layer':'http_response_envelope'}
             raise error from None
         return content, choice.get('finish_reason'), envelope.get('usage') or {}
 
