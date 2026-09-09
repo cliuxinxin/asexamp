@@ -8,7 +8,7 @@ let renderer:Promise<typeof import('mermaid')>|undefined;
 export function checkDiagram(source:string){
  const clean=source.trim().replace(/^```mermaid\s*\n/i,'').replace(/\n```$/,'');
  if(clean.length>30000)throw new Error('图表过大，请按业务模块拆分后再展示。');
- if(!/^(flowchart|graph|stateDiagram-v2)\b/.test(clean))throw new Error('当前支持业务流程图和状态图，请调整 Mermaid 图表类型。');
+ if(!/^(flowchart|graph|stateDiagram-v2|mindmap)\b/.test(clean))throw new Error('当前支持流程图、状态图和 mindmap 思维导图，请调整 Mermaid 图表类型。');
  if(/%%\s*\{|^\s*(click|style|classDef|linkStyle)\b|<\/?[a-z][^>]*>|javascript\s*:|@\{/im.test(clean))throw new Error('图表包含不支持的交互或配置，请让 AI 仅保留业务节点和连线。');
  return clean;
 }
@@ -59,10 +59,10 @@ export function BusinessDiagram({title,source}:{title:string;source:string}){
    <button disabled={!svg} aria-label={'放大 '+title} onClick={()=>setZoom(value=>Math.min(3,value+.25))}><ZoomIn size={15}/></button>
    <button disabled={!svg} aria-label={'缩小 '+title} onClick={()=>setZoom(value=>Math.max(.5,value-.25))}><ZoomOut size={15}/></button>
    <button disabled={!svg} onClick={()=>setExpanded(true)}><Maximize2 size={14}/>全屏</button>
-   <button disabled={!svg} onClick={()=>saveFile('business-flow.svg',svg,'image/svg+xml')}><Download size={14}/>SVG</button>
+   <button disabled={!svg} onClick={()=>saveFile('business-diagram.svg',svg,'image/svg+xml')}><Download size={14}/>SVG</button>
   </div></div>
-  {error?<p role="alert" className="diagram-error">{error}</p>:svg?(expanded?<p className="muted">业务图已在放大视图中打开。</p>:drawing):<p className="diagram-loading"><Spinner/>正在绘制业务流程图…</p>}
-  <details className="diagram-source"><summary>Mermaid 源码</summary><pre>{source}</pre><button onClick={()=>saveFile('business-flow.mmd',source,'text/plain')}>下载源码</button></details>
+  {error?<p role="alert" className="diagram-error">{error}</p>:svg?(expanded?<p className="muted">业务图已在放大视图中打开。</p>:drawing):<p className="diagram-loading"><Spinner/>正在绘制 Mermaid 图表…</p>}
+  <details className="diagram-source"><summary>Mermaid 源码</summary><pre>{source}</pre><button onClick={()=>saveFile('business-diagram.mmd',source,'text/plain')}>下载源码</button></details>
   {expanded&&<Dialog title={title} onClose={()=>setExpanded(false)} wide>{drawing}</Dialog>}
  </section>;
 }
