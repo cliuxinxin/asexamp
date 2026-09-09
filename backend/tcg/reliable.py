@@ -259,7 +259,7 @@ class ReliableEngine(Engine):
                 return errors
             result = await self.validated(run_id, f'v4:analysis:{index}', 'analyze_requirement', context, validate)
             merged.extend({**i, 'id': f'R{index + 1}-{i["id"]}'} for i in result['items'])
-            reports.append(result.get('report', {}))
+            reports.append({**result.get('report', {}), 'changes': {kind: sum(op['op'] == kind for op in result['operations']) for kind in ('add','update','delete')}})
             self.progress(run_id, 'requirement_analysis', index + 1, len(groups), '需求批次已保存')
         report = {'questions': list(dict.fromkeys(q for r in reports for q in r.get('questions', []))),
                   'assumptions': list(dict.fromkeys(q for r in reports for q in r.get('assumptions', []))),
@@ -498,7 +498,7 @@ class ReliableEngine(Engine):
             result = await self.validated(run_id, f'v4:review:{index}', 'review_cases', context, validate)
             revised = apply_operations(group, operations_for(result), self.store.run(run_id)['_request'].get('selected_ids'))
             final.extend(revised)
-            reports.append(result.get('report', {}))
+            reports.append({**result.get('report', {}), 'changes': {kind: sum(op['op'] == kind for op in result['operations']) for kind in ('add','update','delete')}})
             self.progress(run_id, 'case_review', index + 1, len(groups), '审核批次已保存')
         evidence = {e['id']: e for e in self.all_evidence(run_id)}
         errors = item_errors('cases', final, evidence, {s['id'] for s in scenario_items} if scenario_items else None)

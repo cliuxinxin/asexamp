@@ -149,6 +149,8 @@ class FlowEngine(DirectEngine):
         reports=self.store.cache_get(run_id,'v4:review_reports') or []
         if state['intent']=='generate_case':
             content=f'已完成需求理解、场景设计、用例生成和一轮 AI 审核，共 {len(artifact["items"])} 条用例。用例尚未实际执行。\n接下来可以查看依据、修改选中项、调整 Profile 或按模板导出 Excel。'
+        elif state['intent']=='review_case':
+            content=f'已完成一轮用例评审并保存修订版本，共 {len(artifact["items"])} 条用例。下方展示评审结论与修改数量，可查看版本记录。'
         elif state['intent']=='learn_template':
             content='已整理 Excel 模板与写作规则建议。请选择更新当前 Profile、新建 Profile 或仅下一次运行使用。'
         else:

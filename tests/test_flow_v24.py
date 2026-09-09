@@ -66,3 +66,17 @@ def test_profile_override_and_excel_columns(tmp_path):
         assert list(next(sheet.values))==['用例名称','预期结果']
         assert sheet.cell(2,1).value=='Reviewed login case'
         assert client.get('/api/projects/'+project['id']+'/profiles').json()==profiles
+
+
+def test_explicit_review_preserves_target_and_records_changes(tmp_path):
+    model=FlowModel()
+    with TestClient(create_app(tmp_path,model)) as client:
+        _,chat,_=setup_chat(client)
+        generated=until(client,start(client,chat,experience='reliable'))
+        aid=generated['artifact_ids'][0]
+        before=client.get('/api/artifacts/'+aid).json()
+        reviewed=until(client,start(client,chat,experience='reliable',intent='review_case',artifact_id=aid))
+        assert reviewed['status']=='completed',reviewed
+        after=client.get('/api/artifacts/'+aid).json()
+        assert after['revision']>before['revision']
+        assert after['report']['review_reports'][0]['changes']['update']==1

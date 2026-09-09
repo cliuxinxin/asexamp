@@ -338,7 +338,7 @@ class LangChainGateway:
             from langchain_core.messages import HumanMessage, SystemMessage
             from langchain_ollama import ChatOllama
             model = ChatOllama(model=settings['model'], base_url=settings['base_url'], temperature=0, format='json',
-                num_ctx=int(runtime_value(self.settings.directory, 'TCG_MODEL_CONTEXT_TOKENS', '32768')),
+                **({'num_ctx': int(runtime_value(self.settings.directory, 'TCG_MODEL_CONTEXT_TOKENS', '0'))} if int(runtime_value(self.settings.directory, 'TCG_MODEL_CONTEXT_TOKENS', '0')) > 0 else {}),
                 num_predict=int(runtime_value(self.settings.directory, 'TCG_OUTPUT_TOKENS', '8192')),
                 client_kwargs={'timeout': settings['timeout_seconds'], 'headers': headers, 'follow_redirects': False},
                 sync_client_kwargs={'event_hooks': {'request': [configured_auth]}},

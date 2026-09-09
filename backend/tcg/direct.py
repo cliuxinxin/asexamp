@@ -42,9 +42,9 @@ class DirectEngine(ReliableEngine):
 
     def limits(self):
         try:
-            window = int(runtime_value(self.store.directory, 'TCG_MODEL_CONTEXT_TOKENS', '32768'))
+            window = int(runtime_value(self.store.directory, 'TCG_MODEL_CONTEXT_TOKENS', '0'))
             reserve = int(runtime_value(self.store.directory, 'TCG_OUTPUT_TOKENS', '8192'))
-            if not 4096 <= window <= 1000000 or not 1024 <= reserve < window - 1024:
+            if window < 0 or reserve < 1024 or (window and (window < 4096 or reserve >= window - 1024)):
                 raise ValueError()
         except ValueError:
             raise DomainError('模型容量配置无效：输出预留须小于上下文窗口，至少保留 1024 tokens 输入空间。') from None
@@ -52,6 +52,8 @@ class DirectEngine(ReliableEngine):
 
     def fits(self, task, context):
         window, reserve = self.limits()
+        if window == 0:
+            return True
         return token_estimate(SYSTEM + TASK_INSTRUCTIONS.get(task, '')) + token_estimate(context) + 512 <= window - reserve and len(json.dumps(context, ensure_ascii=False)) <= 490000
 
     async def invoke_model(self, task, context, run_id=None):

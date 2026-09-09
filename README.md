@@ -1,4 +1,4 @@
-# TCG Case Agent 2.4.0
+# TCG Case Agent 2.4.1
 
 本地测试用例生成助手。本版修复 v2.3 简化调用时跳过业务流程及人工确认的问题，恢复完整流程，并参照 execution-agent-UI 的生成页布局扩大聊天区域。
 
@@ -35,7 +35,7 @@
 ## 容量与数据
 
 ```dotenv
-TCG_MODEL_CONTEXT_TOKENS=32768
+TCG_MODEL_CONTEXT_TOKENS=0
 TCG_OUTPUT_TOKENS=8192
 TCG_SEND_OUTPUT_LIMIT=false
 ```
@@ -57,3 +57,9 @@ python3 start.py --no-install --no-browser
 按要求仅验证主流程，详见 `docs/VALIDATION_V24.md`。使用模拟模型完成 Auto、HITP、场景修改传递和 Excel 配置导出；前端组件冒烟及生产构建通过。未验证真实模型业务质量、延迟及浏览器视觉效果，未运行全量回归。
 
 实现入口：`backend/tcg/flow.py`。历史文档与测试保留供参考，其调用次数断言不代表本版默认行为。
+
+## v2.4.1 修正
+
+上传成功提示 3 秒后消失，失败信息保留。单独评审用例绑定当前用例结果，最终展示评审结论及新增、修改、删除数量。
+
+上下文默认 0：关闭客户端 token 预算和容量分组，不给 Ollama 指定 num_ctx，由服务自身配置决定容量。服务超限可能报错；若需要提前分组，手动设置实际容量。旧 .env 中的 32768 仍会生效，请改为 0 后重启。此设置不取消文件大小及解析限制。
