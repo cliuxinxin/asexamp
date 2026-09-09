@@ -234,12 +234,16 @@ class Store:
             run['_history_total'] = len(history)
             run['_artifact_source_ids'] = artifact.get('_source_ids', []) if artifact else []
             if request.get('experience') == 'reliable':
-                depth = request.get('depth', 'standard')
+                depth = request.get('depth', 'auto')
                 depth = depth if depth in ('quick', 'standard', 'deep') else 'standard'
-                config = dict(profile['config'], case_level=depth, scenario_level=depth)
+                config = dict(profile['config'])
+                if request.get('depth') not in (None, 'auto'):
+                    config.update(case_level=depth, scenario_level=depth)
+                if request.get('profile_override'):
+                    config = profile_config({**config, **request['profile_override']})
                 if request.get('case_types'):
                     config['case_types'] = list(dict.fromkeys(request['case_types']))
-                run.update(experience='reliable', graph_version=5, _profile=config,
+                run.update(experience='reliable', graph_version=6, _profile=config,
                            _memory=[m for m in self.list('memory', project_id=chat['project_id']) if m.get('active', True)],
                            _source_roles={sid: self.get('source', sid)['role'] for sid in sources},
                            progress={'phase': 'queued', 'completed': 0, 'total': 0, 'label': '准备任务'})
@@ -349,7 +353,7 @@ class Store:
             self.audit(value['id'], 'artifact_create', {'run_id': run_id})
             return value
 
-    def revise_artifact(self, artifact_id, expected_revision, items, reason='manual_edit', run_id=None, cache_key=None):
+    def revise_artifact(self, artifact_id, expected_revision, items, reason='manual_edit', run_id=None, cache_key=None, report=None):
         with self.transaction():
             if run_id:
                 self.assert_running(run_id)
@@ -370,6 +374,9 @@ class Store:
             if previous.get('report'):
                 from .agent_contracts import refreshed_report
                 result['report'] = refreshed_report(previous['type'], items, previous['report'], {e['id']: e for e in self.evidence(source_ids, roles)})
+            if report is not None:
+                if not isinstance(report,dict): raise DomainError('分析报告必须为对象')
+                result['report'] = report
             self.put('artifact', result)
             self.db.execute('INSERT INTO revisions VALUES(?,?,?,?,?,?)', (artifact_id, result['revision'], dump(result), now(), reason, dump(diff)))
             self.audit(artifact_id, reason, {'revision': result['revision'], 'diff': diff})

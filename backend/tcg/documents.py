@@ -174,16 +174,30 @@ def export_cases(artifact, layout='case', selected=None):
     sheet = workbook.active
     title = artifact.get('_profile', {}).get('sheet_name', 'Test Cases')
     sheet.title = re.sub(r'[\\/*?:\[\]]', '_', title)[:31] or 'Test Cases'
-    sheet.append(['Case ID', 'Title', 'Type', 'Priority', 'Preconditions', 'Steps', 'Expected Result'])
+    profile = artifact.get('_profile', {})
+    defaults = [{'field':k,'header':h} for k,h in [('id','Case ID'),('title','Title'),('type','Type'),('priority','Priority'),('preconditions','Preconditions'),('steps','Steps'),('expected','Expected Result')]]
+    columns = profile.get('excel_columns') or defaults
+    forbidden = {'refs','source_ids','source_hash','evidence','report','profile','run_id','requirement_ids'}
+    if not isinstance(columns,list) or not columns or any(not isinstance(c,dict) or not isinstance(c.get('field'),str) or not isinstance(c.get('header'),str) or c['field'].startswith('_') or c['field'] in forbidden for c in columns):
+        raise DomainError('Excel 列映射无效；只允许 Case 字段，不导出来源或内部记录。')
+    sheet.append([cell_safe(c['header']) for c in columns])
     for item in items:
-        base = [item['id'], item['title'], item['type'], item['priority'], item['preconditions']]
-        if layout == 'step':
-            for index, step in enumerate(item['steps'], 1):
-                sheet.append([cell_safe(value) for value in base + [f'{index}. {step["action"]}', step['expected']]])
-        else:
-            actions = '\n'.join(f'{index}. {step["action"]}' for index, step in enumerate(item['steps'], 1))
-            expected = '\n'.join(f'{index}. {step["expected"]}' for index, step in enumerate(item['steps'], 1))
-            sheet.append([cell_safe(value) for value in base + [actions, expected]])
+        steps = item['steps']
+        row_steps = [[step] for step in steps] if layout == 'step' else [steps]
+        for row_index, selected_steps in enumerate(row_steps,1):
+            values = []
+            for column in columns:
+                field = column['field']
+                if field in ('steps','expected'):
+                    part = 'action' if field == 'steps' else 'expected'
+                    value = '\n'.join(f'{row_index if layout == "step" else i}. {step[part]}' for i,step in enumerate(selected_steps,1))
+                else:
+                    value = item.get(field, '')
+                    if isinstance(value,(dict,list)):
+                        import json
+                        value = json.dumps(value,ensure_ascii=False)
+                values.append(cell_safe(value))
+            sheet.append(values)
     sheet.freeze_panes = 'A2'
     sheet.auto_filter.ref = sheet.dimensions
     for cell in sheet[1]:

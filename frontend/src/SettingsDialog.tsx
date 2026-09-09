@@ -1,11 +1,12 @@
 import {useEffect,useState} from 'react';
 import {Check,PlugZap,Plus,Save} from 'lucide-react';
+import {ProfileEditor} from './ProfileEditor';
 import {api,errText} from './api';
 import {Dialog,ErrorBox,Spinner} from './ui';
 import type {Json,Profile,Settings} from './types';
 
-export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onClose,onSaved,onSelectProfile}:{projectId:string;profiles:Profile[];activeProfileId?:string;proposal?:Json;onClose:()=>void;onSaved:()=>void;onSelectProfile?:(id:string)=>void}){
- const [tab,setTab]=useState(proposal?'profile':'model');
+export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onClose,onSaved,onSelectProfile,initialTab='model',onUseOnce}:{projectId:string;profiles:Profile[];activeProfileId?:string;proposal?:Json;onClose:()=>void;onSaved:()=>void;onSelectProfile?:(id:string)=>void;initialTab?:'model'|'profile';onUseOnce?:(config:Json)=>void}){
+ const [tab,setTab]=useState(proposal?'profile':initialTab);
  const [settings,setSettings]=useState<Settings>();
  const [key,setKey]=useState('');const [clearKey,setClearKey]=useState(false);
  const [headers,setHeaders]=useState('');const [clearHeaders,setClearHeaders]=useState(false);
@@ -70,10 +71,10 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
    <details className="timeout-settings"><summary>请求等待时间 · {settings.timeout_seconds} 秒</summary><label>单次请求超时（秒）<input type="number" min={5} max={3600} disabled={managed||settings.timeout_policy==='fixed_60_minutes'} value={settings.timeout_seconds} onChange={e=>setSettings({...settings,timeout_seconds:Number(e.target.value)})}/></label>{settings.timeout_policy==='fixed_60_minutes'&&<p className="muted small-text">模型请求超时统一为 60 分钟（3600 秒）；旧配置中的短超时也按此值执行。</p>}</details>
    <div className="dialog-actions">{!managed&&<button disabled={working} onClick={()=>saveModel()}><Save size={16}/>保存</button>}<button className="primary" disabled={working||!settings.model.trim()} onClick={()=>saveModel(true)}>{working?<Spinner/>:<PlugZap size={16}/>} {managed?'测试连接':'保存并测试连接'}</button></div>
   </div>:tab==='model'?<Spinner/>:null}
-  {tab==='profile'&&<div><p className="muted">{proposal?'AI 提出了下面的偏好建议。你可以保存为新的项目偏好。':'设置常用语言、测试关注范围和业务规则。测试深度在每次对话中由 AI 推荐。'}</p>
+  {tab==='profile'&&<div><p className="muted">{proposal?'AI 提出了下面的偏好建议。你可以保存为新的项目偏好。':'设置常用语言、测试关注范围和业务规则。场景颗粒度、用例深度独立配置；每轮可临时覆盖。'}</p>
    <label>选择 Profile<select value={profileId} onChange={e=>{const p=profiles.find(x=>x.id===e.target.value);if(!p)return;setProfileId(p.id);setName(p.name);if(!proposal)setConfig(JSON.stringify(p.config,null,2));}}>{profiles.map(p=><option key={p.id} value={p.id}>{p.name} · v{p.version}</option>)}</select></label>
-   <label>Profile 名称<input value={name} onChange={e=>setName(e.target.value)}/></label><label>配置 JSON<textarea className="code-editor profile-editor" aria-label="Profile 配置 JSON" value={config} onChange={e=>setConfig(e.target.value)} spellCheck={false}/></label>
-   <div className="dialog-actions">{onSelectProfile&&<button disabled={working||!profileId} onClick={()=>{onSelectProfile(profileId);setNotice('后续任务将使用此项目偏好');}}>使用此项目偏好</button>}<button disabled={working} onClick={()=>saveProfile(true)}><Plus size={16}/>保存为新 Profile</button><button className="primary" disabled={working||!profileId} onClick={()=>saveProfile(false)}>{working?<Spinner/>:<Save size={16}/>}更新当前 Profile</button></div>
+   <label>Profile 名称<input value={name} onChange={e=>setName(e.target.value)}/></label><ProfileEditor value={config} onChange={setConfig}/><details><summary>高级配置 JSON · Schema 与全部字段</summary><label>配置 JSON<textarea className="code-editor profile-editor" aria-label="Profile 配置 JSON" value={config} onChange={e=>setConfig(e.target.value)} spellCheck={false}/></label></details>
+   <div className="dialog-actions">{onUseOnce&&<button disabled={working} onClick={()=>{try{onUseOnce(JSON.parse(config));onClose();}catch{setError('配置 JSON 无效');}}}>仅下一次运行使用</button>}{onSelectProfile&&<button disabled={working||!profileId} onClick={()=>{onSelectProfile(profileId);setNotice('后续任务将使用此项目偏好');}}>使用此项目偏好</button>}<button disabled={working} onClick={()=>saveProfile(true)}><Plus size={16}/>保存为新 Profile</button><button className="primary" disabled={working||!profileId} onClick={()=>saveProfile(false)}>{working?<Spinner/>:<Save size={16}/>}更新当前 Profile</button></div>
   </div>}
   <ErrorBox message={error}/>{notice&&<p role="status" className="success inline"><Check size={16}/>{notice}</p>}
  </Dialog>;

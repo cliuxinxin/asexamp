@@ -828,8 +828,8 @@ class Engine:
     async def _edit_waiting(self, run_id, content, selected_ids=None):
         with self.store.transaction():
             run = self.store.run(run_id)
-            if run['status'] != 'waiting' or run.get('interrupt', {}).get('type') != 'scenario_review':
-                raise DomainError('仅等待场景确认的任务支持此编辑', 409)
+            if run['status'] != 'waiting' or run.get('interrupt', {}).get('type') not in ('scenario_review', 'strategy_review'):
+                raise DomainError('仅等待需求或场景确认的任务支持此编辑', 409)
             if run.get('_edit_token'):
                 raise DomainError('当前场景编辑正在进行，请稍候', 409)
             artifact = self.store.get('artifact', run['interrupt']['artifact_id'])
@@ -855,7 +855,7 @@ class Engine:
                     current = self.store.run(run_id)
                     if current['status'] != 'waiting' or current.get('_edit_token') != token:
                         raise DomainError('任务已继续或取消，拒绝过期编辑结果', 409)
-                    updated = self.store.revise_artifact(artifact['id'], artifact['revision'], items, 'ai_waiting_edit')
+                    updated = self.store.revise_artifact(artifact['id'], artifact['revision'], items, 'ai_waiting_edit', report={**artifact.get('report',{}),**result['report_patch']} if artifact['type']=='analysis' and isinstance(result.get('report_patch'),dict) else None)
                     current['interrupt']['items'] = updated['items']
                     current['_edit_token'] = None
                     self.store.save_run(current)

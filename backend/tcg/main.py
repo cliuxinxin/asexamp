@@ -6,7 +6,7 @@ import os
 import time
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from .diagnostics import endpoint_origin, error_details
 from .documents import MAX_UPLOAD, classify_source, export_cases, parse_document, parse_text
 from .environment import runtime_value
-from .direct import DirectEngine as Engine
+from .flow import FlowEngine as Engine
 from .model import LangChainGateway, Settings
 from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
 from .storage import DirectoryLock, Store, public, uid, now
@@ -68,7 +68,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.3.0', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.4.0', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -128,7 +128,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.3.0', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.4.0', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -336,7 +336,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.3.0', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.4.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
             'runtime': {'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
@@ -418,7 +418,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     @app.put('/api/artifacts/{artifact_id}')
     def artifact_put(artifact_id: str, body: RevisionInput):
         visible_artifact(artifact_id)
-        return public(app.state.store.revise_artifact(artifact_id, body.expected_revision, body.items))
+        return public(app.state.store.revise_artifact(artifact_id, body.expected_revision, body.items, report=body.report))
 
     @app.get('/api/artifacts/{artifact_id}/revisions')
     def artifact_revisions(artifact_id: str):
@@ -436,12 +436,27 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         historical = app.state.store.revision(artifact_id, body.revision)
         return public(app.state.store.revise_artifact(artifact_id, body.expected_revision, historical['items'], reason=f'restore:{body.revision}'))
 
-    @app.get('/api/artifacts/{artifact_id}/export')
-    def artifact_export(artifact_id: str, layout: str | None = None, ids: str | None = None):
+    @app.get('/api/artifacts/{artifact_id}/export-options')
+    def artifact_export_options(artifact_id: str):
         artifact = visible_artifact(artifact_id)
+        return {'snapshot': artifact.get('_profile',{}), 'profiles': app.state.store.list('profile',project_id=artifact['project_id'])}
+
+    @app.get('/api/artifacts/{artifact_id}/export')
+    def artifact_export(artifact_id: str, layout: str | None = None, ids: str | None = None, profile_id: str | None = None):
+        artifact = visible_artifact(artifact_id)
+        if profile_id:
+            profile = app.state.store.get('profile',profile_id)
+            if profile['project_id'] != artifact['project_id']:
+                raise DomainError('导出 Profile 不属于当前项目')
+            artifact = {**artifact, '_profile':profile['config']}
         layout = layout or artifact.get('_profile', {}).get('excel_layout', 'case')
         output = export_cases(artifact, layout, ids.split(',') if ids is not None else None)
-        return Response(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': 'attachment; filename="test-cases.xlsx"'})
+        project = app.state.store.get('project', artifact['project_id'])
+        pattern = artifact.get('_profile',{}).get('filename_pattern','{project}_{date}.xlsx')
+        filename = str(pattern).replace('{project}',project['name']).replace('{date}',now()[:10])
+        filename = ''.join(c if c.isalnum() or c in '-_.' else '_' for c in filename)[:160]
+        if not filename.endswith('.xlsx'): filename += '.xlsx'
+        return Response(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': "attachment; filename=\"test-cases.xlsx\"; filename*=UTF-8''" + quote(filename)})
 
     @app.get('/{path:path}', include_in_schema=False)
     def frontend(path: str):

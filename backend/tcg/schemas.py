@@ -9,7 +9,8 @@ ROLES = {'primary', 'change', 'supplement', 'clarification', 'example', 'knowled
 DEFAULT_PROFILE = {
     'language': '中文', 'scenario_level': 'standard', 'case_level': 'standard',
     'case_types': ['Business', 'Negative', 'Boundary'], 'additional_rules': '',
-    'scope': '', 'excel_layout': 'case', 'sheet_name': 'Test Cases',
+    'scope': '', 'excel_layout': 'case', 'sheet_name': 'Test Cases', 'filename_pattern':'{project}_{date}.xlsx',
+    'excel_columns':[{'field':f,'header':h} for f,h in [('id','Case ID'),('title','Title'),('type','Type'),('priority','Priority'),('preconditions','Preconditions'),('steps','Steps'),('expected','Expected Result')]],
 }
 
 
@@ -59,6 +60,7 @@ class TextInput(NameInput):
 
 
 class MessageInput(BaseModel):
+    profile_override: dict[str, Any] | None = None
     experience: Literal['legacy', 'agent', 'reliable'] = 'legacy'
     case_types: list[Literal['Business', 'Negative', 'Boundary', 'Security']] | None = Field(default=None, min_length=1, max_length=4)
     depth: Literal['auto', 'quick', 'standard', 'deep'] = 'auto'
@@ -81,6 +83,7 @@ class MessageInput(BaseModel):
 
 
 class RevisionInput(BaseModel):
+    report: dict[str, Any] | None = None
     expected_revision: int = Field(ge=1)
     items: list[dict[str, Any]]
 
@@ -91,6 +94,7 @@ class RestoreInput(BaseModel):
 
 
 class ResumeInput(BaseModel):
+    depth: Literal['quick', 'standard', 'deep'] | None = None
     answer: str | None = Field(default=None, max_length=100_000)
     approved: bool | None = None
 
@@ -118,6 +122,11 @@ def profile_config(config):
             raise DomainError(f'{field} 必须为字符串')
     if result['excel_layout'] not in ('case', 'step'):
         raise DomainError('excel_layout 必须为 case 或 step')
+    columns = result.get('excel_columns')
+    if columns is not None and (not isinstance(columns,list) or not columns or any(not isinstance(c,dict) or not isinstance(c.get('field'),str) or not c['field'] or not isinstance(c.get('header'),str) for c in columns)):
+        raise DomainError('excel_columns 必须是包含 field/header 的非空数组')
+    if not isinstance(result.get('filename_pattern',''),str):
+        raise DomainError('filename_pattern 必须为字符串')
     if len(json.dumps(result, ensure_ascii=False)) > 100_000:
         raise DomainError('Profile 配置过大')
     return result
