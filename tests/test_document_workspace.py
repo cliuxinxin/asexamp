@@ -57,7 +57,7 @@ def test_evidence_is_stable_scoped_and_cached_without_mutation_leaks(workspace, 
     assert calls == [['src-b', 'src-a'], ['src-other']]
 
 
-def test_store_evidence_lists_each_chat_only_once_and_preserves_source_order(workspace, monkeypatch):
+def test_store_evidence_avoids_chat_wide_reads_and_preserves_source_order(workspace, monkeypatch):
     store, _, _, _ = workspace
     calls = []
     original = store.list
@@ -70,7 +70,8 @@ def test_store_evidence_lists_each_chat_only_once_and_preserves_source_order(wor
     monkeypatch.setattr(store, 'list', counted)
     evidence = store.evidence(['src-b', 'src-a'])
     assert [item['id'] for item in evidence] == ['src-b#P1', 'src-a#P1', 'src-a#P2']
-    assert calls == [store.get('source', 'src-a')['chat_id']]
+    # Filtering now happens in SQLite; even one chat-wide body read is too broad.
+    assert calls == []
 
 
 def test_catalog_is_metadata_only_and_hard_bounded(tmp_path):

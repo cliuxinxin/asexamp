@@ -7,7 +7,8 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tcg.main import create_app
+# Historical V2 behavior; V3 product acceptance is test_incremental_agent.py.
+from legacy_agent_app import create_app
 from test_backend_api import setup_chat, start, until
 from test_backend_api import Model as LegacyModel
 

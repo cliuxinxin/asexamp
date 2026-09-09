@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from tcg import agent_contracts as contract
 from tcg.documents import parse_text
 from tcg.agent_generation import compact_previous
-from tcg.main import create_app
+# Historical V2 behavior; V3 product acceptance is test_incremental_agent.py.
+from legacy_agent_app import create_app
 from tcg.schemas import OutputValidationError
 from test_agent_workflow import AgentModel, GoalModel
 from test_backend_api import setup_chat, start, until

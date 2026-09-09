@@ -87,6 +87,8 @@ class Engine:
         self.stopping = False
         self.saver_context = None
         self.graph = None
+        from .runtime_version import runtime_version
+        self.runtime = runtime_version()
 
     async def start(self):
         self.saver_context = AsyncSqliteSaver.from_conn_string(str(self.store.directory / 'checkpoints.sqlite3'))
@@ -106,9 +108,9 @@ class Engine:
         builder.add_edge('single', 'finish')
         builder.add_edge('finish', END)
         self.graph = builder.compile(checkpointer=saver)
-        from .agent import Agent
-        self.agent = Agent(self, saver)
-        self.diagnostics.record('service.ready', graph_nodes=10, history_limit=12)
+        from .incremental_agent import IncrementalAgent
+        self.agent = IncrementalAgent(self, saver)
+        self.diagnostics.record('service.ready', graph_nodes=4, legacy_graph_nodes=9, history_limit=12, **self.runtime)
         # Lifespan already holds the exclusive data-directory OS lock. Any
         # persisted edit token therefore belongs to a request in a dead process;
         # invalidate it without advancing the real interrupt or changing items.
@@ -214,7 +216,9 @@ class Engine:
             run = self.store.run(run_id)
             if run['status'] not in ('queued', 'running'):
                 return
-            graph = self.agent.graph if run.get('graph_version') == 2 else self.graph
+            if run.get('graph_version') == 2 and getattr(self.agent, 'supported_graph_version', 2) != 2:
+                raise DomainError('此任务来自旧版 Agent；本次版本不迁移旧检查点。请新建任务，已有来源、模型配置和成果保留。')
+            graph = self.agent.graph if run.get('graph_version', 0) >= 2 else self.graph
             self.store.update_run(run_id, status='running', error=None)
             self.trace('checkpoint.loading', run_id)
             snapshot = await graph.aget_state(self.config(run_id))
@@ -228,7 +232,7 @@ class Engine:
                 argument = {'run_id': run_id, 'intent': run['intent'], 'analysis_batch': 0, 'scenario_page': 0, 'case_page': 0}
             if snapshot.values and not snapshot.next and not snapshot.interrupts:
                 # Handles process death after final checkpoint but before status update.
-                if run.get('graph_version') != 2:
+                if run.get('graph_version', 0) < 2:
                     await self.node_finish(snapshot.values)
             else:
                 self.trace('graph.invoking', run_id, resuming=isinstance(argument, Command))
@@ -241,7 +245,7 @@ class Engine:
                 paused = snapshot.interrupts[0]
                 with self.store.transaction():
                     current = self.store.run(run_id)
-                    agent_run = current.get('graph_version') == 2
+                    agent_run = current.get('graph_version', 0) >= 2
                     changed = agent_run and current.get('_instruction_version', 0) != snapshot.values.get('epoch', 0)
                     continued = agent_run and self.agent.continuation(current) and paused.value.get('artifact_id') and paused.value['type'] in ('clarification', 'strategy_review')
                     if changed or continued:
@@ -252,7 +256,7 @@ class Engine:
                             _resume={'interrupt_id': paused.id, 'value': {'instruction': True} if changed else {'proceed': True}})
                     else:
                         self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=paused.value, _interrupt_id=paused.id, _resume=None)
-            elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version') != 2:
+            elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version', 0) < 2:
                 await self.node_finish(snapshot.values)
         except asyncio.CancelledError:
             # Shutdown preserves queued/running records for the next process.
@@ -763,8 +767,8 @@ class Engine:
             if run['status'] != 'waiting':
                 raise DomainError('任务当前未等待人工输入', 409)
             kind = run['interrupt']['type']
-            agent_gate = run.get('graph_version') == 2 and kind in ('clarification', 'strategy_review') and bool(run['interrupt'].get('artifact_id'))
-            if response.get('proceed') and not agent_gate:
+            agent_gate = run.get('graph_version', 0) >= 2 and kind in ('clarification', 'strategy_review') and bool(run['interrupt'].get('artifact_id'))
+            if response.get('proceed') and not agent_gate and kind != 'work_pause':
                 raise DomainError('请先提供业务规则并完成初步分析，才能按当前信息继续')
             has_answer = isinstance(response.get('answer'), str) and bool(response['answer'].strip())
             if kind == 'clarification' and not has_answer and not (agent_gate and response.get('proceed')):

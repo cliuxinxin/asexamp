@@ -115,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.1.0', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.1.0', 'storage': 'local', 'model_configured': configured(), 'runtime': app.state.engine.runtime}
 
     @app.get('/api/settings')
     def settings_get():
@@ -251,6 +251,26 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     def run_get(run_id: str):
         return run_view(app.state.store.run(run_id))
 
+    @app.get('/api/runs/{run_id}/work')
+    def run_work(run_id: str, cursor: int = 0, limit: int = 20):
+        if cursor < 0 or not 1 <= limit <= 100:
+            raise DomainError('cursor 必须非负，limit 必须为 1–100')
+        view = app.state.engine.agent.workspace.view(run_id)
+        all_items = view['items']
+        return {**view, 'items': all_items[cursor:cursor+limit],
+                'next_cursor': cursor+limit if cursor+limit < len(all_items) else None}
+
+    @app.post('/api/runs/{run_id}/pause')
+    def run_pause(run_id: str):
+        store = app.state.store
+        with store.transaction():
+            run = store.run(run_id)
+            if run.get('graph_version') != 3 or run['status'] not in ('running', 'queued'):
+                raise DomainError('只有正在进行的新版任务可以暂停', 409)
+            store.update_run(run_id, _pause_requested=True)
+            app.state.engine.agent.update(run_id, pause_requested=True)
+        return run_view(store.run(run_id))
+
     @app.get('/api/runs/{run_id}/diagnostics')
     def run_diagnostics(run_id: str, download: bool = False):
         engine, store = app.state.engine, app.state.store
@@ -260,7 +280,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
             'version': '2.1.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
-            'runtime': {'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
+            'runtime': {**engine.runtime, 'graph_thread_id': run_id, 'task_active': engine.task_active(run_id), 'diagnostic_storage_degraded': engine.diagnostics.storage_degraded, 'diagnostic_file_degraded': engine.diagnostics.file_degraded},
             'context': {'conversation_messages': history, 'history_limit': 12,
                         'history_omitted': max(0, run.get('_history_total', history) - history),
                         'source_count': len(run.get('_source_ids', [])),
@@ -334,7 +354,10 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/artifacts/{artifact_id}')
     def artifact_get(artifact_id: str):
-        return public(visible_artifact(artifact_id))
+        artifact = app.state.store.get('artifact', artifact_id)
+        if not artifact.get('_visible') and not artifact.get('_preview_run_id'):
+            raise DomainError('未找到可查看的 Artifact', 404)
+        return {**public(artifact), 'preview': not artifact.get('_visible', False)}
 
     @app.put('/api/artifacts/{artifact_id}')
     def artifact_put(artifact_id: str, body: RevisionInput):

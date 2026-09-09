@@ -1,219 +1,110 @@
-# Local intelligent design agent API
+# Local incremental Agent API (graph version 3)
 
-All state remains in the existing local SQLite data directory. No external database,
-background cloud deployment, or additional model service is required. Model calls
-use the existing saved/environment connection and the fixed 3600-second timeout.
+The web chat explicitly sends `experience: agent`. Python, SQLite, the model adapter,
+custom headers and the 3,600-second timeout remain local and unchanged.
 
-## Compatibility and goals
+## Create work
 
-`POST /api/chats/{chat_id}/messages` accepts:
+`POST /api/chats/{chat_id}/messages`:
 
 ```json
 {
-  "content": "Design authentication tests",
+  "content": "根据需求生成测试用例",
   "experience": "agent",
   "depth": "auto",
-  "confirm_strategy": true,
+  "confirm_strategy": false,
   "intent": "auto",
   "mode": "auto"
 }
 ```
 
-`experience` defaults to `legacy`. Requests that omit it and old checkpoints retain
-the original LangGraph. Agent requests use `graph_version: 2`, a separate compiled
-LangGraph sharing the durable checkpoint database and exclusive local runner.
+Supported intents: `auto`, `review_requirement`, `generate_scenario`, `generate_case`,
+`review_case`, `query`, `modify`, `learn_template`. Optional `source_ids`, `profile_id`,
+`artifact_id`, `selected_ids`, `as_requirement` retain their existing meanings.
+The response is `{message, run}`. New Agent runs have `graph_version: 3`.
+Requests omitting `experience` still use the original legacy API default; this is
+not the web chat's default. Unfinished v2 Agent checkpoints are not migrated and
+receive a clear request to start a new task. Saved sources/artifacts remain usable.
 
-All existing goals remain supported: automatic routing, requirement analysis,
-scenario generation, case generation, case review/import, grounded questions,
-template proposals, and selected Artifact modification. Analysis-only and
-scenario-only requests stop at their requested goal. Auto routing uses the existing
-bounded metadata-based route contract. Selected modifications retain the original
-Artifact ID and create one new revision only after the final publication guard.
+Depth is `auto`, `quick`, `standard`, or `deep`. Auto proceeds with unresolved business
+questions recorded as unconfirmed. To review the business direction before generation,
+send `mode: hitp, confirm_strategy: true`. Absence of a business subject/source can
+still produce an input clarification. Direct business text is classified and saved
+verbatim; `as_requirement: true` explicitly saves it without classification.
 
-With no evidence, a model intake classifier distinguishes concrete user-authored
-business requirements from generation instructions and ambiguous messages. Clear
-requirements are saved verbatim as an inspectable source; ambiguous or
-instruction-only input pauses for clarification. Message length is never the rule.
-`as_requirement: true` still explicitly saves the message as a requirement.
+## Run and work views
 
-## Planning, depth, strategy and coverage
+`GET /api/runs/{run_id}` returns status, stage, errors/recovery, final `artifact_ids`,
+and `agent` with summaries, insights, current depth, `work`, `preview_ids` and
+`pause_requested`. `work.items` in live updates is bounded to the latest 20 records.
+Total work can grow as pagination and dependencies are discovered; it is not a fixed
+percentage of model thinking or an estimate of elapsed time.
 
-The model produces a plan, depth rationale, evidence-cited public insight, and a
-next action chosen from server-checked prerequisites. After analysis it can proceed
-or reassess; later it can add targeted scenarios/cases, inspect coverage or finish.
-Reassessment invalidates downstream candidates and passes through strategy review
-again. Within unchanged user scope it cannot remove confirmed requirement/branch
-IDs. Two identical reassessments, repeated unchanged gaps, three repairs, or eighteen
-planner iterations stop visibly. Pagination requires new IDs and cursors and has an
-explicit 200-page execution budget; exhaustion fails visibly, never truncates success.
-
-Depth values are `auto`, `quick`, `standard`, `deep`. The model resolves `auto` with a
-reason. Every generation request includes substantive `depth_guidance`: critical
-partitions for quick; positive/negative/boundary coverage for standard; interacting
-rules, transition sequences and recovery paths for deep. Every depth must still
-cover the confirmed requirements and branches. These are product presets, not
-ISTQB certification levels.
-
-The analysis Artifact contains `report.business_model.nodes` and `.edges`, each
-with stable IDs, labels and exact non-example evidence refs. Every edge must refer
-to existing nodes. The server derives Mermaid from that validated model rather than
-executing arbitrary model Mermaid. Source is limited to 30,000 characters and
-contains only the generated flowchart syntax and sanitized labels. Frontends must
-still use strict Mermaid security and offer a recoverable source view.
-
-`report.strategy` contains `depth`, `rationale`, `techniques`, `scope`. Assumptions
-remain separate from grounded requirement items. All supplied business evidence
-chunks must be represented in the analyzed requirements. Blocking questions pause
-even `confirm_strategy: false` requests, unless the user explicitly chooses to
-continue with those uncertainties retained.
-
-Default strategy pause:
-
-```json
-{"type":"strategy_review","artifact_id":"art_...","questions":[]}
-```
-
-`POST /api/runs/{run_id}/resume` accepts `{"approved":true}` for strategy and
-`{"answer":"..."}` for a clarification interrupt. Strategy feedback uses
-`POST /api/runs/{run_id}/instructions` with `{"content":"..."}`. It returns
-`{"run":Run}`. After a strategy edit, approve the updated strategy through `/resume`.
-
-At an agent analysis/strategy pause with an `artifact_id`, `/resume` also accepts
-`{"proceed":true}` to continue without another clarification pass. An optional
-`answer` is applied as new business information first, then execution continues.
-Free-text replies from either `/resume` or `/instructions` distinguish continuation
-from business edits. Common complete continuation commands are handled directly;
-other replies use the bounded `agent_feedback` classifier. Pure workflow decisions
-are recorded separately, never promoted to business source evidence. Responses
-containing both concrete changes and a continuation request reanalyze once, apply
-the changes, and do not pause for the remaining questions again.
-
-Continuation is scoped to the current instruction epoch. It removes `analyze` from
-subsequent planner choices while leaving coverage checks and repairs in place. New
-business instructions invalidate that decision and can require strategy review again.
-Unresolved questions/assumptions remain in conversation memory and generation context;
-analysis/scenario/case reports expose `deferred_questions`, `assumptions`, and
-`clarification_decision`. Final summaries include these uncertainties even if the
-model omits them. Missing-evidence intake and legacy pauses cannot use `proceed`.
-Existing v2 waiting checkpoints work without a data reset.
-
-Common short continuation commands also work while analysis is running: they save
-a workflow decision without restarting the analysis. While a previously accepted
-gate reply is still being classified/applied, a second instruction returns 409 so
-neither reply is silently lost; the frontend keeps the unsent draft. Cancellation
-remains available. The pending marker is durable and cleared with reply application.
-
-Scenarios and cases carry `requirement_ids` and `branch_ids`; cases also carry
-`scenario_id`. Case links must be subsets of their parent scenario's links. The
-Artifact `report.traceability` contains `id`, `title`, `requirement_ids`,
-`branch_ids`, `scenario_id`, `refs`, and `case_id` for cases. Coverage is computed
-from accepted links over the confirmed model, never from a model-provided percentage.
-Gaps expose `kind`, `id`, readable `title`, and `refs`. Generation cannot finish with
-uncovered requirements, branches, or scenarios. A failed repair preserves the
-analysis/earlier versions and exposes `recovery.category: "incomplete_coverage"`.
-Case/scenario reports retain their requirement/scenario basis. Every AI or manual
-revision recomputes coverage and traceability; older reports lacking that basis
-lose stale derived fields and expose `coverage_invalidated`. Historical revision
-snapshots remain unchanged. Case review also preserves a separate review report.
-
-This is **test-design coverage**, not executed test results or code coverage. Link
-validation cannot mathematically establish semantic test completeness: model
-analysis, the strategy confirmation, and human review of expected results remain
-relevant. Local tests exercise real LangGraph orchestration with scripted models;
-they do not establish the quality of an arbitrary remote model.
-
-## Durable instructions and memory
-
-Only active agent runs (`queued`, `running`, `waiting`) accept supplemental
-instructions. SQLite stores the verbatim instruction, clarification source,
-monotonic instruction version, chat message and confirmed decision. A running model
-call may finish, but its obsolete result is rejected before accepting artifacts or
-publishing. At the next safe boundary the graph reapplies the instructions and
-rechecks strategy. The instruction/call/interrupt boundary and service restarts are
-covered by regression tests. A supplemental instruction does not launch another
-concurrent run for the chat.
-
-The public chat response adds `memory`, with `decisions`, `scope`, `open_questions`,
-`scope_confirmed`, `source_refs`, `assumptions` and `updated_at`. Open questions are
-saved before the task pauses. Confirmed decisions are derived from
-explicit strategy approvals or verbatim user clarification/instructions. They are
-not limited to the last twelve messages. Automatic strategy choices and model
-assumptions are not promoted to confirmed decisions. Analysis can report a conflict
-using an existing decision ID and newer change/clarification evidence; the old
-decision then remains visible with `status: "superseded"`, `superseded_by` refs and a
-public supersession insight.
-
-## Run snapshots, events and recovery
-
-Agent runs expose:
+`GET /api/runs/{run_id}/work?cursor=0&limit=20` returns:
 
 ```json
 {
-  "experience":"agent",
-  "graph_version":2,
-  "agent":{
-    "depth":"standard",
-    "rationale":"...",
-    "plan":[{"id":"analyze","title":"Analyze requirements","status":"running"}],
-    "insights":[{"id":"ins_...","summary":"...","refs":["src_...#P1"],"kind":"finding"}],
-    "pending_instructions":0,
-    "coverage":{"requirements_total":1,"requirements_covered":1,"branches_total":2,"branches_covered":2,"gaps":[]},
-    "summary":"..."
-  }
+  "completed": 1,
+  "total": 2,
+  "current": {
+    "id": "work_...", "key": "...", "kind": "work_cases",
+    "title": "生成用例", "status": "running", "refs": ["src_...#P1"],
+    "artifact_id": null, "attempt": 1, "error": null
+  },
+  "items": [],
+  "next_cursor": null
 }
 ```
 
-Plans and public insights persist and emit `agent` SSE events with `{run_id,agent}`.
-Existing `update`, `model_delta`, `progress`, `done`, event IDs and SSE replay remain
-available. Public insights explain findings and decisions; they are not private
-chain of thought. Expandable model output and request inspection remain available.
+`cursor >= 0`, `1 <= limit <= 100`. Work records contain no prompt, source body or
+private model result. Accepted records may expose a draft `artifact_id`. Status is
+`running`, `completed`, `failed`, or `superseded`; superseded work is retained for
+inspection but excluded from current completion counts.
 
-Failures add `recovery: {category,title,detail,suggestions,preserved,retryable}`.
-Authentication/configuration failures do not receive blind automatic retries.
-Structured outputs receive one targeted schema-repair attempt. `/retry` uses the
-checkpoint and clears the failed raw call cache while retaining earlier accepted
-work. Retry does not erase explicit loop/coverage budgets; unresolved business scope
-may require cancelling and starting a narrower task. Provider exception contents,
-request validation inputs and secret values are never included in error messages.
+## Controls
 
-## Custom headers and authentication
+| Endpoint | Body | Behavior |
+| --- | --- | --- |
+| `POST /api/runs/{id}/pause` | `{}` | Request pause at the next safe work boundary; does not suspend an upstream request already in flight |
+| `POST /api/runs/{id}/resume` | `{"proceed":true}` | Continue a work pause or approved direction |
+| `POST /api/runs/{id}/resume` | `{"answer":"业务补充"}` | Answer a clarification or submit direction feedback |
+| `POST /api/runs/{id}/instructions` | `{"content":"仅修改登录锁定规则"}` | Persist a versioned instruction and recompute affected work; returns `{run}` |
+| `POST /api/runs/{id}/retry` | `{}` | Retry unfinished work after failure; accepted work remains |
+| `POST /api/runs/{id}/cancel` | `{}` | Stop the local run, retaining accepted work/history |
 
-Settings input adds:
+Interrupts use `work_pause` (manual boundary or read budget), `strategy_review`, or
+`clarification`. A work pause caused by eight read rounds can continue with another
+read allowance. Repeated identical tool requests fail visibly instead of looping.
+Pure continue commands are not promoted to business evidence. An absent business
+subject cannot be bypassed by continue alone.
 
-```json
-{"headers":{"X-Api-Key":"value"},"clear_headers":false,"auth_mode":"headers"}
-```
+## SSE and inspection
 
-Public settings return only `header_names`, `has_headers`, and `auth_mode`, alongside
-existing settings. Header values are encrypted locally with the existing Fernet key.
-Omitted headers retain the saved set only on the same provider/endpoint. Explicit
-`headers` replaces the entire set; `{}` or `clear_headers: true` clears it. Endpoint
-changes clear inherited API keys and headers. Existing API-key inputs remain valid.
+`GET /api/runs/{id}/events?after={event_id}` supports `Last-Event-ID` and persistent
+replay. Existing run/stage/model-call events remain. `agent` carries public Agent
+state; `agent_work` carries bounded work progress. Clients deduplicate by event ID
+and fetch the paginated inventory only when expanded.
 
-Header names are case-insensitive, unique HTTP tokens; at most 32 are accepted.
-Values must be single-line ASCII and cannot contain controls/CRLF. Managed transport
-headers such as Host, Content-Length, Connection, Transfer-Encoding, Upgrade and
-Trailer are rejected. An explicit Authorization header requires `auth_mode: "headers"`.
-Header-only OpenAI requests remove the SDK's default Bearer header at the actual
-HTTP request boundary and then apply the explicit headers. Ollama receives the same
-merged custom/auth configuration, with ambient `OLLAMA_API_KEY` stripped at the
-wire boundary. Both providers disable redirects so arbitrary custom secrets cannot
-be forwarded to another origin; configure the final model endpoint directly.
-Connection tests use that same gateway.
+`GET /api/runs/{id}/model-calls/{call_id}/request` returns the recorded request;
+`?download=true` downloads it. Header values are redacted. `GET /api/runs/{id}/diagnostics`
+adds `runtime` with loaded-at code fingerprint, commit (when available), graph,
+protocol, prompt and schema versions. `GET /api/health` exposes the same startup
+runtime identity. Live token estimates are labeled as character estimates; provider
+usage remains distinct.
 
-Environment variables:
+## Drafts and final artifacts
 
-```dotenv
-TCG_MODEL_AUTH_MODE=headers
-TCG_MODEL_HEADERS_JSON='{"X-Api-Key":"your-value"}'
-```
+`GET /api/artifacts/{id}` returns `preview: true` for an accepted stage draft.
+Drafts can be inspected, including evidence and Mermaid graphs, but cannot be edited,
+exported, restored or used as a new task's target. Completing the run does not turn
+its intermediate drafts into final artifacts. The final published artifact has
+`preview: false`, uses the existing revision/export APIs and appears in chat.
 
-Process environment overrides the file using whole-object replacement. Changing an
-endpoint in a higher-priority layer discards lower-priority credentials. Environment
-managed settings remain read-only in the settings UI. The model request inspector
-includes header names with masked values only; header values never enter prompts,
-ordinary settings responses, diagnostics or persisted unredacted request records.
+Generation publishes after accepted source work, applicable case types and linked
+coverage pass validation. Review preserves coverage and edits only the current group.
+Explicit selected modifications preserve unselected items. Updates received after
+accepted modifications are based on their accepted result and cumulative operations;
+publication writes one new revision under the original version guard.
 
-Local HTTP fixtures verify actual OpenAI/Ollama wire headers, header-only mode,
-explicit Authorization, masking, endpoint clearing, encryption and nonretryable
-authentication errors. No tests call or bill a remote model API.
+See [implementation and validation boundaries](INCREMENTAL_AGENT.md) for the actual
+LangGraph and model-input rules. The retained v2 docs describe historical behavior.
