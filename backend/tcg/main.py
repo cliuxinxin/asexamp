@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from .diagnostics import endpoint_origin, error_details
-from .documents import MAX_UPLOAD, classify_source, export_cases, parse_document, parse_text
+from .documents import MAX_UPLOAD, classify_source, export_artifact, parse_document, parse_text
 from .environment import runtime_value
 from .workflow import WorkflowEngine as Engine
 from .model import LangChainGateway, Settings
@@ -77,7 +77,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.5.7', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.5.8', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -137,7 +137,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.5.7', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.5.8', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -345,7 +345,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.5.7', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.5.8', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -486,6 +486,12 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         artifact = visible_artifact(artifact_id)
         from .case_fields import template_check
         profiles=app.state.store.list('profile',project_id=artifact['project_id'])
+        if artifact['type']=='scenarios':
+            from .schemas import DEFAULT_PROFILE
+            defaults={key:value for key,value in DEFAULT_PROFILE.items() if key.startswith('scenario_')}
+            return {'kind':'scenarios','snapshot':{**defaults,**artifact.get('_profile',{})},
+                    'profiles':[{**p,'config':{**defaults,**p['config']},'field_check':None} for p in profiles]}
+        if artifact['type']!='cases':raise DomainError('仅测试场景或测试用例支持 Excel 导出')
         return {'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
                 'profiles':[{**p,'field_check':template_check(p['config'],artifact['items'])} for p in profiles]}
 
@@ -533,13 +539,15 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                 raise DomainError('导出 Profile 不属于当前项目')
             artifact = {**artifact, '_profile':profile['config']}
         layout = layout or artifact.get('_profile', {}).get('excel_layout', 'case')
-        output = export_cases(artifact, layout, ids.split(',') if ids is not None else None)
+        output = export_artifact(artifact, layout, ids.split(',') if ids is not None else None)
         project = app.state.store.get('project', artifact['project_id'])
-        pattern = artifact.get('_profile',{}).get('filename_pattern','{project}_{date}.xlsx')
+        pattern_key='scenario_filename_pattern' if artifact['type']=='scenarios' else 'filename_pattern'
+        fallback='{project}_scenarios_{date}.xlsx' if artifact['type']=='scenarios' else '{project}_{date}.xlsx'
+        pattern = artifact.get('_profile',{}).get(pattern_key,fallback)
         filename = str(pattern).replace('{project}',project['name']).replace('{date}',now()[:10])
         filename = ''.join(c if c.isalnum() or c in '-_.' else '_' for c in filename)[:160]
         if not filename.endswith('.xlsx'): filename += '.xlsx'
-        return Response(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': "attachment; filename=\"test-cases.xlsx\"; filename*=UTF-8''" + quote(filename)})
+        return Response(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': "attachment; filename=\"tcg-export.xlsx\"; filename*=UTF-8''" + quote(filename)})
 
     @app.get('/{path:path}', include_in_schema=False)
     def frontend(path: str):

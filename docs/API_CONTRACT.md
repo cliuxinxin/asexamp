@@ -138,3 +138,12 @@ Request capture is installed only on the production gateway, using the active di
 ## v2.0.7 bootstrap recovery
 
 start.py checks the local interpreter, pyvenv.cfg, activate script and a working pip CLI. Missing skeleton files trigger EnvBuilder(with_pip=False) without clearing the directory; missing pip triggers a separate visible python -u -m ensurepip --upgrade --default-pip -v process. Repaired environments rerun the locked requirements installation before continuing. Bootstrap KeyboardInterrupt exits 130 with a restart instruction; failed child commands retain their exit code and visible error output. --no-install continues to use the current interpreter. Model timeouts, request inspection and API behavior are unchanged except the reported version.
+
+
+## v2.5.8 additions
+
+- Analysis reports and clarification interrupts may include `question_suggestions: [{question, answer, basis, refs, confidence}]`. `confidence` is `supported` or `assumption`. Suggestions are optional and require explicit user submission through the existing resume API. Invalid suggestions are discarded while questions remain available.
+- Profiles gain independent `scenario_excel_columns`, `scenario_sheet_name`, and `scenario_filename_pattern`. Scenario columns support `field`, `header`, and optional `definition`; `refs` and `requirement_ids` may be exported as traceability lists. Existing case column rules remain unchanged.
+- `GET /api/artifacts/{id}/export-options` and `/export` support both `cases` and `scenarios`. Scenario options return `kind: "scenarios"`, effective snapshot defaults and available profiles. The existing `ids` and `profile_id` parameters select rows and export configuration. Scenario exports never call case field completion.
+- New template proposal reports contain `config` and `template_kinds: ["scenarios" | "cases"]`. New chat messages publish `metadata.proposal: {config, template_kinds}`. Historical messages may still contain a plain Profile config in `metadata.proposal`; clients should accept both forms.
+- `template_kinds` is proposal metadata, not a Profile field. Applying a scoped proposal to a selected destination Profile preserves that Profile's unrelated template settings.

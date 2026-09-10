@@ -5,6 +5,27 @@ import {api,errText} from './api';
 import {Dialog,ErrorBox,Spinner} from './ui';
 import type {Json,Profile,Settings} from './types';
 
+// Keep kind boundaries aligned with WorkflowEngine.template_config.
+const templateKeys:Record<string,string[]>={
+ scenarios:['scenario_excel_columns','scenario_sheet_name','scenario_filename_pattern'],
+ cases:['excel_columns','excel_layout','sheet_name','filename_pattern','template_rules','case_level','case_types','additional_rules'],
+};
+function scopedProposalKeys(proposal?:Json){
+ const kinds=proposal?.template_kinds;
+ if(!proposal?.config||typeof proposal.config!=='object'||Array.isArray(proposal.config)||!Array.isArray(kinds)||!kinds.length||kinds.some(kind=>!Object.hasOwn(templateKeys,kind)))return undefined;
+ return [...new Set<string>(kinds.flatMap(kind=>templateKeys[kind]))];
+}
+function applyTemplateFields(base:Json,values:Json,keys:string[]){
+ const result={...base};
+ for(const key of keys)if(Object.hasOwn(values,key))result[key]=values[key];
+ return result;
+}
+function parseProfileConfig(value:string):Json{
+ const parsed=JSON.parse(value);
+ if(!parsed||Array.isArray(parsed)||typeof parsed!=='object')throw new Error('项目偏好必须是 JSON 对象');
+ return parsed;
+}
+
 export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onClose,onSaved,onSelectProfile,initialTab='model',onUseOnce}:{projectId:string;profiles:Profile[];activeProfileId?:string;proposal?:Json;onClose:()=>void;onSaved:()=>void;onSelectProfile?:(id:string)=>void;initialTab?:'model'|'profile';onUseOnce?:(config:Json)=>void}){
  const [tab,setTab]=useState(proposal?'profile':initialTab);
  const [settings,setSettings]=useState<Settings>();
@@ -12,7 +33,8 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
  const [headers,setHeaders]=useState('');const [clearHeaders,setClearHeaders]=useState(false);
  const initialProfile=profiles.find(p=>p.id===activeProfileId)??profiles[0];
  const [profileId,setProfileId]=useState(initialProfile?.id??'');const [name,setName]=useState(initialProfile?.name??'默认偏好');
- const [config,setConfig]=useState(JSON.stringify(proposal??initialProfile?.config??{},null,2));
+ const learnedKeys=scopedProposalKeys(proposal);
+ const [config,setConfig]=useState(()=>JSON.stringify(learnedKeys?applyTemplateFields(initialProfile?.config??{},proposal!.config,learnedKeys):(proposal?.config??proposal??initialProfile?.config??{}),null,2));
  const [error,setError]=useState('');const [notice,setNotice]=useState('');const [working,setWorking]=useState(false);
  useEffect(()=>{let active=true;api<Settings>('/settings').then(value=>active&&setSettings(value)).catch(e=>active&&setError(errText(e)));return()=>{active=false;};},[]);
  function changeEndpoint(provider:Settings['provider'],base_url:string){
@@ -41,9 +63,17 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
    onSaved();
   }catch(e){setError(errText(e));}finally{setWorking(false);}
  }
+ function selectProfile(id:string){
+  const selected=profiles.find(p=>p.id===id);if(!selected)return;
+  try{
+   if(learnedKeys)setConfig(JSON.stringify(applyTemplateFields(selected.config,parseProfileConfig(config),learnedKeys),null,2));
+   else if(!proposal)setConfig(JSON.stringify(selected.config,null,2));
+   setProfileId(selected.id);setName(selected.name);setError('');
+  }catch{setError('请先修正配置 JSON，再切换 Profile；当前草稿已保留。');}
+ }
  async function saveProfile(create=false){
   setWorking(true);setError('');setNotice('');
-  try{const value=JSON.parse(config);if(!value||Array.isArray(value)||typeof value!=='object')throw new Error('项目偏好必须是 JSON 对象');
+  try{const value=parseProfileConfig(config);
    const selected=profiles.find(p=>p.id===profileId);
    if(create){const p=await api<Profile>('/projects/'+projectId+'/profiles',{name:name||'新偏好',config:value});setProfileId(p.id);onSelectProfile?.(p.id);}
    else await api('/profiles/'+profileId,{name,config:value,expected_version:selected?.version},'PUT');
@@ -71,10 +101,10 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
    <details className="timeout-settings"><summary>请求等待时间 · {settings.timeout_seconds} 秒</summary><label>单次请求超时（秒）<input type="number" min={5} max={3600} disabled={managed||settings.timeout_policy==='fixed_60_minutes'} value={settings.timeout_seconds} onChange={e=>setSettings({...settings,timeout_seconds:Number(e.target.value)})}/></label>{settings.timeout_policy==='fixed_60_minutes'&&<p className="muted small-text">模型请求超时统一为 60 分钟（3600 秒）；旧配置中的短超时也按此值执行。</p>}</details>
    <div className="dialog-actions">{!managed&&<button disabled={working} onClick={()=>saveModel()}><Save size={16}/>保存</button>}<button className="primary" disabled={working||!settings.model.trim()} onClick={()=>saveModel(true)}>{working?<Spinner/>:<PlugZap size={16}/>} {managed?'测试连接':'保存并测试连接'}</button></div>
   </div>:tab==='model'?<Spinner/>:null}
-  {tab==='profile'&&<div><p className="muted">{proposal?'AI 提出了下面的偏好建议。你可以保存为新的项目偏好。':'设置常用语言、测试关注范围和业务规则。场景颗粒度、用例深度独立配置；每轮可临时覆盖。'}</p>
-   <label>选择 Profile<select value={profileId} onChange={e=>{const p=profiles.find(x=>x.id===e.target.value);if(!p)return;setProfileId(p.id);setName(p.name);if(!proposal)setConfig(JSON.stringify(p.config,null,2));}}>{profiles.map(p=><option key={p.id} value={p.id}>{p.name} · v{p.version}</option>)}</select></label>
+  {tab==='profile'&&<div><p className="muted">{learnedKeys?'已应用学习到的模板设置。切换 Profile 会保留该模板的修改，其余设置来自所选 Profile。':proposal?'AI 提出了下面的偏好建议。你可以保存为新的项目偏好。':'设置常用语言、测试关注范围和业务规则。场景颗粒度、用例深度独立配置；每轮可临时覆盖。'}</p>
+   <label>选择 Profile<select value={profileId} onChange={e=>selectProfile(e.target.value)}>{profiles.map(p=><option key={p.id} value={p.id}>{p.name} · v{p.version}</option>)}</select></label>
    <label>Profile 名称<input value={name} onChange={e=>setName(e.target.value)}/></label><ProfileEditor value={config} onChange={setConfig}/><details><summary>高级配置 JSON · Schema 与全部字段</summary><label>配置 JSON<textarea className="code-editor profile-editor" aria-label="Profile 配置 JSON" value={config} onChange={e=>setConfig(e.target.value)} spellCheck={false}/></label></details>
-   <div className="dialog-actions">{onUseOnce&&<button disabled={working} onClick={()=>{try{onUseOnce(JSON.parse(config));onClose();}catch{setError('配置 JSON 无效');}}}>仅下一次运行使用</button>}{onSelectProfile&&<button disabled={working||!profileId} onClick={()=>{onSelectProfile(profileId);setNotice('后续任务将使用此项目偏好');}}>使用此项目偏好</button>}<button disabled={working} onClick={()=>saveProfile(true)}><Plus size={16}/>保存为新 Profile</button><button className="primary" disabled={working||!profileId} onClick={()=>saveProfile(false)}>{working?<Spinner/>:<Save size={16}/>}更新当前 Profile</button></div>
+   <div className="dialog-actions">{onUseOnce&&<button disabled={working} onClick={()=>{try{onUseOnce(parseProfileConfig(config));onClose();}catch{setError('配置 JSON 无效');}}}>仅下一次运行使用</button>}{onSelectProfile&&<button disabled={working||!profileId} onClick={()=>{onSelectProfile(profileId);setNotice('后续任务将使用此项目偏好');}}>使用此项目偏好</button>}<button disabled={working} onClick={()=>saveProfile(true)}><Plus size={16}/>保存为新 Profile</button><button className="primary" disabled={working||!profileId} onClick={()=>saveProfile(false)}>{working?<Spinner/>:<Save size={16}/>}更新当前 Profile</button></div>
   </div>}
   <ErrorBox message={error}/>{notice&&<p role="status" className="success inline"><Check size={16}/>{notice}</p>}
  </Dialog>;

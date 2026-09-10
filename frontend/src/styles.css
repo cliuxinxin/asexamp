@@ -70,6 +70,8 @@
 .technique-tags span{border:1px solid #dee8e2;background:#f8fbf9;font-size:11px;padding:4px 8px;border-radius:5px;color:#607866}
 .report-findings{padding:12px 14px;background:#f6f9f7;border-radius:8px;margin-top:13px}
 .report-findings.questions,.report-findings.assumptions{background:#fffbef}
+.answer-suggestion{margin:.55rem 0 .8rem;padding:.75rem;border:1px solid #d8e5e1;border-radius:12px;background:#f7fbfa}
+.answer-suggestion p{margin:.35rem 0}.answer-suggestion small{display:block;color:var(--muted);margin-bottom:.5rem}
 .report-findings>strong{font-size:12px}
 .report-findings ul{margin:7px 0 0;padding-left:18px;line-height:1.9;font-size:12px}
 .report-findings li{overflow-wrap:anywhere}

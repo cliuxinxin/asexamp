@@ -6,7 +6,7 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
-from .flow import FlowEngine
+from .flow import FlowEngine, valid_question_suggestions
 from .graph import State
 from .schemas import DomainError, INTENTS, profile_config
 from .documents import parse_text
@@ -104,9 +104,12 @@ class WorkflowEngine(FlowEngine):
     def small_context(self,run_id,**extra):
         context=super().small_context(run_id,**extra)
         # Formatting examples are separate from business evidence and only sent to authoring/review.
-        if self.store.run(run_id).get('graph_version')==7 and ('scenarios' in extra or 'cases' in extra):
+        if self.store.run(run_id).get('graph_version')==7 and any(key in extra for key in ('analysis','scenarios','cases')):
             context['format_references']=[e for e in self.all_evidence(run_id) if e['role']=='example']
-            context['format_instruction']='采用当前 Profile 的字段定义、template_rules 和写作规范；format_references 仅补充格式定义，不作为业务事实或 refs。内部 steps 始终是 action/expected 对象数组；Excel 列顺序、标题与单元格换行由导出器处理。'
+            if 'analysis' in extra and not any(key in extra for key in ('scenarios','cases')):
+                context['format_instruction']='采用 profile.scenario_excel_columns 的场景字段定义与写作规范，填写有需求依据的自定义场景字段；保留原始 refs 和 requirement_ids 数组。format_references 仅补充格式定义，不作为业务事实或 refs；Excel 列顺序、标题与换行由导出器处理。'
+            else:
+                context['format_instruction']='采用当前 Profile 的字段定义、template_rules 和写作规范；format_references 仅补充格式定义，不作为业务事实或 refs。内部 steps 始终是 action/expected 对象数组；Excel 列顺序、标题与单元格换行由导出器处理。'
         return context
 
     async def node_cases(self,state):
@@ -387,8 +390,10 @@ class WorkflowEngine(FlowEngine):
     async def node_clarification_gate(self,state):
         rid=state['run_id'];self.stage(rid,'clarification')
         artifact=self.store.get('artifact',state['analysis_ref']);questions=artifact['report']['questions']
+        evidence={item['id']:item for item in self.all_evidence(rid)}
+        suggestions=valid_question_suggestions(artifact['report'],evidence)
         self.store.publish(rid,[artifact['id']],'已整理需求理解和业务图。请回答会影响测试设计的问题。',waiting=True)
-        response=interrupt({'type':'clarification','artifact_id':artifact['id'],'questions':questions})
+        response=interrupt({'type':'clarification','artifact_id':artifact['id'],'questions':questions,'question_suggestions':suggestions})
         return {'clarification_answer':response['answer'],'clarification_questions':questions}
 
     async def node_apply_answer(self,state):
@@ -403,7 +408,7 @@ class WorkflowEngine(FlowEngine):
                 saved=self.store.cache_set(rid,'v7:clarification_source',{'id':source['id']})
         self.store.update_run(rid,_source_ids=list(dict.fromkeys(run['_source_ids']+[saved['id']])),_source_roles={**run['_source_roles'],saved['id']:'clarification'})
         artifact=self.store.get('artifact',state['analysis_ref'])
-        report={**artifact.get('report',{}),'clarification':answer,'questions':[],
+        report={**artifact.get('report',{}),'clarification':answer,'questions':[],'question_suggestions':[],
                 'clarification_note':'已保存用户补充，场景与用例生成将结合原需求和此补充；没有重新生成需求理解。',
                 'previous_questions':state['clarification_questions']}
         artifact=self.store.revise_artifact(artifact['id'],artifact['revision'],artifact['items'],
@@ -456,22 +461,23 @@ class WorkflowEngine(FlowEngine):
             self.stage(rid,'learn_template')
             context=self.context(rid)
             if not context['evidence'] and not context.get('artifact'):
-                artifact=self.answer(rid,'v7:no_template','请上传 Excel 示例或选择当前用例后再学习格式。')
+                artifact=self.answer(rid,'v7:no_template','请上传 Excel 示例或选择当前场景、用例后再学习格式。')
                 return {'output_ref':artifact['id']}
             def validate(result):
                 try:
                     if not isinstance(result.get('config'),dict):raise DomainError('config 必须为对象')
-                    normalized,notes=self.template_config(run['_profile'],result['config'])
-                    profile_config(normalized)
+                    kinds=self.template_kinds(result)
+                    self.template_config(run['_profile'],result['config'],kinds)
                     return []
                 except DomainError as exc:
                     return [{'path':'config','code':'profile','expected':str(exc)}]
             result=await self.validated(rid,'v7:template','learn_template',context,validate)
-            config,notes=self.template_config(run['_profile'],result['config'])
+            kinds=self.template_kinds(result)
+            config,notes=self.template_config(run['_profile'],result['config'],kinds)
             summary=str(result.get('summary','已整理模板建议'))
             if notes:summary+='\n'+ '；'.join(notes)
             artifact=self.store.artifact(rid,'v7:template_proposal','proposal','Excel 格式建议',
-                [{'id':'template-proposal','title':'模板学习结果','description':summary,'refs':[]}],{'config':config,'notes':notes})
+                [{'id':'template-proposal','title':'模板学习结果','description':summary,'refs':[]}],{'config':config,'notes':notes,'template_kinds':kinds})
             return {'output_ref':artifact['id']}
         if run.get('graph_version')==7 and state['intent']=='modify' and not run.get('_artifact_snapshot'):
             artifact=self.answer(rid,'v7:no_target','当前还没有可修改的结果。请先生成或上传用例。')
@@ -494,11 +500,34 @@ class WorkflowEngine(FlowEngine):
             return {'output_ref':artifact['id']}
         return await super().node_single(state)
 
-    def template_config(self, current, proposal):
+    def template_kinds(self,result):
+        kinds=result.get('template_kinds')
+        if kinds is None:
+            config=result.get('config',{})
+            if not isinstance(config,dict):raise DomainError('config 必须为对象')
+            kinds=[]
+            if any(key in config for key in ('scenario_excel_columns','scenario_sheet_name','scenario_filename_pattern')):kinds.append('scenarios')
+            if any(key in config for key in ('excel_columns','excel_layout','sheet_name','filename_pattern','template_rules','case_level','case_types','additional_rules')):kinds.append('cases')
+        if not isinstance(kinds,list) or not kinds or any(kind not in ('scenarios','cases') for kind in kinds):
+            raise DomainError('template_kinds 必须包含 scenarios 或 cases')
+        return list(dict.fromkeys(kinds))
+
+    def template_config(self, current, proposal, kinds=None):
+        from .schemas import DEFAULT_PROFILE
+        if not isinstance(proposal,dict):raise DomainError('config 必须为对象')
+        kinds=self.template_kinds({'config':proposal} if kinds is None else {'template_kinds':kinds})
         config=dict(current);notes=[]
+        scenario_keys={'scenario_excel_columns','scenario_sheet_name','scenario_filename_pattern'}
+        case_keys={'excel_columns','excel_layout','sheet_name','filename_pattern','template_rules','case_level','case_types','additional_rules'}
+        allowed=(scenario_keys if 'scenarios' in kinds else set()) | (case_keys if 'cases' in kinds else set())
         for key,value in proposal.items():
-            if value is None or (key=='excel_columns' and value==[]):
+            if key not in allowed:continue
+            if value is None or value==[] or (isinstance(value,str) and not value.strip()):
                 notes.append(f'{key} 未识别到有效值，保留当前设置')
+                continue
+            columns_key='scenario_excel_columns' if key in scenario_keys else 'excel_columns'
+            if proposal.get(columns_key)==[] and key in DEFAULT_PROFILE and value==DEFAULT_PROFILE[key]:
+                notes.append(f'{key} 仅为默认值，保留当前设置')
                 continue
             if key=='template_rules' and isinstance(value,list):value='\n'.join(str(item) for item in value)
             config[key]=value
@@ -544,7 +573,11 @@ class WorkflowEngine(FlowEngine):
                 artifact['report']={**artifact.get('report',{}),'review_reports':reports}
                 self.store.put('artifact',artifact)
                 self.store.db.execute('UPDATE revisions SET payload=? WHERE artifact_id=? AND revision=?',(dump(artifact),artifact['id'],artifact['revision']))
-        self.store.publish(rid,[artifact['id']],content,proposal=artifact.get('report',{}).get('config') if artifact['type']=='proposal' else None)
+        proposal=None
+        if artifact['type']=='proposal':
+            report=artifact.get('report',{})
+            proposal={'config':report.get('config'),'template_kinds':report['template_kinds']} if 'template_kinds' in report else report.get('config')
+        self.store.publish(rid,[artifact['id']],content,proposal=proposal)
         self.store.update_run(rid,progress={'phase':'completed','completed':1,'total':1,'label':'结果已保存'})
         return {}
 

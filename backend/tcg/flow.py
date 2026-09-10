@@ -7,6 +7,37 @@ from .schemas import DomainError, profile_config
 from .documents import parse_text
 
 
+def valid_question_suggestions(report, evidence):
+    """Drop malformed or ungrounded optional suggestions without losing questions."""
+    if not isinstance(report, dict) or not isinstance(evidence, dict):
+        return []
+    questions = report.get('questions', [])
+    suggestions = report.get('question_suggestions', [])
+    if not isinstance(questions, list) or not isinstance(suggestions, list):
+        return []
+    questions = {q for q in questions if isinstance(q, str)}
+    available = {key for key, value in evidence.items()
+                 if isinstance(value, dict) and value.get('role') != 'example'}
+    valid, seen = [], set()
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            continue
+        question = suggestion.get('question')
+        if not isinstance(question, str) or question not in questions or question in seen:
+            continue
+        if not all(isinstance(suggestion.get(field), str) and suggestion[field].strip()
+                   for field in ('answer', 'basis')):
+            continue
+        refs = suggestion.get('refs')
+        if not isinstance(refs, list) or not refs or not all(isinstance(ref, str) and ref in available for ref in refs):
+            continue
+        if suggestion.get('confidence') not in ('supported', 'assumption'):
+            continue
+        valid.append({key: suggestion[key] for key in ('question', 'answer', 'basis', 'refs', 'confidence')})
+        seen.add(question)
+    return valid
+
+
 class FlowEngine(DirectEngine):
     def reliable(self, run_id):
         return self.store.run(run_id).get('graph_version') in (4, 5, 6)
@@ -69,7 +100,7 @@ class FlowEngine(DirectEngine):
         evidence = [e for e in self.all_evidence(run_id) if e['role'] != 'example']
         def build(values):
             return {**self.small_context(run_id, clarification=clarification,
-                output_contract='返回items与report。整体理解业务规则，忽略封面、签署人和审批元数据。report包含summary,in_scope,out_of_scope,questions,assumptions,requirement_map,diagrams,strategy。diagrams包含业务流程图；复杂需求另含mindmap，存在生命周期则增加stateDiagram-v2。strategy包含建议depth与rationale。questions仅保留会影响下游的歧义。每条业务需求用精确refs引用原文。不要求逐个解释被忽略的元数据。'), 'evidence':values}
+                output_contract='返回items与report。整体理解业务规则，忽略封面、签署人和审批元数据。report包含summary,in_scope,out_of_scope,questions,assumptions,requirement_map,diagrams,strategy，可选question_suggestions数组。每个建议包含question（questions中的原文）,answer,basis,refs（本批次非示例证据精确ID）,confidence（supported表示原文支持；assumption表示需用户确认的假设）。仅在当前证据支持有用建议时返回，没有可靠建议则返回空数组；建议不代表用户已确认，不得为了提供建议增加问题。diagrams包含业务流程图；复杂需求另含mindmap，存在生命周期则增加stateDiagram-v2。strategy包含建议depth与rationale。questions仅保留会影响下游的歧义。每条业务需求用精确refs引用原文。不要求逐个解释被忽略的元数据。'), 'evidence':values}
         groups = self.capacity_groups('analyze_requirement', evidence, build)
         items, reports = [], []
         self.stage(run_id, 'requirement_analysis')
@@ -93,15 +124,20 @@ class FlowEngine(DirectEngine):
                 return errors
             result = await self.validated(run_id, f'{key}:{index}', 'analyze_requirement', build(group), validate)
             items.extend({**row,'id':f'R{index+1}-{row["id"]}'} for row in result['items'])
-            reports.append(result['report'])
+            reports.append({**result['report'],
+                            'question_suggestions': valid_question_suggestions(result['report'], refs)})
         if not items:
             raise DomainError('没有提取到业务规则。请补充功能需求；文档元数据不会作为业务需求。')
         report = dict(reports[0]) if len(reports)==1 else {'summary':'已按容量分组理解需求','segments':reports,'diagrams':[d for r in reports for d in r.get('diagrams',[])]}
         report['questions'] = list(dict.fromkeys(q for r in reports for q in r.get('questions',[])))
         report['assumptions'] = list(dict.fromkeys(q for r in reports for q in r.get('assumptions',[])))
+        report['question_suggestions'] = valid_question_suggestions(
+            {**report, 'question_suggestions': [item for r in reports for item in r['question_suggestions']]},
+            {e['id']: e for e in evidence})
         if self.store.run(run_id)['mode']=='auto':
             report['assumptions'] += ['待核实风险：'+q for q in report['questions']]
             report['questions'] = []
+            report['question_suggestions'] = []
         self.store.cache_set(run_id, 'v6:requirement_map', {k:report[k] for k in ('summary','in_scope','out_of_scope','requirement_map','assumptions') if k in report})
         return self.store.artifact(run_id, key+':artifact', 'analysis','需求理解与业务图',items,report)
 
@@ -122,7 +158,9 @@ class FlowEngine(DirectEngine):
         round_index=0
         while analysis.get('report',{}).get('questions'):
             self.store.publish(run_id,[analysis['id']],'先核对我的需求理解与业务图，以下问题会影响后续场景。',waiting=True)
-            answer=interrupt({'type':'clarification','artifact_id':analysis['id'],'questions':analysis['report']['questions']})
+            suggestions=valid_question_suggestions(analysis['report'], {e['id']: e for e in self.all_evidence(run_id)})
+            answer=interrupt({'type':'clarification','artifact_id':analysis['id'],'questions':analysis['report']['questions'],
+                              'question_suggestions':suggestions})
             key=f'v6:clarification:{round_index}'
             import hashlib
             answer_key='clarification_answer:'+hashlib.sha256(answer['answer'].strip().encode()).hexdigest()

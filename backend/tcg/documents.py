@@ -1,11 +1,12 @@
 """Local text extraction with source coordinates and safe XLSX export."""
 import csv
 import io
+import json
 import re
 import zipfile
 from pathlib import Path
 
-from .schemas import DomainError
+from .schemas import DEFAULT_PROFILE, DomainError, scenario_template_columns
 
 MAX_UPLOAD = 100 * 1024 * 1024
 MAX_TEXT = 2_000_000
@@ -158,18 +159,41 @@ def cell_safe(value):
     return text
 
 
+def _export_items(artifact, selected):
+    items = artifact['items']
+    if selected is not None:
+        wanted = set(selected)
+        if not wanted or not wanted.issubset({item['id'] for item in items}):
+            raise DomainError('导出所选条目 ID 无效')
+        items = [item for item in items if item['id'] in wanted]
+    return items
+
+
+def _workbook_bytes(workbook, widths):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    sheet = workbook.active
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = sheet.dimensions
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = PatternFill('solid', fgColor='23635B')
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 def export_cases(artifact, layout='case', selected=None):
     if artifact['type'] != 'cases':
         raise DomainError('仅 Case Artifact 支持 Excel 导出')
     if layout not in ('case', 'step'):
         raise DomainError('layout 必须为 case 或 step')
-    items = artifact['items']
-    if selected is not None:
-        if not selected or not set(selected).issubset({item['id'] for item in items}):
-            raise DomainError('导出所选条目 ID 无效')
-        items = [item for item in items if item['id'] in set(selected)]
+    items = _export_items(artifact, selected)
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
     workbook = Workbook()
     sheet = workbook.active
     title = artifact.get('_profile', {}).get('sheet_name', 'Test Cases')
@@ -205,16 +229,38 @@ def export_cases(artifact, layout='case', selected=None):
                         value = json.dumps(value,ensure_ascii=False)
                 values.append(cell_safe(value))
             sheet.append(values)
-    sheet.freeze_panes = 'A2'
-    sheet.auto_filter.ref = sheet.dimensions
-    for cell in sheet[1]:
-        cell.font = Font(bold=True, color='FFFFFF')
-        cell.fill = PatternFill('solid', fgColor='23635B')
-    for row in sheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical='top', wrap_text=True)
-    for column, width in {'A': 20, 'B': 42, 'C': 18, 'D': 12, 'E': 38, 'F': 64, 'G': 64}.items():
-        sheet.column_dimensions[column].width = width
-    output = io.BytesIO()
-    workbook.save(output)
-    return output.getvalue()
+    return _workbook_bytes(workbook, {'A': 20, 'B': 42, 'C': 18, 'D': 12, 'E': 38, 'F': 64, 'G': 64})
+
+
+def export_scenarios(artifact, selected=None):
+    if artifact['type'] != 'scenarios':
+        raise DomainError('仅 Scenario Artifact 支持场景 Excel 导出')
+    items = _export_items(artifact, selected)
+    from openpyxl import Workbook
+    profile=artifact.get('_profile',{})
+    columns=scenario_template_columns(profile.get('scenario_excel_columns',DEFAULT_SCENARIO_COLUMNS))
+    workbook=Workbook();sheet=workbook.active
+    title=profile.get('scenario_sheet_name','Test Scenarios')
+    sheet.title=re.sub(r'[\\/*?:\[\]]','_',title)[:31] or 'Test Scenarios'
+    sheet.append([cell_safe(c['header']) for c in columns])
+    for item in items:
+        values=[]
+        for column in columns:
+            value=item.get(column['field'],'')
+            if isinstance(value,list):value='\n'.join(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else str(v) for v in value)
+            elif isinstance(value,dict):value=json.dumps(value,ensure_ascii=False)
+            values.append(cell_safe(value))
+        sheet.append(values)
+    return _workbook_bytes(workbook, {
+        sheet.cell(1,index).column_letter:42 if column['field'] in ('title','description') else 24
+        for index,column in enumerate(columns,1)
+    })
+
+
+DEFAULT_SCENARIO_COLUMNS=DEFAULT_PROFILE['scenario_excel_columns']
+
+
+def export_artifact(artifact, layout='case', selected=None):
+    if artifact['type']=='cases':return export_cases(artifact,layout,selected)
+    if artifact['type']=='scenarios':return export_scenarios(artifact,selected)
+    raise DomainError('仅测试场景或测试用例支持 Excel 导出')
