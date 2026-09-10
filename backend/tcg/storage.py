@@ -322,7 +322,12 @@ class Store:
             return [{'id': row['id'], 'kind': row['kind'], 'data': json.loads(row['payload'])} for row in self.db.execute('SELECT id,kind,payload FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT 200', (run_id, after)).fetchall()]
 
     def assert_running(self, run_id):
-        if self.run(run_id)['status'] not in ('queued', 'running'):
+        run = self.run(run_id)
+        # A paused HITP artifact edit intentionally calls the model while the
+        # workflow remains waiting.  Its private token is the lease that keeps
+        # cache writes valid until the edit is saved or cancelled.
+        active_waiting_edit = run['status'] == 'waiting' and bool(run.get('_edit_token'))
+        if run['status'] not in ('queued', 'running') and not active_waiting_edit:
             raise DomainError('任务状态已改变，拒绝过期结果', 409)
 
     def cache_get(self, run_id, key):

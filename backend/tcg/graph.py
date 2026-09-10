@@ -759,24 +759,31 @@ class Engine:
         return {}
 
     def resume(self, run_id, response):
+        blocked_by_edit = False
         with self.store.transaction():
             run = self.store.run(run_id)
             if run['status'] != 'waiting':
                 raise DomainError('任务当前未等待人工输入', 409)
-            kind = run['interrupt']['type']
-            if kind=='source_review':
-                selected=response.get('source_ids') or []
-                if not set(selected).issubset(set(run['_source_ids'])) or (not selected and not (response.get('answer') or '').strip()):
-                    raise DomainError('请选择本轮需求文件或输入需求正文')
-            if kind == 'clarification' and (not response.get('answer') or not response['answer'].strip()):
-                raise DomainError('请输入澄清答案')
-            if kind == 'scenario_review' and response.get('approved') is not True:
-                raise DomainError('请确认场景后继续生成用例')
-            if kind == 'strategy_review' and response.get('approved') is not True:
-                raise DomainError('请确认策略后继续，或使用补充指令修订策略')
-            run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
-            run.pop('interrupt', None)
-            self.store.save_run(run)
+            if run.get('_edit_token'):
+                blocked_by_edit = True
+            else:
+                kind = run['interrupt']['type']
+                if kind=='source_review':
+                    selected=response.get('source_ids') or []
+                    if not set(selected).issubset(set(run['_source_ids'])) or (not selected and not (response.get('answer') or '').strip()):
+                        raise DomainError('请选择本轮需求文件或输入需求正文')
+                if kind == 'clarification' and (not response.get('answer') or not response['answer'].strip()):
+                    raise DomainError('请输入澄清答案')
+                if kind == 'scenario_review' and response.get('approved') is not True:
+                    raise DomainError('请确认场景后继续生成用例')
+                if kind == 'strategy_review' and response.get('approved') is not True:
+                    raise DomainError('请确认策略后继续，或使用补充指令修订策略')
+                run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
+                run.pop('interrupt', None)
+                self.store.save_run(run)
+        if blocked_by_edit:
+            self.trace('resume.blocked_by_edit', run_id)
+            raise DomainError('AI 正在修改当前结果，请等待保存完成后再确认', 409)
         self.trace('run.resumed', run_id)
         self.schedule(run_id)
         return run
@@ -846,6 +853,7 @@ class Engine:
             token = uid('edit_')
             run['_edit_token'] = token
             self.store.save_run(run)
+        self.trace('edit.started', run_id, artifact_id=artifact['id'], artifact_revision=artifact['revision'], selected_count=len(selected_ids) if selected_ids is not None else None)
         started = time.monotonic()
         with self.diagnostics.bind(node='paused_edit', call_key='paused_edit', attempt=1, max_attempts=1):
             self.trace('node.start', run_id)
@@ -867,6 +875,7 @@ class Engine:
                     current['interrupt']['items'] = updated['items']
                     current['_edit_token'] = None
                     self.store.save_run(current)
+                    self.trace('edit.saved', run_id, artifact_id=updated['id'], artifact_revision=updated['revision'])
                     self.trace('node.complete', run_id, elapsed_ms=round((time.monotonic() - started) * 1000))
                     return current
             except asyncio.CancelledError:

@@ -57,6 +57,9 @@ export function reduceEvent(feed:Feed,kind:string,id:number,data:Json):Feed{
  }else if(event==='model.retry'){add(`模型请求失败，开始第 ${data.next_attempt} 次尝试`,'waiting');
  }else if(event==='model.cache_hit'){add('读取已保存的模型结果','neutral');
  }else if(event==='checkpoint.loaded'){add(data.has_state?'已加载检查点，继续保存的进度':'开始新的执行流程');
+ }else if(event==='edit.started'){add('AI 正在修改当前确认结果','active');
+ }else if(event==='edit.saved'){add(`AI 修改已保存${data.artifact_revision?` · v${data.artifact_revision}`:''}，仍等待你确认`,'success');
+ }else if(event==='resume.blocked_by_edit'){add('修改尚未保存，已保留当前确认节点','waiting');
  }else if(event==='run.resumed'){add('已收到确认，继续执行','active');
  }else if(event==='run.retried'){add('从失败阶段重新执行','active');
  }else if(event==='run.recovered'){finalize('cancelled');add('服务重启，正在恢复任务','waiting');

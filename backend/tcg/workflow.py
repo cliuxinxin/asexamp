@@ -117,7 +117,7 @@ class WorkflowEngine(FlowEngine):
             usage={'profile_name':self.store.get('profile',run['_profile_id'])['name'],
                    'columns':run['_profile'].get('excel_columns',[]),'field_contract':template_columns(run['_profile']),'rules':run['_profile'].get('template_rules',''),
                    'sheet_name':run['_profile'].get('sheet_name'),'layout':run['_profile'].get('excel_layout'),
-                   'references':[{'id':sid,'name':self.store.get('source',sid)['name']} for sid in run['_source_ids'] if run['_source_roles'].get(sid)=='example'],
+                   'references':[{'id':sid,'name':self.store.get('source',sid)['name']} for sid in run['_source_ids'] if run.get('_source_roles',{}).get(sid)=='example'],
                    'note':'本轮已将上述定义及参考模板发送给生成与评审。导出采用本轮 Profile 快照；模板正文仅参考格式，上传文件不会自动覆盖列映射。'}
             self.save_report(artifact,{'template_usage':usage})
         return result

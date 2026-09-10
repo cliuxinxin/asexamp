@@ -22,6 +22,15 @@ test('failed task exposes the small log without opening run details',async()=>{
   assert.equal(link.closest('details'),null);
  }finally{cleanup();}
 });
+
+test('confirmation is disabled while AI is editing the waiting artifact',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ try{
+  render(<RunCard interactionBusy={true} run={{id:'editing-run',status:'waiting',intent:'generate_case',mode:'hitp',stage:'scenario_review',updated_at:'2026-09-10',artifact_ids:[],experience:'reliable',graph_version:7,edit_in_progress:true,interrupt:{type:'scenario_review'}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.equal(screen.getByRole('button',{name:'确认场景，继续生成用例'}).hasAttribute('disabled'),true);
+  assert.ok(screen.getByText('AI 正在修改当前场景，保存后才能确认。'));
+ }finally{cleanup();}
+});
 // This narrow component smoke uses deterministic API state, without browser/network dependencies.
 test('wide conversation shows inline results and explicit editing targets them',async()=>{
  let generated=false,modified=false;const requests:any[]=[];
