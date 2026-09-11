@@ -106,6 +106,10 @@ class WorkflowEngine(FlowEngine):
         # Formatting examples are separate from business evidence and only sent to authoring/review.
         if self.store.run(run_id).get('graph_version')==7 and any(key in extra for key in ('analysis','scenarios','cases')):
             context['format_references']=[e for e in self.all_evidence(run_id) if e['role']=='example']
+            samples=self.store.run(run_id)['_profile'].get('sample_cases',[])
+            if samples:
+                context['format_samples']=samples
+                context['sample_instruction']='固定样例仅用于字段格式与步骤写法；其业务规则、数据与结果不能作为当前需求事实，也不能作为 refs。'
             if 'analysis' in extra and not any(key in extra for key in ('scenarios','cases')):
                 context['format_instruction']='采用 profile.scenario_excel_columns 的场景字段定义与写作规范，填写有需求依据的自定义场景字段；保留原始 refs 和 requirement_ids 数组。format_references 仅补充格式定义，不作为业务事实或 refs；Excel 列顺序、标题与换行由导出器处理。'
             else:
@@ -325,7 +329,7 @@ class WorkflowEngine(FlowEngine):
                 lambda r: [] if r.get('intent') in INTENTS and r['intent']!='auto' else [{'path':'intent','code':'intent','expected':sorted(set(INTENTS)-{'auto'})}])
             intent=result['intent']
         snapshot=run.get('_artifact_snapshot')
-        if intent in ('modify','review_case'):
+        if intent in ('modify','review_case') and not run['_request'].get('_fresh_after_supplement'):
             wanted=('cases',) if intent=='review_case' else ('analysis','scenarios','cases')
             if not snapshot or snapshot['type'] not in wanted:
                 available=[a for a in self.store.list('artifact',chat_id=run['chat_id']) if a.get('_visible') and a['type'] in wanted]
@@ -410,6 +414,9 @@ class WorkflowEngine(FlowEngine):
             with self.store.transaction():
                 source=self.store.add_source(run['chat_id'],'用户澄清','clarification',text,chunks)
                 saved=self.store.cache_set(rid,'v7:clarification_source',{'id':source['id']})
+        if run.get('_save_clarification_to_project',True):
+            from .project_context import share_clarification
+            share_clarification(self.store,saved['id'],run['project_id'])
         self.store.update_run(rid,_source_ids=list(dict.fromkeys(run['_source_ids']+[saved['id']])),_source_roles={**run['_source_roles'],saved['id']:'clarification'})
         artifact=self.store.get('artifact',state['analysis_ref'])
         report={**artifact.get('report',{}),'clarification':answer,'questions':[],'question_suggestions':[],
@@ -433,7 +440,14 @@ class WorkflowEngine(FlowEngine):
                 self.store.update_run(rid,_profile=profile_config({**run['_profile'],'scenario_level':response['depth'],'case_level':response['depth']}))
         artifact=self.store.get('artifact',state['analysis_ref'])
         self.store.cache_set(rid,'v6:requirement_map',{**artifact.get('report',{}),'confirmed_requirements':artifact['items']})
+        self.store.cache_set(rid,'workspace:analysis_parent',{'id':artifact['id'],'revision':artifact['revision']})
         return {'output_ref':artifact['id']}
+
+    async def node_scenario_gate(self,state):
+        result=await super().node_scenario_gate(state)
+        artifact=self.store.get('artifact',state['scenario_ref'])
+        self.store.cache_set(state['run_id'],'workspace:scenario_parent',{'id':artifact['id'],'revision':artifact['revision']})
+        return result
 
     async def node_review(self,state):
         if self.store.run(state['run_id']).get('graph_version')==7 and not state.get('cases_ref'):

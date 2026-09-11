@@ -96,6 +96,7 @@ class RestoreInput(BaseModel):
 
 
 class ResumeInput(BaseModel):
+    save_to_project: bool = True
     source_ids: list[str] | None = None
     depth: Literal['quick', 'standard', 'deep'] | None = None
     answer: str | None = Field(default=None, max_length=100_000)
@@ -139,6 +140,9 @@ def profile_config(config):
     result = {**DEFAULT_PROFILE, **config}
     # Recognition metadata belongs to the proposal report, never saved preferences.
     result.pop('template_kinds', None)
+    if 'sample_cases' in result:
+        from .project_context import validate_sample_cases
+        validate_sample_cases(result['sample_cases'])
     if not isinstance(result['case_types'], list) or not all(isinstance(x, str) and x for x in result['case_types']):
         raise DomainError('case_types 必须为字符串数组')
     for field in ('language', 'scenario_level', 'case_level', 'additional_rules', 'scope', 'sheet_name', 'scenario_sheet_name'):

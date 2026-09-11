@@ -155,3 +155,28 @@ start.py checks the local interpreter, pyvenv.cfg, activate script and a working
 - The analysis contract asks for all question candidates together. Missing candidates are completed independently of requirement analysis; the clarification path retains a conservative, explicitly labeled fallback if the model cannot provide a usable suggestion.
 - Adopting suggestions only changes the editable answer draft. The UI hides question cards whose answer blocks contain text, preserves edited answers and manual notes, and restores suggestions when their answers are removed. Submitting still uses the existing explicit resume action.
 - Historical pending interrupts with missing candidates receive a frontend fallback; simply viewing or adopting a candidate does not write confirmed requirement evidence.
+
+
+## v2.5.12 项目上下文与成果操作
+
+- `GET /api/projects/{project_id}/shared-context` 返回 `clarifications` 和按 Profile 汇总的 `samples`；澄清保留原 source/chunk ID。`DELETE /api/projects/{project_id}/shared-context/{source_id}` 仅解除共享，不删除历史来源。
+- `POST /api/runs/{run_id}/resume` 的 `save_to_project` 缺省为 true；仅在提交澄清后保存项目共享来源，前端采用建议不触发共享。
+- `POST /api/artifacts/{artifact_id}/pin-samples` 接收 `profile_id, expected_version, selected_ids`。选择 1–5 条用例替换目标 Profile 的 `sample_cases`，大小不超过 12000 字符；不把样例业务数据作为需求依据。
+- `POST /api/runs/{run_id}/supplement` 接收 `source_ids, content`。等待中的需求分析/场景生成/用例生成任务可创建使用新旧资料的后继任务，返回 `run, previous_run_id, message`；旧任务及成果保留。冲突失败时事务回滚。
+- `GET /api/artifacts/{artifact_id}/workspace` 返回相关成果、覆盖关系和过期状态。`case_artifact_id` 可选择具体用例分支；相同业务 ID 不建立隐式关联。
+- `POST /api/artifacts/{artifact_id}/actions/preview` 接收 `action`（estimate/explain/modify/sync）、`instruction`、可选 `selected_ids/source_ids/related_artifact_ids`，返回可审阅结果与 `id`。不传 selected_ids 表示全部，空数组不作为全部的别名。
+- `POST /api/artifacts/{artifact_id}/actions/apply` 接收 `proposal_id`。只允许应用 modify/sync，先核对所有输入版本及资料指纹，再原子保存相关成果。estimate/explain 不生成、修改用例。
+- 新生成场景和用例保存服务器确定的上游成果 ID/版本。仅同步部分场景时逐场景保存同步版本，其余过期关系保留。
+- 运行中不能直接手动写入被使用的成果；等待确认时可修改当前确认成果，后台仍校验编辑状态和版本。
+
+
+## v2.5.13 聊天估算入口
+
+`POST /api/chats/{chat_id}/interpret` 接收 `content` 及可选 `artifact_id, selected_ids, intent_hint, as_requirement`。普通聊天在调用原有发送/暂停问答入口前调用此接口。
+
+- 普通请求：`{handled:false,intent:<原有任务类型>}`；前端按已识别意图继续原入口，不重复调用自动路由。`as_requirement:true` 返回 `handled:false` 供调用方按原明确要求处理。
+- 估算或目标澄清：`{handled:true,kind:"estimate"|"clarification",message:<已保存的助手消息>,estimate?:...}`。用户消息和回答已经写入本对话，调用方只刷新，不能再提交 `/messages` 或 `/resume`。
+- `message.metadata.case_estimate` 保存 `artifact_id, artifact_revision, title, instruction, scenarios, min_count, max_count`；各行含 `scenario_id, title, min_count, max_count, rationale, assumptions`。
+- 识别只传场景元数据、附件名称/角色统计、当前成果/等待状态和近期消息摘录，不包含来源正文或用例步骤。估算复用已有场景估算契约，不生成 case、不创建工作流运行、不改变成果版本。估算数量不是后续生成配额。
+- 目标绑定当前场景、暂停场景、用例上游关系或近期估算上下文；显式的成果编号/唯一标题可指定目标。仅在本对话、本项目内解析。编号、序号与返回范围须通过校验，歧义或缺少场景时先回答澄清。
+- 调用前后校验状态与来源版本，实际估算期间复用成果操作锁。错误返回 DomainError；前端保留草稿，禁止失败后回退成生成请求。

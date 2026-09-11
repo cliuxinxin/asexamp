@@ -20,6 +20,7 @@ from .workflow import WorkflowEngine as Engine
 from .model import LangChainGateway, Settings
 from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
 from .storage import DirectoryLock, Store, public, uid, now
+from .access import allowed_host
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -77,7 +78,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.5.11', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.5.13', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -115,9 +116,8 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     @app.middleware('http')
     async def local_origin(request: Request, call_next):
         host = request.headers.get('host', '')
-        hostname = urlparse('//' + host).hostname
-        if hostname not in ('127.0.0.1', 'localhost', '::1', 'testserver'):
-            return JSONResponse({'detail': '仅允许本地回环地址访问'}, status_code=403)
+        if not allowed_host(host, os.environ.get('TCG_ALLOWED_HOSTS', '')):
+            return JSONResponse({'detail': '访问地址未配置，请在服务端 TCG_ALLOWED_HOSTS 中加入该主机名或 IP'}, status_code=403)
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             origin = request.headers.get('origin')
             if origin is not None:
@@ -137,7 +137,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.5.11', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.5.13', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -345,7 +345,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.5.11', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.5.13', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -462,8 +462,18 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.put('/api/artifacts/{artifact_id}')
     def artifact_put(artifact_id: str, body: RevisionInput):
-        visible_artifact(artifact_id)
-        return public(app.state.store.revise_artifact(artifact_id, body.expected_revision, body.items, report=body.report))
+        from .artifact_actions import active_guard
+        store = app.state.store
+        with store.transaction():
+            artifact = visible_artifact(artifact_id)
+            active_guard(store, [artifact])
+            report = body.report
+            if report is not None:
+                report = {**report}
+                report.pop('lineage', None)
+                if artifact.get('report', {}).get('lineage'):
+                    report['lineage'] = artifact['report']['lineage']
+            return public(store.revise_artifact(artifact_id, body.expected_revision, body.items, report=report))
 
     @app.get('/api/artifacts/{artifact_id}/revisions')
     def artifact_revisions(artifact_id: str):
@@ -477,9 +487,13 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.post('/api/artifacts/{artifact_id}/restore')
     def artifact_restore(artifact_id: str, body: RestoreInput):
-        visible_artifact(artifact_id)
-        historical = app.state.store.revision(artifact_id, body.revision)
-        return public(app.state.store.revise_artifact(artifact_id, body.expected_revision, historical['items'], reason=f'restore:{body.revision}'))
+        from .artifact_actions import active_guard
+        store = app.state.store
+        with store.transaction():
+            artifact = visible_artifact(artifact_id)
+            active_guard(store, [artifact])
+            historical = store.revision(artifact_id, body.revision)
+            return public(store.revise_artifact(artifact_id, body.expected_revision, historical['items'], reason=f'restore:{body.revision}', report=historical.get('report')))
 
     @app.get('/api/artifacts/{artifact_id}/export-options')
     def artifact_export_options(artifact_id: str):
@@ -548,6 +562,15 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         filename = ''.join(c if c.isalnum() or c in '-_.' else '_' for c in filename)[:160]
         if not filename.endswith('.xlsx'): filename += '.xlsx'
         return Response(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': "attachment; filename=\"tcg-export.xlsx\"; filename*=UTF-8''" + quote(filename)})
+
+    from .project_context import register_project_routes
+    from .artifact_actions import register_artifact_routes
+    from .workspace_coverage import register_coverage_routes
+    from .chat_estimate import register_chat_estimate_routes
+    register_project_routes(app)
+    register_artifact_routes(app)
+    register_coverage_routes(app)
+    register_chat_estimate_routes(app)
 
     @app.get('/{path:path}', include_in_schema=False)
     def frontend(path: str):

@@ -156,11 +156,12 @@ function fixture(override?:(path:string,init:RequestInit)=>Promise<Response>|und
   if(path==='/settings')return json({provider:'ollama',base_url:'http://localhost:11434',model:'installed-model',has_api_key:false,timeout_seconds:120});
   if(path.endsWith('/profiles'))return json(path.includes('/p1/')?profiles:[{...profiles[0],id:'pf3',project_id:'p2'}]);
   if(path.endsWith('/chats'))return json(chats[path.split('/')[2]]);
+  if(path.endsWith('/interpret')){const body=JSON.parse(String(init.body));return json({handled:false,intent:body.intent_hint&&body.intent_hint!=='auto'?body.intent_hint:'generate_case'});}
   if(path.startsWith('/chats/')){const id=path.split('/')[2];return json({chat:Object.values(chats).flat().find((c:any)=>c.id===id),messages:[],sources:[],runs:[]});}
   throw new Error('Unexpected API request: '+path);
  };return{calls,chats};
 }
-async function ready(){await screen.findByRole('button',{name:'对话一'});await waitFor(()=>assert.equal(screen.getByRole('heading',{level:1}).textContent,'对话一'));}
+async function ready(){await screen.findByRole('button',{name:'对话一'});await waitFor(()=>assert.equal((screen.getByRole('button',{name:'新建生成会话'}) as HTMLButtonElement).disabled,false));}
 
 test('delayed send preserves newer text and drafts survive chat navigation',async()=>{
  const pending=deferred();fixture((path,init)=>path==='/chats/c1/messages'?pending.promise:undefined);render(<App/>);await ready();
@@ -168,7 +169,7 @@ test('delayed send preserves newer text and drafts survive chat navigation',asyn
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'尚未发送的新草稿'}});
  await act(async()=>pending.resolve(json({message:{},run:{id:'r1'}})));
  await waitFor(()=>assert.equal((screen.getByLabelText('聊天输入') as HTMLTextAreaElement).value,'尚未发送的新草稿'));
- fireEvent.click(screen.getByRole('button',{name:'对话二'}));await waitFor(()=>assert.equal(screen.getByRole('heading',{level:1}).textContent,'对话二'));
+ fireEvent.click(screen.getByRole('button',{name:'对话二'}));await waitFor(()=>assert.equal(screen.getByRole('button',{name:'对话二'}).classList.contains('active'),true));
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'第二个对话的草稿'}});
  fireEvent.click(screen.getByRole('button',{name:'对话一'}));await waitFor(()=>assert.equal((screen.getByLabelText('聊天输入') as HTMLTextAreaElement).value,'尚未发送的新草稿'));
 });

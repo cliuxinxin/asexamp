@@ -28,7 +28,7 @@ test('confirmation is disabled while AI is editing the waiting artifact',async()
  try{
   render(<RunCard interactionBusy={true} run={{id:'editing-run',status:'waiting',intent:'generate_case',mode:'hitp',stage:'scenario_review',updated_at:'2026-09-10',artifact_ids:[],experience:'reliable',graph_version:7,edit_in_progress:true,interrupt:{type:'scenario_review'}}} onChanged={()=>{}} onTarget={()=>{}}/>);
   assert.equal(screen.getByRole('button',{name:'确认场景，继续生成用例'}).hasAttribute('disabled'),true);
-  assert.ok(screen.getByText('AI 正在修改当前场景，保存后才能确认。'));
+  assert.ok(screen.getByText('正在处理当前请求，完成后可继续确认。'));
  }finally{cleanup();}
 });
 // This narrow component smoke uses deterministic API state, without browser/network dependencies.
@@ -44,6 +44,7 @@ test('wide conversation shows inline results and explicit editing targets them',
   if(path.endsWith('/profiles'))return response([{id:'profile',name:'Default',config:{}}]);
   if(path==='/api/projects/p1/chats')return response([{id:'c1',project_id:'p1',title:'Smoke'}]);
   if(path==='/api/chats/c1')return response({chat:{id:'c1',title:'Smoke'},sources:[],runs:generated?[{id:'r1',status:'completed',experience:'reliable'}]:[],messages:generated?[{id:'stage1',role:'assistant',content:'需求理解与业务图已完成',metadata:{run_id:'r1',stage:'understand',stage_artifact_id:'analysis1',stage_revision:1}},{id:'m1',role:'assistant',content:'已完成',metadata:{run_id:'r1',artifact_ids:['a1']}}]:[]});
+  if(path==='/api/chats/c1/interpret')return response({handled:false,intent:'generate_case'});
   if(path==='/api/chats/c1/messages'){const body=JSON.parse(init.body);requests.push(body);if(generated){modified=true;artifact.revision++;artifact.items[0].title='Updated login';}generated=true;return response({});}
   if(path==='/api/artifacts/a1/export-options')return response({snapshot:{},snapshot_check:{columns:[],missing:[]},profiles:[]});
   if(path==='/api/artifacts/a1')return response(artifact);
@@ -65,7 +66,7 @@ test('wide conversation shows inline results and explicit editing targets them',
   stage.open=true;fireEvent(stage,new Event('toggle'));
   await screen.findByText('历史登录规则');
   assert.equal(screen.queryByRole('region',{name:'用例工作区'}),null);
-  assert.equal(requests[0].intent,'auto');assert.equal(requests[0].as_requirement,false);
+  assert.equal(requests[0].intent,'generate_case');assert.equal(requests[0].as_requirement,false);
   fireEvent.click(screen.getByRole('button',{name:'让 AI 修改此结果'}));
   fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'修改标题'}});
   fireEvent.click(screen.getByRole('button',{name:'发送消息',exact:true}));

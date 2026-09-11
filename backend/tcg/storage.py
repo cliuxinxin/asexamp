@@ -196,6 +196,8 @@ class Store:
     def create_run(self, chat_id, request):
         with self.transaction():
             chat = self.get('chat', chat_id)
+            if getattr(self, '_workspace_action_tokens', {}).get(chat_id):
+                raise DomainError('正在预览或应用项目修改，请稍候', 409)
             active = self.db.execute("SELECT id FROM runs WHERE chat_id=? AND status IN ('queued','running','waiting')", (chat_id,)).fetchone()
             if active:
                 raise DomainError('此对话已有运行中的任务，请先继续、取消或等待完成', 409)
@@ -205,6 +207,8 @@ class Store:
             sources = request.get('source_ids')
             if sources is None:
                 sources = [s['id'] for s in self.list('source', chat_id=chat_id) if s['_active']]
+                from .project_context import shared_sources
+                sources = list(dict.fromkeys(sources + [s['id'] for s in shared_sources(self, chat['project_id'])]))
             if not isinstance(sources, list) or len(set(sources)) != len(sources):
                 raise DomainError('source_ids 必须为不重复的数组')
             for source_id in sources:
@@ -216,7 +220,7 @@ class Store:
                 artifact = self.get('artifact', request['artifact_id'])
                 if artifact['project_id'] != chat['project_id'] or artifact['chat_id'] != chat_id:
                     raise DomainError('Artifact 不属于当前对话')
-            elif request['intent'] in ('auto', 'query', 'modify', 'review_case', 'learn_template'):
+            elif not request.get('_fresh_after_supplement') and request['intent'] in ('auto', 'query', 'modify', 'review_case', 'learn_template'):
                 visible = [a for a in self.list('artifact', chat_id=chat_id) if a.get('_visible')]
                 if request['intent'] == 'review_case':
                     visible = [a for a in visible if a['type'] == 'cases']
@@ -355,8 +359,10 @@ class Store:
             evidence = {e['id']: e for e in self.evidence(run['_source_ids'], run.get('_source_roles'))}
             validate_items(kind, items, evidence)
             value = {'id': uid('art_'), 'chat_id': run['chat_id'], 'project_id': run['project_id'], 'type': kind, 'title': title, 'revision': 1, 'items': items, 'created_at': now(), '_source_ids': run['_source_ids'], '_source_roles': run.get('_source_roles', {}), '_profile': run['_profile'], '_visible': False}
-            if report is not None:
-                value['report'] = report
+            from .workspace_coverage import creation_report
+            generated_report = creation_report(self, run, kind, report)
+            if report is not None or generated_report:
+                value['report'] = generated_report
             self.put('artifact', value)
             self.db.execute('INSERT INTO revisions VALUES(?,?,?,?,?,?)', (value['id'], 1, dump(value), now(), 'generated', dump({'added': [i['id'] for i in items], 'updated': [], 'deleted': []})))
             self.cache_set(run_id, key, {'id': value['id']})
@@ -370,6 +376,8 @@ class Store:
                 if cache_key and self.cache_get(run_id, cache_key):
                     return self.get('artifact', artifact_id)
             previous = self.get('artifact', artifact_id)
+            if reason != 'workspace_action' and getattr(self, '_workspace_action_tokens', {}).get(previous['chat_id']):
+                raise DomainError('项目成果正在预览或应用修改，请稍候', 409)
             if previous['revision'] != expected_revision:
                 raise DomainError('Artifact 已更新，请刷新后重试', 409)
             source_ids = previous['_source_ids']

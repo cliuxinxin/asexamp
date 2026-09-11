@@ -1,0 +1,13 @@
+.chat-estimate{margin-top:16px;border:1px solid var(--border,#e2e8f0);border-radius:12px;overflow:hidden;background:var(--surface,#fff)}
+.chat-estimate-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:16px 18px 8px}
+.chat-estimate-heading strong{font-size:16px;color:var(--text,#1e293b)}
+.chat-estimate-heading>span{font-size:12px;color:#42715a;background:#edf6ef;border-radius:5px;padding:3px 7px}
+.chat-estimate-source,.chat-estimate-scope{margin:0;padding:0 18px 8px;font-size:12px;color:var(--muted,#64748b);overflow-wrap:anywhere}
+.chat-estimate-scope{padding-bottom:14px}
+.chat-estimate-scroll{max-width:100%;overflow-x:auto}
+.chat-estimate table{width:100%;min-width:460px;border-collapse:collapse;font-size:13px;text-align:left}
+.chat-estimate th{padding:10px 16px;background:#f8fafc;font-weight:500;color:var(--muted,#64748b);border-top:1px solid var(--border,#e2e8f0)}
+.chat-estimate td{padding:13px 16px;border-top:1px solid var(--border,#e2e8f0);vertical-align:top;white-space:normal;overflow-wrap:anywhere}
+.chat-estimate td:first-child{width:28%}.chat-estimate td:nth-child(2){width:100px}.chat-estimate-id{display:block;margin-bottom:3px;font-size:11px;color:var(--muted,#64748b)}
+.chat-estimate td strong{font-weight:500}.chat-estimate-count{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap!important}
+.chat-estimate td p{margin:0;line-height:1.6}.chat-estimate-assumptions{margin-top:8px;color:var(--muted,#64748b);font-size:12px}.chat-estimate-assumptions ul{margin:4px 0 0;padding-left:17px}.chat-estimate-assumptions li{margin:3px 0;line-height:1.5}

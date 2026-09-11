@@ -739,7 +739,10 @@ class Engine:
                     if operation.get('op') == 'add' and isinstance(operation.get('item'), dict):
                         operation['item'].setdefault('id', uid('item_'))
             items = apply_operations(snapshot['items'], operations, run['_request'].get('selected_ids'))
-            artifact = self.store.revise_artifact(snapshot['id'], snapshot['revision'], items, 'ai_modify', run_id, 'modify_applied')
+            report = None
+            if snapshot['type'] == 'analysis' and isinstance(result.get('report_patch'), dict):
+                report = {**snapshot.get('report', {}), **result['report_patch']}
+            artifact = self.store.revise_artifact(snapshot['id'], snapshot['revision'], items, 'ai_modify', run_id, 'modify_applied', report=report)
         else:
             raise DomainError('不支持的 Intent')
         return {'output_ref': artifact['id']}
@@ -778,6 +781,8 @@ class Engine:
                     raise DomainError('请确认场景后继续生成用例')
                 if kind == 'strategy_review' and response.get('approved') is not True:
                     raise DomainError('请确认策略后继续，或使用补充指令修订策略')
+                if kind == 'clarification':
+                    run['_save_clarification_to_project'] = response.get('save_to_project', True)
                 run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
                 run.pop('interrupt', None)
                 self.store.save_run(run)

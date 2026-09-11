@@ -50,6 +50,8 @@ def launch() -> None:
     parser.add_argument("--log-level", choices=("debug", "info", "warning"), default="info", help="业务日志级别，默认 info")
     parser.add_argument("--access-log", action="store_true", help="额外显示 Uvicorn 全部访问日志（包含轮询）")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址；同一内网共享可用 0.0.0.0")
+    parser.add_argument("--allowed-hosts", default="", help="允许访问的主机名或 IP，逗号分隔")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--env-file", type=Path, help="指定固定 .env 文件；默认优先读取数据目录中的 .env")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
@@ -85,6 +87,8 @@ def launch() -> None:
     app_env["PYTHONPATH"] = str(ROOT / "backend")
     app_env["TCG_LOG_LEVEL"] = args.log_level.upper()
     app_env["TCG_DATA_DIR"] = str(args.data_dir.resolve())
+    if args.allowed_hosts:
+        app_env["TCG_ALLOWED_HOSTS"] = args.allowed_hosts
     if args.env_file:
         app_env["TCG_ENV_FILE"] = str(args.env_file.expanduser().resolve())
     app_env["LANGSMITH_TRACING"] = "false"
@@ -97,7 +101,7 @@ def launch() -> None:
         timer.daemon = True
         timer.start()
     try:
-        subprocess.run([str(executable), "-m", "uvicorn", "tcg.main:app", "--host", "127.0.0.1", "--port", str(args.port), "--workers", "1", "--log-level", args.log_level, *( [] if args.access_log else ["--no-access-log"])], cwd=ROOT, env=app_env, check=True)
+        subprocess.run([str(executable), "-m", "uvicorn", "tcg.main:app", "--host", args.host, "--port", str(args.port), "--workers", "1", "--log-level", args.log_level, *( [] if args.access_log else ["--no-access-log"])], cwd=ROOT, env=app_env, check=True)
     except KeyboardInterrupt:
         pass
     except subprocess.CalledProcessError as error:
