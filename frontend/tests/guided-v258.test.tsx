@@ -29,6 +29,9 @@ test('clarification suggestions fill drafts and never auto submit',async()=>{
   render(<RunCard run={{id:'r1',status:'waiting',intent:'generate_case',mode:'hitp',stage:'clarification',updated_at:'2026-09-10',artifact_ids:[],experience:'reliable',graph_version:7,interrupt:{type:'clarification',questions:['是否锁定账号？'],question_suggestions:[{question:'是否锁定账号？',answer:'连续失败 5 次后锁定。',basis:'需求明确给出阈值。',refs:['src#P1'],confidence:'supported'}]}}} onChanged={()=>{}} onTarget={()=>{}}/>);
   fireEvent.click(screen.getByRole('button',{name:'采用此答案'}));
   assert.match((screen.getByLabelText('回答澄清问题') as HTMLTextAreaElement).value,/连续失败 5 次/);
+  assert.equal(Boolean(screen.queryByText('是否锁定账号？')),false);
+  assert.equal(Boolean(screen.queryByRole('button',{name:'采用此答案'})),false);
+  assert.equal(Boolean(screen.queryByRole('button',{name:'采用全部建议'})),false);
   assert.equal(requested,false);
   fireEvent.click(screen.getByRole('button',{name:'提交并继续'}));
   await waitFor(()=>assert.equal(requested,true));
@@ -89,22 +92,83 @@ test('adopt all retains an edited answer and unrelated manual notes without dupl
   assert.ok(screen.getByText('需求中已有答案'));assert.ok(screen.getByText('建议假设'));assert.ok(screen.getByText('引用：src#P1'));
   const draft=screen.getByLabelText('回答澄清问题') as HTMLTextAreaElement;
   fireEvent.change(draft,{target:{value:'  我的补充备注  '}});fireEvent.click(screen.getAllByRole('button',{name:'采用此答案'})[0]);
+  assert.equal(Boolean(screen.queryByText('失败几次锁定？')),false);assert.ok(screen.getByText('是否允许人工解锁？'));
   fireEvent.change(draft,{target:{value:draft.value.replace('5 次。','3 次，以人工确认为准。')}});
   const edited=draft.value;fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));
   assert.ok(draft.value.startsWith(edited));assert.match(draft.value,/建议允许管理员解锁/);assert.equal(draft.value.includes('5 次。'),false);
   assert.equal(draft.value.split('问题：失败几次锁定？').length,2);const once=draft.value;
+  assert.equal(Boolean(screen.queryByRole('button',{name:'采用全部建议'})),false);assert.equal(Boolean(screen.queryByRole('button',{name:'采用此答案'})),false);
+  assert.equal(Boolean(screen.queryByText('以下信息会影响测试设计，请补充后继续。')),false);
+  assert.equal(Boolean(screen.queryByText(/采用后问题将从上方移除/)),false);
+  assert.equal(Boolean(screen.queryByText('请检查或修改下方草稿，再提交并继续。')),false);
+  fireEvent.change(draft,{target:{value:edited}});assert.ok(screen.getByText('是否允许人工解锁？'));assert.equal(Boolean(screen.queryByText('失败几次锁定？')),false);
   fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));assert.equal(draft.value,once);assert.equal(submitted,undefined);
   fireEvent.click(screen.getByRole('button',{name:'提交并继续'}));await waitFor(()=>assert.equal(submitted.answer,once));
  }finally{cleanup();globalThis.fetch=originalFetch;}
 });
 
-test('legacy clarification still accepts manual answers when suggestions are absent',async()=>{
+test('legacy clarification offers a conservative editable assumption and still accepts manual answers',async()=>{
  const {RunCard}=await import('../src/RunCard');
  try{
   render(<RunCard run={{id:'r-old',status:'waiting',intent:'generate_case',mode:'hitp',stage:'clarification',updated_at:'2026-09-10',artifact_ids:[],interrupt:{type:'clarification',questions:['请确认范围。']}}} onChanged={()=>{}} onTarget={()=>{}}/>);
-  assert.ok(screen.getByText('请确认范围。'));assert.equal(screen.queryByRole('button',{name:'采用全部建议'}),null);
+  assert.ok(screen.getByText('请确认范围。'));assert.ok(screen.getByRole('button',{name:'采用全部建议'}));assert.ok(screen.getByText('建议假设'));
+  assert.ok(screen.getByText(/当前没有明确答案，这是暂定的测试设计假设，采用前可修改/));
+  fireEvent.click(screen.getByRole('button',{name:'采用此答案'}));
+  assert.match((screen.getByLabelText('回答澄清问题') as HTMLTextAreaElement).value,/对于“请确认范围。”涉及的未明确条件，先标记为待确认，不新增限制或例外/);
+  assert.equal(Boolean(screen.queryByRole('button',{name:'采用此答案'})),false);
   fireEvent.change(screen.getByLabelText('回答澄清问题'),{target:{value:'仅 Web 登录。'}});
+  assert.ok(screen.getByRole('button',{name:'采用此答案'}));
   assert.equal(screen.getByRole('button',{name:'提交并继续'}).hasAttribute('disabled'),false);
+ }finally{cleanup();}
+});
+
+test('every unanswered question has one suggestion even when persisted suggestions are partial',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ try{
+  render(<RunCard run={{id:'r-partial',status:'waiting',intent:'generate_case',mode:'hitp',stage:'clarification',updated_at:'2026-09-11',artifact_ids:[],interrupt:{type:'clarification',questions:['是否锁定账号？','请确认范围。','是否锁定账号？'],question_suggestions:[{question:'是否锁定账号？',answer:'连续失败 5 次后锁定。',basis:'需求明确给出阈值。',refs:['src#P1'],confidence:'supported'},{question:'过期问题',answer:'不应显示',basis:'旧答案',refs:[],confidence:'assumption'}]}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.equal(screen.getAllByRole('button',{name:'采用此答案'}).length,2);
+  assert.ok(screen.getByText('需求中已有答案'));assert.ok(screen.getByText('建议假设'));assert.equal(screen.queryByText('过期问题'),null);
+  fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));
+  const draft=(screen.getByLabelText('回答澄清问题') as HTMLTextAreaElement).value;
+  assert.match(draft,/问题：是否锁定账号？\n回答：连续失败 5 次后锁定。/);
+  assert.match(draft,/问题：请确认范围。\n回答：建议暂按现有需求中已明确的规则设计/);
+  assert.equal(draft.split('问题：是否锁定账号？').length,2);assert.equal(Boolean(screen.queryByRole('button',{name:'采用此答案'})),false);
+ }finally{cleanup();}
+});
+
+test('clearing an adopted answer restores its suggestion and adoption refills the empty block once',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ try{
+  render(<RunCard run={{id:'r-empty-answer',status:'waiting',intent:'generate_case',mode:'hitp',stage:'clarification',updated_at:'2026-09-11',artifact_ids:[],interrupt:{type:'clarification',questions:['失败几次锁定？','是否允许人工解锁？'],question_suggestions:[{question:'失败几次锁定？',answer:'5 次。',basis:'需求第 1 段。',refs:['src#P1'],confidence:'supported'},{question:'是否允许人工解锁？',answer:'建议允许管理员解锁。',basis:'建议待业务确认。',refs:[],confidence:'assumption'}]}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  const draft=screen.getByLabelText('回答澄清问题') as HTMLTextAreaElement;
+  fireEvent.change(draft,{target:{value:'  手工备注不变  '}});fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));
+  const adopted=draft.value;fireEvent.change(draft,{target:{value:adopted.replace('5 次。','')}});
+  assert.ok(screen.getByText('失败几次锁定？'));assert.equal(Boolean(screen.queryByText('是否允许人工解锁？')),false);
+  fireEvent.click(screen.getByRole('button',{name:'采用此答案'}));
+  assert.equal(draft.value,adopted);assert.equal(draft.value.split('问题：失败几次锁定？').length,2);
+  assert.equal(Boolean(screen.queryByRole('button',{name:'采用全部建议'})),false);
+  const withNotes=adopted+'\n\n尾部手工备注';
+  fireEvent.change(draft,{target:{value:withNotes.replace('建议允许管理员解锁。','')}});
+  assert.ok(screen.getByText('是否允许人工解锁？'));
+  fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));assert.equal(draft.value,withNotes);
+ }finally{cleanup();}
+});
+
+test('clarification drafts survive polling and reset for another interrupt or run',async()=>{
+ const {RunCard}=await import('../src/RunCard');
+ const run={id:'r-scope',status:'waiting',intent:'generate_case',mode:'hitp',stage:'clarification',updated_at:'2026-09-11',artifact_ids:[],interrupt:{type:'clarification',artifact_id:'analysis-1',questions:['请确认范围。']}};
+ try{
+  const view=render(<RunCard run={run} onChanged={()=>{}} onTarget={()=>{}}/>);
+  fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));
+  const draft=screen.getByLabelText('回答澄清问题') as HTMLTextAreaElement;
+  fireEvent.change(draft,{target:{value:draft.value+'\n\n保留我的备注'}});const edited=draft.value;
+  view.rerender(<RunCard run={{...run,updated_at:'2026-09-11T00:00:10Z',interrupt:{...run.interrupt,question_suggestions:[{question:'请确认范围。',answer:'建议稍后确认。',basis:'新建议',refs:[],confidence:'assumption'}]}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.equal(draft.value,edited);assert.equal(Boolean(screen.queryByRole('button',{name:'采用全部建议'})),false);
+  view.rerender(<RunCard run={{...run,interrupt:{...run.interrupt,artifact_id:'analysis-2'}}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.equal(draft.value,'');assert.ok(screen.getByRole('button',{name:'采用全部建议'}));
+  fireEvent.click(screen.getByRole('button',{name:'采用全部建议'}));
+  view.rerender(<RunCard run={{...run,id:'r-another'}} onChanged={()=>{}} onTarget={()=>{}}/>);
+  assert.equal(draft.value,'');assert.ok(screen.getByRole('button',{name:'采用全部建议'}));
  }finally{cleanup();}
 });
 

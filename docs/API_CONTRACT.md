@@ -147,3 +147,11 @@ start.py checks the local interpreter, pyvenv.cfg, activate script and a working
 - `GET /api/artifacts/{id}/export-options` and `/export` support both `cases` and `scenarios`. Scenario options return `kind: "scenarios"`, effective snapshot defaults and available profiles. The existing `ids` and `profile_id` parameters select rows and export configuration. Scenario exports never call case field completion.
 - New template proposal reports contain `config` and `template_kinds: ["scenarios" | "cases"]`. New chat messages publish `metadata.proposal: {config, template_kinds}`. Historical messages may still contain a plain Profile config in `metadata.proposal`; clients should accept both forms.
 - `template_kinds` is proposal metadata, not a Profile field. Applying a scoped proposal to a selected destination Profile preserves that Profile's unrelated template settings.
+
+
+## v2.5.11 clarification updates
+
+- Each clarification question receives one suggested answer. Candidates with `confidence: "supported"` require exact non-example evidence references. Candidates with `confidence: "assumption"` may use `refs: []`; the answer and basis explicitly remain unconfirmed proposals until the user submits them.
+- The analysis contract asks for all question candidates together. Missing candidates are completed independently of requirement analysis; the clarification path retains a conservative, explicitly labeled fallback if the model cannot provide a usable suggestion.
+- Adopting suggestions only changes the editable answer draft. The UI hides question cards whose answer blocks contain text, preserves edited answers and manual notes, and restores suggestions when their answers are removed. Submitting still uses the existing explicit resume action.
+- Historical pending interrupts with missing candidates receive a frontend fallback; simply viewing or adopting a candidate does not write confirmed requirement evidence.

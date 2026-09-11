@@ -1,4 +1,6 @@
 """Stage-complete authoring: optimize batch size, never skip human decisions."""
+import re
+
 from langgraph.types import interrupt
 from .direct import DirectEngine
 from .graph import Engine
@@ -8,7 +10,7 @@ from .documents import parse_text
 
 
 def valid_question_suggestions(report, evidence):
-    """Drop malformed or ungrounded optional suggestions without losing questions."""
+    """Keep one valid candidate per exact question, separating evidence from assumptions."""
     if not isinstance(report, dict) or not isinstance(evidence, dict):
         return []
     questions = report.get('questions', [])
@@ -29,13 +31,64 @@ def valid_question_suggestions(report, evidence):
                    for field in ('answer', 'basis')):
             continue
         refs = suggestion.get('refs')
-        if not isinstance(refs, list) or not refs or not all(isinstance(ref, str) and ref in available for ref in refs):
+        if not isinstance(refs, list) or not all(isinstance(ref, str) and ref in available for ref in refs):
             continue
-        if suggestion.get('confidence') not in ('supported', 'assumption'):
+        confidence = suggestion.get('confidence')
+        if confidence not in ('supported', 'assumption') or (confidence == 'supported' and not refs):
             continue
-        valid.append({key: suggestion[key] for key in ('question', 'answer', 'basis', 'refs', 'confidence')})
+        candidate = {key: suggestion[key] for key in ('question', 'answer', 'basis', 'refs', 'confidence')}
+        if confidence == 'assumption' and not any(marker in candidate['basis'] for marker in ('未确认', '待确认', '假设')):
+            candidate['basis'] += '\n这是未确认的测试设计假设，采用前可修改。'
+        valid.append(candidate)
         seen.add(question)
     return valid
+
+
+def complete_question_suggestions(report, evidence):
+    """Fill missing candidates conservatively without asserting any new business fact."""
+    candidates = {item['question']: item for item in valid_question_suggestions(report, evidence)}
+    questions = report.get('questions', []) if isinstance(report, dict) else []
+    if not isinstance(questions, list):
+        return []
+    return [candidates.get(question) or {
+        'question': question,
+        'answer': f'建议暂按现有需求中已明确的规则设计；对于“{question}”涉及的未明确条件，先标记为待确认，不新增限制或例外。',
+        'basis': '当前没有明确答案，这是暂定的测试设计假设，采用前可修改。',
+        'confidence': 'assumption', 'refs': [],
+    } for question in dict.fromkeys(q for q in questions if isinstance(q, str))]
+
+
+def question_suggestion_context(report, evidence, questions, language):
+    """A small completion context; omitted source content is never implied to be supplied."""
+    words = re.findall(r'[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]+', ' '.join(questions))
+    terms = {term for word in words for term in ([word] if word.isascii() else
+             [word[index:index + 2] for index in range(len(word) - 1)])}
+    available = [item for item in evidence.values() if isinstance(item, dict)
+                 and item.get('role') != 'example' and isinstance(item.get('text'), str)]
+    ranked = sorted(available, key=lambda item: (
+        sum(term.lower() in item['text'].lower() for term in terms),
+        item.get('role') in ('change', 'clarification')), reverse=True)
+    selected, characters = [], 0
+    for item in ranked:
+        # Keep complete short chunks so a cropped condition cannot become a false default.
+        if len(item['text']) > 2000 or characters + len(item['text']) > 5000:
+            continue
+        selected.append({key: item[key] for key in ('id', 'text', 'role', 'location') if key in item})
+        characters += len(item['text'])
+        if len(selected) == 6:
+            break
+    return {
+        'language': language, 'questions': questions,
+        'analysis_context': {
+            'summary': str(report.get('summary', ''))[:1600],
+            'in_scope': str(report.get('in_scope', ''))[:800],
+            'out_of_scope': str(report.get('out_of_scope', ''))[:800],
+        },
+        'evidence': selected,
+        'evidence_scope': {'partial': len(selected) < len(available),
+                           'available_chunks': len(available), 'supplied_chunks': len(selected),
+                           'note': '仅提供有限的完整证据片段和已有理解摘要；摘要不是新增证据。未提供的内容不得作为依据。'},
+    }
 
 
 class FlowEngine(DirectEngine):
@@ -93,6 +146,35 @@ class FlowEngine(DirectEngine):
                 context['global_requirement_map'] = global_map
         return context
 
+    async def ensure_question_suggestions(self, run_id, key, report, evidence):
+        valid = valid_question_suggestions(report, evidence)
+        covered = {item['question'] for item in valid}
+        questions = list(dict.fromkeys(q for q in report.get('questions', [])
+                                      if isinstance(q, str) and q not in covered))
+        if not questions:
+            return complete_question_suggestions({**report, 'question_suggestions': valid}, evidence)
+        cached = self.store.cache_get(run_id, key)
+        if cached is None:
+            context = question_suggestion_context(report, evidence, questions,
+                self.store.run(run_id).get('_profile', {}).get('language', '中文'))
+            completed = []
+            self.store.assert_running(run_id)
+            if self.fits('complete_question_suggestions', context):
+                try:
+                    # One focused request only: failure must not restart analysis or block the question.
+                    result = await self.invoke_model('complete_question_suggestions', context, run_id)
+                    if isinstance(result, dict):
+                        completed = valid_question_suggestions(
+                            {'questions': questions, 'question_suggestions': result.get('question_suggestions')},
+                            {item['id']: item for item in context['evidence']})
+                except Exception as exc:
+                    self.trace('clarification.suggestion_fallback', run_id, error_type=type(exc).__name__)
+            self.store.assert_running(run_id)
+            cached = complete_question_suggestions(
+                {**report, 'question_suggestions': valid + completed}, evidence)
+            self.store.cache_set(run_id, key, cached)
+        return complete_question_suggestions({**report, 'question_suggestions': valid + cached}, evidence)
+
     async def analyze(self, run_id, key, clarification=''):
         saved = self.store.cache_get(run_id, key+':artifact')
         if saved:
@@ -100,7 +182,7 @@ class FlowEngine(DirectEngine):
         evidence = [e for e in self.all_evidence(run_id) if e['role'] != 'example']
         def build(values):
             return {**self.small_context(run_id, clarification=clarification,
-                output_contract='返回items与report。整体理解业务规则，忽略封面、签署人和审批元数据。report包含summary,in_scope,out_of_scope,questions,assumptions,requirement_map,diagrams,strategy，可选question_suggestions数组。每个建议包含question（questions中的原文）,answer,basis,refs（本批次非示例证据精确ID）,confidence（supported表示原文支持；assumption表示需用户确认的假设）。仅在当前证据支持有用建议时返回，没有可靠建议则返回空数组；建议不代表用户已确认，不得为了提供建议增加问题。diagrams包含业务流程图；复杂需求另含mindmap，存在生命周期则增加stateDiagram-v2。strategy包含建议depth与rationale。questions仅保留会影响下游的歧义。每条业务需求用精确refs引用原文。不要求逐个解释被忽略的元数据。'), 'evidence':values}
+                output_contract='返回items与report。整体理解业务规则，忽略封面、签署人和审批元数据。report包含summary,in_scope,out_of_scope,questions,question_suggestions,assumptions,requirement_map,diagrams,strategy。questions中的每个问题必须恰好有一个可采用、可修改的具体建议，不得遗漏、重复或增加问题。每个建议包含question（questions中的原文）,answer,basis,refs,confidence。有明确原文支持时confidence为supported且refs必须包含本批次非示例证据精确ID；否则confidence为assumption，refs可为空，answer和basis明确说明这是未确认的建议行为及取舍，不得假装原文已确认。缺少事实时建议保守的测试设计处理，不编造精确业务阈值、角色或时限。建议不代表用户已确认。diagrams包含业务流程图；复杂需求另含mindmap，存在生命周期则增加stateDiagram-v2。strategy包含建议depth与rationale。questions仅保留会影响下游的歧义。每条业务需求用精确refs引用原文。不要求逐个解释被忽略的元数据。'), 'evidence':values}
         groups = self.capacity_groups('analyze_requirement', evidence, build)
         items, reports = [], []
         self.stage(run_id, 'requirement_analysis')
@@ -138,6 +220,9 @@ class FlowEngine(DirectEngine):
             report['assumptions'] += ['待核实风险：'+q for q in report['questions']]
             report['questions'] = []
             report['question_suggestions'] = []
+        else:
+            report['question_suggestions'] = await self.ensure_question_suggestions(
+                run_id, key + ':question_suggestions', report, {e['id']: e for e in evidence})
         self.store.cache_set(run_id, 'v6:requirement_map', {k:report[k] for k in ('summary','in_scope','out_of_scope','requirement_map','assumptions') if k in report})
         return self.store.artifact(run_id, key+':artifact', 'analysis','需求理解与业务图',items,report)
 
@@ -158,7 +243,9 @@ class FlowEngine(DirectEngine):
         round_index=0
         while analysis.get('report',{}).get('questions'):
             self.store.publish(run_id,[analysis['id']],'先核对我的需求理解与业务图，以下问题会影响后续场景。',waiting=True)
-            suggestions=valid_question_suggestions(analysis['report'], {e['id']: e for e in self.all_evidence(run_id)})
+            suggestions=await self.ensure_question_suggestions(run_id,
+                f"{analysis['id']}:{analysis['revision']}:question_suggestions", analysis['report'],
+                {e['id']: e for e in self.all_evidence(run_id)})
             answer=interrupt({'type':'clarification','artifact_id':analysis['id'],'questions':analysis['report']['questions'],
                               'question_suggestions':suggestions})
             key=f'v6:clarification:{round_index}'

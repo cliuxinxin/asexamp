@@ -275,6 +275,9 @@ class WorkflowEngine(FlowEngine):
                 context.pop('format_references',None)
         if task in ('generate_cases','import_cases','review_cases','modify','direct_cases'):
             context={**context,'template_contract':template_columns(context.get('profile',{}))}
+        if task=='complete_question_suggestions':
+            # This optional completion has one request; its caller supplies the safe fallback.
+            return await super().invoke_model(task,context,run_id)
         original=context
         hint_key='json_hint:'+hashlib.sha256(json.dumps(context,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         hint=self.store.cache_get(run_id,hint_key) if run_id else None
@@ -391,7 +394,8 @@ class WorkflowEngine(FlowEngine):
         rid=state['run_id'];self.stage(rid,'clarification')
         artifact=self.store.get('artifact',state['analysis_ref']);questions=artifact['report']['questions']
         evidence={item['id']:item for item in self.all_evidence(rid)}
-        suggestions=valid_question_suggestions(artifact['report'],evidence)
+        suggestions=await self.ensure_question_suggestions(rid,
+            f"{artifact['id']}:{artifact['revision']}:question_suggestions",artifact['report'],evidence)
         self.store.publish(rid,[artifact['id']],'已整理需求理解和业务图。请回答会影响测试设计的问题。',waiting=True)
         response=interrupt({'type':'clarification','artifact_id':artifact['id'],'questions':questions,'question_suggestions':suggestions})
         return {'clarification_answer':response['answer'],'clarification_questions':questions}

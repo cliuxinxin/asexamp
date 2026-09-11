@@ -30,7 +30,7 @@ def test_question_suggestions_keep_only_current_grounded_answers():
 def test_question_suggestions_ignore_malformed_optional_data_and_duplicates():
     evidence = {'src#P1': {'id': 'src#P1', 'role': 'primary'}}
     suggestion = {'question': '是否锁定？', 'answer': '请确认是否按五次锁定。',
-                  'basis': '登录策略中提到失败次数。', 'refs': ['src#P1'], 'confidence': 'assumption'}
+                  'basis': '这是待确认的假设；登录策略中提到失败次数。', 'refs': ['src#P1'], 'confidence': 'assumption'}
     assert valid_question_suggestions({'questions': ['是否锁定？'], 'question_suggestions': None}, evidence) == []
     report = {'questions': ['是否锁定？'], 'question_suggestions': [
         {**suggestion, 'question': {'text': '是否锁定？'}}, suggestion, suggestion,
@@ -57,7 +57,10 @@ def test_malformed_suggestions_do_not_block_legacy_clarification(tmp_path):
         run = until(client, start(client, chat, experience='reliable', mode='hitp'))
         assert run['status'] == 'waiting', run
         assert run['interrupt']['questions'] == ['是否锁定？']
-        assert run['interrupt']['question_suggestions'] == []
+        suggestions = run['interrupt']['question_suggestions']
+        assert len(suggestions) == 1 and suggestions[0]['question'] == '是否锁定？'
+        assert suggestions[0]['confidence'] == 'assumption' and suggestions[0]['refs'] == []
+        assert '待确认' in suggestions[0]['answer']
 
 
 def test_scenario_profile_is_independent_from_case_profile():
