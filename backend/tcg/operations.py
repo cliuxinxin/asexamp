@@ -67,7 +67,10 @@ def create_artifact(store, run_id, key, kind, title, items, report=None, *, comm
         if dependencies is None:
             dependencies = run.get('_commit_guards', {}).get(kind)
         if dependencies is not None:
-            deps.assert_manifest(store, dependencies)
+            try:
+                deps.assert_manifest(store, dependencies)
+            except deps.DependencyConflict as exc:
+                raise deps.conflict_context(exc, 'before_commit', kind=kind)
             _assert_project(dependencies, run['project_id'])
         validate_items(kind, items, {e['id']: e for e in store.evidence(run['_source_ids'], run.get('_source_roles'))})
         value = {'id': uid('art_'), 'chat_id': run['chat_id'], 'project_id': run['project_id'], 'type': kind,
@@ -111,7 +114,10 @@ def revise_artifact(store, artifact_id, expected_revision, items, reason='manual
         if previous['revision'] != expected_revision:
             raise DomainError('Artifact 已更新，请刷新后重试', 409)
         if dependencies is not None:
-            deps.assert_manifest(store, dependencies)
+            try:
+                deps.assert_manifest(store, dependencies)
+            except deps.DependencyConflict as exc:
+                raise deps.conflict_context(exc, 'before_commit', kind=previous['type'])
             _assert_project(dependencies, previous['project_id'])
         sources = list(previous['_source_ids'])
         roles = dict(previous.get('_source_roles', {}))

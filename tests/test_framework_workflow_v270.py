@@ -63,7 +63,7 @@ def test_confirmation_is_bound_to_artifact_version(tmp_path):
             'interrupt_id': waiting['interrupt_id'], 'expected_control_version': waiting['control_version']})
         assert continued.status_code == 200, continued.text
         done = until(client, continued.json())
-        assert done['status'] == 'completed', done
+        assert done['status'] == 'waiting' and done['interrupt']['type'] == 'case_draft_review', done
         calls = [context for task, context in model.calls if task == 'generate_cases']
         assert calls[0]['scenarios'][0]['title'] == items[0]['title']
 

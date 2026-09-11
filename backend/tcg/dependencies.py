@@ -1,8 +1,64 @@
 """Immutable input manifests and versioned, item-level artifact relations."""
 import hashlib
 import json
+import re
 
 from .schemas import DomainError
+
+
+ARTIFACT_DIGEST_SCHEME = 'immutable_revision_v1'
+ARTIFACT_BUSINESS_FIELDS = ('items', 'report', '_source_ids', '_source_roles', '_profile',
+    'type', 'title', 'project_id', 'chat_id', '_dependencies', '_write_dependencies')
+ARTIFACT_OPERATIONAL_FIELDS = {'_visible', '_agent_target'}
+
+
+class DependencyConflict(DomainError):
+    """Only identifiers, versions, hashes and server-owned labels are diagnostic."""
+    def __init__(self, changes, message='依赖已改变，请重新生成'):
+        super().__init__(message, 409)
+        self.dependency_changes = changes
+
+
+def conflict_context(exc, phase, task=None, kind=None):
+    if isinstance(exc, DependencyConflict):
+        exc.dependency_phase = phase
+        if task is not None:
+            exc.dependency_task = task
+        if kind is not None:
+            exc.dependency_kind = kind
+    return exc
+
+
+def _artifact_payload(value):
+    return {k: v for k, v in value.items() if k not in ARTIFACT_OPERATIONAL_FIELDS}
+
+
+def _saved_snapshot(store, artifact):
+    try:
+        return store.revision(artifact['id'], artifact['revision'])
+    except DomainError as exc:
+        if exc.status != 404:
+            raise
+        # Old imported artifacts can predate the immutable revision table.
+        return artifact
+
+
+def _safe_id(value):
+    return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:#-]{1,200}', value) else None
+
+
+def _safe_digest(value):
+    return value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{64}', value) else None
+
+
+def dependency_change(category, expected, current=None, reason='content_changed'):
+    current = current or {}
+    version = 'revision' if category == 'artifact' else 'version'
+    return {'category': category, 'id': _safe_id(expected.get('id')), 'reason': reason,
+            'expected_version': expected.get(version) if type(expected.get(version)) is int else None,
+            'current_version': current.get(version) if type(current.get(version)) is int else None,
+            'expected_digest': _safe_digest(expected.get('digest')),
+            'current_digest': _safe_digest(current.get('digest'))}
 
 
 def digest(value):
@@ -15,8 +71,12 @@ def manifest(store, artifact_ids=(), source_ids=(), profile_ids=(), run_id=None)
         artifact_refs = {(ref, 0) if isinstance(ref, str) else (ref['id'], ref['revision']): ref for ref in artifact_ids}
         for (aid, _), ref in sorted(artifact_refs.items()):
             a = store.get('artifact', aid) if isinstance(ref, str) else store.revision(aid, ref['revision'])
+            snapshot = _saved_snapshot(store, a)
+            if any(a.get(key) != snapshot.get(key) for key in ARTIFACT_BUSINESS_FIELDS):
+                raise DependencyConflict([dependency_change('artifact', {'id': aid, 'revision': a['revision']},
+                    reason='current_snapshot_inconsistent')])
             value['artifacts'].append({'id': aid, 'revision': a['revision'], 'project_id': a['project_id'],
-                                       'digest': digest({k: v for k, v in a.items() if k != '_visible'})})
+                                       'digest': digest(_artifact_payload(snapshot)), 'digest_scheme': ARTIFACT_DIGEST_SCHEME})
         source_refs = {(ref, 0) if isinstance(ref, str) else (ref['id'], ref['version']): ref for ref in source_ids}
         for (sid, _), ref in sorted(source_refs.items()):
             snapshot = store.source_snapshot(sid, None if isinstance(ref, str) else ref['version'])
@@ -41,14 +101,75 @@ def manifest(store, artifact_ids=(), source_ids=(), profile_ids=(), run_id=None)
 
 def assert_manifest(store, value):
     if not isinstance(value, dict) or value.get('version') != 1:
-        raise DomainError('依赖清单无效，请重新生成', 409)
-    try:
-        current = manifest(store, [a['id'] for a in value['artifacts']], [s['id'] for s in value['sources']],
-                           [p['id'] for p in value['profiles']], value.get('run', {}).get('id'))
-    except (KeyError, TypeError, DomainError):
-        raise DomainError('依赖已改变，请重新生成', 409) from None
-    if current != value:
-        raise DomainError('依赖已改变，请重新生成', 409)
+        raise DependencyConflict([dependency_change('manifest', {}, reason='invalid_manifest')], '依赖清单无效，请重新生成')
+    changes = []
+    with store.transaction():
+        if value.get('digest') != digest({k: v for k, v in value.items() if k != 'digest'}):
+            changes.append(dependency_change('manifest', value, reason='manifest_digest_changed'))
+        for group, category in (('artifacts', 'artifact'), ('sources', 'source'), ('profiles', 'profile')):
+            refs = value.get(group)
+            if not isinstance(refs, list):
+                changes.append(dependency_change(category, {}, reason='invalid_reference'))
+                continue
+            for expected in refs:
+                if not isinstance(expected, dict) or not _safe_id(expected.get('id')):
+                    changes.append(dependency_change(category, {}, reason='invalid_reference'))
+                    continue
+                try:
+                    kwargs = {category + '_ids': [expected['id']]}
+                    current = manifest(store, **kwargs)[group][0]
+                except (KeyError, TypeError, DomainError) as exc:
+                    if isinstance(exc, DependencyConflict):
+                        changes.extend(exc.dependency_changes)
+                    else:
+                        changes.append(dependency_change(category, expected, reason='unavailable'))
+                    continue
+                comparable = dict(current)
+                version = 'revision' if category == 'artifact' else 'version'
+                if category == 'artifact' and 'digest_scheme' not in expected:
+                    comparable.pop('digest_scheme', None)
+                    # v2.7 hashes used the mutable head. Bridge only a verified
+                    # digest from this exact immutable revision or current head.
+                    # A newer business revision is never accepted by this bridge.
+                    if expected.get('revision') == current['revision']:
+                        head = store.get('artifact', expected['id'])
+                        snapshot = _saved_snapshot(store, head)
+                        legacy = {digest({k: v for k, v in item.items() if k != '_visible'}) for item in (head, snapshot)}
+                        if expected.get('digest') in legacy:
+                            comparable['digest'] = expected['digest']
+                if expected == comparable:
+                    continue
+                reason = 'version_changed' if expected.get(version) != current.get(version) else 'content_changed'
+                change = dependency_change(category, expected, current, reason)
+                if category == 'artifact' and type(expected.get('revision')) is int:
+                    try:
+                        old = store.revision(expected['id'], expected['revision'])
+                        head = store.get('artifact', expected['id'])
+                        change['changed_fields'] = [key for key in ARTIFACT_BUSINESS_FIELDS if old.get(key) != head.get(key)]
+                    except DomainError:
+                        pass
+                changes.append(change)
+        if 'run' in value:
+            expected = value['run']
+            if not isinstance(expected, dict) or not _safe_id(expected.get('id')):
+                changes.append(dependency_change('run', {}, reason='invalid_reference'))
+            else:
+                try:
+                    current = manifest(store, run_id=expected['id'])['run']
+                    if current != expected:
+                        changes.append(dependency_change('run', expected, current, 'run_inputs_changed'))
+                except (KeyError, TypeError, DomainError):
+                    changes.append(dependency_change('run', expected, reason='unavailable'))
+        if changes:
+            raise DependencyConflict(changes)
+
+
+def current_manifest(store, value):
+    """Canonicalize only after asserting old guards, within the same transaction."""
+    with store.transaction():
+        assert_manifest(store, value)
+        return manifest(store, [a['id'] for a in value['artifacts']], [s['id'] for s in value['sources']],
+                        [p['id'] for p in value['profiles']], value.get('run', {}).get('id'))
 
 
 def _relations(artifact):

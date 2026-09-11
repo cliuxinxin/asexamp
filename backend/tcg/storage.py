@@ -331,7 +331,7 @@ class Store:
                     config = profile_config({**config, **request['profile_override']})
                 if request.get('case_types'):
                     config['case_types'] = list(dict.fromkeys(request['case_types']))
-                run.update(experience='reliable', graph_version=7, _profile=config,
+                run.update(experience='reliable', graph_version=7, pause_contract=2, _profile=config,
                            _memory=[m for m in self.list('memory', project_id=chat['project_id']) if m.get('active', True)],
                            _source_roles={sid: self.get('source', sid)['role'] for sid in sources},
                            progress={'phase': 'queued', 'completed': 0, 'total': 0, 'label': '准备任务'})

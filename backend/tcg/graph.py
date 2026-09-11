@@ -316,6 +316,15 @@ class Engine:
                 message = str(exc) if isinstance(exc, DomainError) else f'任务执行失败（{type(exc).__name__}）；已有进度保留，请重试当前阶段'
                 current = self.store.run(run_id)
                 recovery = {'recovery': self.agent.recovery(current, exc)} if current.get('experience') == 'agent' else {}
+                changes = error_details(exc).get('dependency_changes')
+                if changes:
+                    recovery = {'recovery': {'category': 'dependency', 'title': '输入版本已变化，旧结果未保存',
+                        'detail': '请在失败步骤日志中核对具体来源、成果或范围的变化。已保存的阶段和历史版本仍可查看。',
+                        'suggestions': ['若确实更新过输入，打开最新上游成果，在聊天中明确要求从该版本重新生成受影响阶段。',
+                            '例如：基于当前最新场景重新生成用例，采用人工逐步确认。',
+                            '普通重试沿用原任务输入，不能把旧批次与新版本混合保存。'],
+                        'preserved': ['已保存的需求与场景', '原有用例和历史版本', '失败调用与输入差异日志'],
+                        'retryable': False}}
                 self.store.update_run(run_id, status='failed', error=message, stage='failed', failed_stage=current['stage'], _failed_cache_key=current.get('_active_call_key'), **recovery)
 
     def stage(self, run_id, stage):
@@ -401,7 +410,7 @@ class Engine:
 
     async def invoke_model(self, task, context, run_id=None):
         from .generation_guards import begin_generation
-        from .dependencies import assert_manifest
+        from .dependencies import assert_manifest, DependencyConflict, conflict_context
         guard = begin_generation(self.store, run_id, task, context)
         input_version = self.store.run(run_id).get('input_version', 0) if run_id else None
         fields = {'task': task, 'call_id': uid('call_'), 'timeout_seconds': self.settings.value['timeout_seconds'],
@@ -463,7 +472,10 @@ class Engine:
                 if run_id and self.store.run(run_id).get('input_version', 0) != input_version:
                     raise DomainError('工作流输入版本已更新，拒绝旧输入生成的结果；已有阶段保留', 409)
                 if guard is not None:
-                    assert_manifest(self.store, guard)
+                    try:
+                        assert_manifest(self.store, guard)
+                    except DependencyConflict as exc:
+                        raise conflict_context(exc, 'after_model', task)
                 if not hasattr(self.gateway, 'generate_stream'):
                     await on_text(json.dumps(result, ensure_ascii=False))
                 await flush()
@@ -688,9 +700,12 @@ class Engine:
         run_id = state['run_id']
         run = self.store.run(run_id)
         if run['mode'] == 'hitp' and state['intent'] == 'generate_case':
+            self.stage(run_id, 'scenario_review')
             artifact = self.store.get('artifact', state['scenario_ref'])
             self.store.publish(run_id, [artifact['id']], '请检查并编辑测试场景，确认后继续生成用例。', waiting=True)
-            response = interrupt({'type': 'scenario_review', 'artifact_id': artifact['id'], 'items': artifact['items']})
+            response = interrupt({'type': 'scenario_review', 'artifact_id': artifact['id'], 'items': artifact['items'],
+                'title': '确认测试场景', 'message': '检查场景与需求覆盖。可通过聊天估算、修改或补充资料；明确确认后才生成用例。',
+                'confirm_label': '确认场景，生成用例草稿', 'next_stage': 'cases'})
             if not isinstance(response, dict) or response.get('approved') is not True:
                 raise DomainError('请确认场景后继续')
         return {}
@@ -845,6 +860,7 @@ class Engine:
                 kind = run['interrupt']['type']
                 if ((kind == 'scenario_review' and run.get('stop_after') == 'scenarios') or
                         (kind == 'strategy_review' and run.get('stop_after') == 'analysis') or
+                        (kind == 'case_draft_review' and run.get('stop_after') == 'cases') or
                         (kind == 'workflow_paused' and run['interrupt'].get('reason') == 'stop_after'
                          and run.get('stop_after') == 'cases')):
                     raise DomainError('已达到任务的持久停止位置，请先明确修改后续目标', 409)
@@ -858,6 +874,8 @@ class Engine:
                     raise DomainError('请确认场景后继续生成用例')
                 if kind == 'strategy_review' and response.get('approved') is not True:
                     raise DomainError('请确认策略后继续，或使用补充指令修订策略')
+                if kind in ('case_draft_review','case_result_review') and response.get('approved') is not True:
+                    raise DomainError('请明确确认当前用例版本后继续',409)
                 if kind == 'clarification':
                     if run.get('graph_version') == 7:
                         from .clarification import get_draft, save_draft

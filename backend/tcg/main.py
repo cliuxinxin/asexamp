@@ -84,7 +84,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.7.0', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.7.1', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -143,7 +143,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.7.0', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.7.1', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -351,7 +351,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.7.0', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.7.1', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],

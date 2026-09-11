@@ -171,7 +171,7 @@ def active_guard(store, artifacts):
                 raise DomainError('当前资料正在生成，请完成或停止任务后再操作成果', 409)
             pending = run.get('interrupt', {})
             safe_boundary = pending.get('type') == 'workflow_paused'
-            matching_gate = (pending.get('type') in ('strategy_review', 'scenario_review', 'clarification')
+            matching_gate = (pending.get('type') in ('strategy_review', 'scenario_review', 'clarification','case_draft_review','case_result_review')
                              and (pending.get('artifact_id') in ids or linked_gate(store, artifacts, pending.get('artifact_id'))))
             if not safe_boundary and not matching_gate:
                 raise DomainError('请先完成当前确认，再操作其他成果', 409)

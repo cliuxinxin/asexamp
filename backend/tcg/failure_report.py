@@ -38,6 +38,18 @@ def response_excerpt(raw,issue):
     return '\n\n'.join(parts)
 
 
+def belongs_to_call(event, call, calls):
+    if event.get('call_id'):
+        return event['call_id'] == call['call_id']
+    if event.get('node') != call.get('node'):
+        return False
+    later = next((c.get('at') for c in calls if c.get('node') == call.get('node')
+                  and c.get('at', '') > call.get('at', '')), None)
+    if not (call.get('at', '') <= event.get('at', '') and (not later or event.get('at', '') < later)):
+        return False
+    return not event.get('call_key') or event['call_key'] == call.get('call_key')
+
+
 def failed_step_report(store,diagnostics,run_id,call_id=None):
     run=store.run(run_id)
     with store.lock:
@@ -57,19 +69,21 @@ def failed_step_report(store,diagnostics,run_id,call_id=None):
         '任务级错误：'+clip(run.get('error') or '当前没有终止错误；所选调用是否通过，请看下方调用结论与校验记录。',1800),
         f'本文件只包含选中步骤最近 {len(chosen)} 次调用；不含完整需求、历史产物或检查点。文件上限 64 KiB。']
     if omitted:parts.append(f'该步骤更早的 {omitted} 次调用未收入本文件。')
+    dependency_events = [{k: event[k] for k in ('event', 'node', 'task', 'call_id', 'call_key',
+        'dependency_changes', 'dependency_phase', 'dependency_task', 'dependency_kind') if k in event}
+        for event in events if event.get('dependency_changes') and
+        event.get('node') == node and (not call_id or belongs_to_call(event, chosen[0], calls))]
+    if dependency_events:
+        parts += ['## 工作流依赖校验失败',
+            '模型 JSON 通过后，结果仍须通过输入版本与保存校验。以下记录区分来源、成果、配置或运行范围；不据此推断是谁修改了输入。',
+            code(clip(json.dumps(dependency_events[-3:], ensure_ascii=False, indent=2), 9000))]
     if not chosen:parts.append('没有可用的调用快照。旧版本记录缺失时无法补回。')
     for i,call in enumerate(chosen,1):
         cid=call['call_id']
         with store.lock:
             row=store.db.execute('SELECT content FROM model_outputs WHERE run_id=? AND call_id=?',(run_id,cid)).fetchone()
         raw=row['content'] if row else ''
-        later=next((c.get('at') for c in calls if c.get('node')==call.get('node') and c.get('at','')>call.get('at','')),None)
-        def belongs(event):
-            if event.get('call_id'):return event['call_id']==cid
-            if event.get('node')!=call.get('node'):return False
-            if not (call.get('at','')<=event.get('at','') and (not later or event.get('at','')<later)):return False
-            return not event.get('call_key') or event['call_key']==call.get('call_key')
-        own=[e for e in events if belongs(e)]
+        own=[e for e in events if belongs_to_call(e,call,calls)]
         transport=next((e for e in reversed(own) if e.get('event')=='model.transport_response'),{})
         end=next((e for e in reversed(own) if e.get('event') in ('model.error','model.complete')), {})
         messages=call.get('messages',[])
@@ -96,7 +110,8 @@ def failed_step_report(store,diagnostics,run_id,call_id=None):
                 parts.append('JSON 语法错误：'+code(json.dumps(issue,ensure_ascii=False,indent=2)))
             parts+=['### 原始返回或错误片段',response_excerpt(raw,issue)]
         else:parts.append('未保存模型文本返回；可能在网络或接口协议层失败。')
-        specific=[{k:e[k] for k in ('event','parse_error','validation_error','validation_errors','errors','error_types','http_status','stack','appended_closers') if k in e} for e in own if e.get('event') in ('model.invalid_json','model.error','node.error','batch.validation_failed','model.transport_error','model.json_local_repair')]
+        specific=[{k:e[k] for k in ('event','parse_error','validation_error','validation_errors','errors','error_types','http_status','stack','appended_closers',
+            'dependency_changes','dependency_phase','dependency_task','dependency_kind') if k in e} for e in own if e.get('event') in ('model.invalid_json','model.error','node.error','batch.validation_failed','model.transport_error','model.json_local_repair')]
         if specific:parts+=['### 本次调用的错误记录',code(clip(json.dumps(specific,ensure_ascii=False,indent=2),3500))]
         if i==1:
             system=next((text_content(m) for m in messages if m.get('role')=='system'),'')

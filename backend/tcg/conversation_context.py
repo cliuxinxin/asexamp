@@ -5,6 +5,13 @@ from .schemas import DomainError
 from .storage import now
 
 BUSINESS_TYPES = {'analysis','scenarios','cases','review'}
+RUN_SETTING_FIELDS = ('profile_id','mode','source_ids','depth','case_types','profile_override','experience','artifact_id')
+
+
+def explicit_run_settings(body):
+    # HTTP keeps its historical defaults separately from caller-supplied values.
+    # Old persisted turns have no marker and retain their original precedence.
+    return set(body.get('_explicit_run_settings', ()))
 
 class NeedsInput(Exception):
     def __init__(self, message, candidates=None, field='artifact_id'):
@@ -45,10 +52,16 @@ def build_context(store, engine, chat, body, registry):
     messages=sorted(store.list('message',chat_id=chat['id']),key=lambda m:m.get('created_at',''))[-6:]
     sources=[s for s in store.list('source',project_id=chat['project_id']) if s.get('_active',True)
              and (s.get('chat_id')==chat['id'] or s.get('_project_shared'))]
+    explicit=explicit_run_settings(body)
+    requested_settings={key:copy.deepcopy(body[key]) for key in ('mode','profile_id','depth','case_types')
+                        if key in explicit and key in body}
+    if 'profile_override' in explicit and isinstance(body.get('profile_override'),dict):
+        requested_settings['profile_override_fields']=sorted(body['profile_override'])
     value={'content':body['content'],'intent_hint':body.get('intent_hint','auto'),
+        'requested_settings':requested_settings,
         'focus':state.get('focus'),'reply_to':body.get('reply_to'),'pending':pending[-8:],
         'view':{k:body.get(k) for k in ('artifact_id','artifact_revision','selected_ids','view_order') if body.get(k) is not None},
-        'runs':[{'id':r['id'],'status':r['status'],'stage':r.get('stage'),'intent':r.get('intent'),
+        'runs':[{'id':r['id'],'status':r['status'],'stage':r.get('stage'),'intent':r.get('intent'),'mode':r.get('mode'),
                  'interrupt':r.get('interrupt'),'stop_after':r.get('stop_after'),'scope':r.get('scope'),
                  'control_version':r.get('control_version',0),'interrupt_id':r.get('_interrupt_id')} for r in runs],
         'artifacts':[artifact_brief(a) for a in artifacts[:12]],'artifacts_partial':len(artifacts)>12,
@@ -112,6 +125,11 @@ def resolve_artifact(store,chat,body,state,name,args,definition=None):
     if len(allowed)==1:required_type=allowed[0]
     artifacts=[a for a in artifacts if a['type'] in allowed]
     aid=args.get('artifact_id');focus=state.get('focus') or {};chosen=None
+    # A selected row is an explicit target. A merely rendered result may be stale,
+    # so without a selection the established conversational focus still wins.
+    ui_selected=bool(body.get('artifact_id') and body.get('selected_ids'))
+    context_ids=(body.get('artifact_id'),focus.get('artifact_id')) if ui_selected else (
+        focus.get('artifact_id'),body.get('artifact_id'))
     if aid:
         chosen=known.get(aid)
         if chosen is None:raise DomainError('指定成果不属于当前对话的已保存结果',404)
@@ -121,17 +139,16 @@ def resolve_artifact(store,chat,body,state,name,args,definition=None):
         if len(matches)==1:chosen=matches[0]
         elif len(matches)>1:raise NeedsInput('这几份成果名称相同，请选择要操作的一份。',[artifact_brief(a) for a in matches])
     if args.get('from_case') or args.get('related_to_case'):
-        case=chosen or known.get(focus.get('artifact_id')) or known.get(body.get('artifact_id'))
+        case=chosen or next((known[candidate_id] for candidate_id in context_ids if candidate_id in known),None)
         if case and case['type']=='cases':
             lineage=case.get('report',{}).get('lineage',{})
             chosen=known.get(lineage.get('scenario_artifact_id'))
-            ids=args.pop('case_ids',None) or focus.get('selected_ids') or body.get('selected_ids')
+            ids=args.pop('case_ids',None) or (body.get('selected_ids') if ui_selected and case['id']==body.get('artifact_id') else None) or focus.get('selected_ids') or body.get('selected_ids')
             if chosen and ids:
                 args['selected_ids']=list(dict.fromkeys(r.get('scenario_id') for r in case['items'] if r['id'] in ids))
     if not chosen:
         candidates=[a for a in artifacts if not required_type or a['type']==required_type]
-        # Explicit conversational focus outranks a stale automatically rendered result.
-        for candidate_id in (focus.get('artifact_id'),body.get('artifact_id')):
+        for candidate_id in context_ids:
             candidate=known.get(candidate_id)
             if candidate and (not required_type or candidate['type']==required_type):
                 chosen=candidate;break

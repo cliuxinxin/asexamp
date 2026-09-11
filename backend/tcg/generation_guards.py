@@ -1,7 +1,8 @@
 """Bind generation batches to inputs without confusing freshness and provenance."""
 import copy
 
-from .dependencies import assert_manifest, digest, manifest
+from .dependencies import (assert_manifest, digest, manifest, current_manifest,
+    DependencyConflict, dependency_change, conflict_context)
 from .schemas import DomainError
 
 
@@ -18,13 +19,19 @@ def merge_manifests(*values, strict=False):
             for ref in (value or {}).get(group, []):
                 key = (ref['id'], ref.get('revision', ref.get('version')))
                 if strict and any(k[0] == key[0] and k != key for k in refs):
-                    raise DomainError('生成批次的输入版本已变化，请重新生成受影响阶段', 409)
+                    previous = next(value for k, value in refs.items() if k[0] == key[0] and k != key)
+                    raise DependencyConflict([dependency_change(group[:-1], previous, ref, 'version_changed')],
+                        '生成批次的输入版本已变化，请重新生成受影响阶段')
+                if strict and key in refs and refs[key] != ref:
+                    raise DependencyConflict([dependency_change(group[:-1], refs[key], ref, 'inconsistent_batch_snapshot')],
+                        '生成批次的输入版本已变化，请重新生成受影响阶段')
                 refs[key] = copy.deepcopy(ref)
         result[group] = [refs[key] for key in sorted(refs)]
     for value in values:
         if (value or {}).get('run'):
             if strict and result.get('run') and result['run'] != value['run']:
-                raise DomainError('生成范围已改变，请重新生成受影响阶段', 409)
+                raise DependencyConflict([dependency_change('run', result['run'], value['run'], 'run_inputs_changed')],
+                    '生成范围已改变，请重新生成受影响阶段')
             result['run'] = copy.deepcopy(value['run'])
     result['digest'] = digest(result)
     return result
@@ -56,8 +63,11 @@ def begin_generation(store, run_id, task, context):
         if previous == epoch:
             saved = run.get('_commit_guards', {}).get(kind)
             if saved:
-                assert_manifest(store, saved)
-                guard = merge_manifests(saved, guard, strict=True)
+                try:
+                    saved = current_manifest(store, saved)
+                    guard = merge_manifests(saved, guard, strict=True)
+                except DependencyConflict as exc:
+                    raise conflict_context(exc, 'before_generation', task, kind)
             consumed = merge_manifests(run.get('_consumed_inputs', {}).get(kind), consumed)
         store.update_run(run_id,
             _generation_epochs={**run.get('_generation_epochs', {}), kind: epoch},

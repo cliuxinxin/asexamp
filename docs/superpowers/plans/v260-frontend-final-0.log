@@ -1,0 +1,24 @@
+✔ running composer sends one unified turn with stable view context and renders a saved estimate (556.647725ms)
+✔ pending read keeps actual scenario confirmation available and confirm uses a bound command (456.889509ms)
+✔ failed response preserves edited composer and retry reuses the client message id (313.531407ms)
+✔ stored typed parts display actual steps, before and after differences, coverage and separate downloads (273.092176ms)
+✔ clarification adoption persists, reload restores edits, save and share never imply continue (576.385718ms)
+✔ artifact estimate shortcut calls the same read capability and renders its typed response (316.656916ms)
+✔ chat adopts suggestions in the authoritative draft while the visible run card updates (350.76977ms)
+✔ scenario export creates a real downloadable file through the unified export capability (231.902445ms)
+✔ later hold instruction can be sent while a prior edit is awaiting its response (351.381037ms)
+✔ remote draft revision never silently rebases and overwrites an unsaved local answer (202.187087ms)
+✔ a saved artifact turn advances the composer version used by the next request (305.253375ms)
+✔ conversational Profile selection becomes the next composer profile without reverting an unsent local choice (323.25653ms)
+✔ draft submit binds the original control version so a later hold supersedes its pending continue (405.4406ms)
+✔ typing during an owned draft save keeps the newer text and advances only its own saved base revision (239.191426ms)
+✔ a persisted failed receipt shows the actual failure and retains the composer text (276.26699ms)
+✔ ambiguous object requests show the actual candidate order, IDs and saved revisions (163.007689ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6401.764773

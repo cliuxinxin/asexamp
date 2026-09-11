@@ -35,7 +35,7 @@ class WorkflowEngine(FlowEngine):
     def build_workflow(self, saver):
         graph = StateGraph(WorkflowState)
         nodes = ('dispatch','inputs','understand','clarification_gate','apply_answer',
-                 'understanding_gate','scenarios','scenario_gate','cases','review',
+                 'understanding_gate','scenarios','scenario_gate','cases','case_draft_gate','review','review_result_gate',
                  'conversation','single','summarize','publish')
         for name in nodes:
             boundary='boundary_'+name
@@ -54,8 +54,10 @@ class WorkflowEngine(FlowEngine):
         branch('understanding_gate',lambda s:'summarize' if s['intent']=='review_requirement' else 'scenarios',('summarize','scenarios'))
         branch('scenarios',lambda s:'scenario_gate' if s.get('scenario_ref') else 'scenarios',('scenario_gate','scenarios'))
         branch('scenario_gate',lambda s:'summarize' if s['intent']=='generate_scenario' else 'cases',('summarize','cases'))
-        branch('cases',lambda s:'review' if s.get('cases_ref') else 'cases',('review','cases'))
-        for name in ('review','conversation','single'):
+        branch('cases',lambda s:'case_draft_gate' if s.get('cases_ref') else 'cases',('case_draft_gate','cases'))
+        edge('case_draft_gate','review')
+        edge('review','review_result_gate')
+        for name in ('review_result_gate','conversation','single'):
             edge(name,'summarize')
         edge('summarize','publish')
         graph.add_edge('publish',END)
@@ -92,6 +94,7 @@ class WorkflowEngine(FlowEngine):
         names={'routing':'识别本次任务','input_check':'检查资料用途','requirement_analysis':'理解需求与业务图',
             'applying_clarification':'保存澄清，沿用已有理解','strategy_review':'等待确认理解与方案',
             'scenario_generation':'生成测试场景','case_generation':'生成测试用例','case_review':'评审并优化用例',
+            'scenario_review':'等待确认测试场景','case_draft_review':'等待确认用例草稿','case_result_review':'等待确认评审结果',
             'learn_template':'读取 Excel 格式建议','modify':'修改选定结果','query':'回答你的问题','summarizing':'整理本轮总结'}
         if stage in names:self.store.update_run(run_id,progress={'phase':stage,'completed':0,'total':1,'label':names[stage]})
 
@@ -174,14 +177,6 @@ class WorkflowEngine(FlowEngine):
         saved = self.store.annotate_artifact(current['id'], current['revision'], {'report': {**current.get('report', {}), **fields}})
         artifact.update(saved)
         return saved
-
-    async def node_review(self,state):
-        result=await super().node_review(state)
-        if result.get('output_ref'):
-            artifact=self.store.get('artifact',result['output_ref'])
-            reports=self.store.cache_get(state['run_id'],'v4:review_reports') or []
-            self.save_report(artifact,{'review_reports':reports})
-        return result
 
     async def prepare_result(self, rid, task, context, result):
         profile=context.get('profile',{})
@@ -471,6 +466,9 @@ class WorkflowEngine(FlowEngine):
             artifact=self.store.get('artifact',state['analysis_ref'])
             self.store.publish(rid,[artifact['id']],'请确认需求理解、业务图和测试方案。剩余不确定项可在此修订，不会自动反复追问。',waiting=True)
             response=interrupt({'type':'strategy_review','artifact_id':artifact['id'],
+                'title':'确认需求理解','message':'检查需求、业务图和测试方案。可通过聊天提问、修订或补充资料；明确确认后才生成场景。',
+                'confirm_label':'确认需求理解，生成场景','next_stage':'scenarios',
+                **({'stop_after':'analysis'} if run.get('stop_after')=='analysis' else {}),
                 'recommended_depth':artifact.get('report',{}).get('strategy',{}).get('depth','standard')})
             if response.get('approved') is not True:raise DomainError('请确认理解与方案')
             if response.get('depth'):
@@ -483,9 +481,11 @@ class WorkflowEngine(FlowEngine):
     async def node_scenario_gate(self,state):
         rid=state['run_id'];run=self.store.run(rid)
         if run.get('stop_after') == 'scenarios':
+            self.stage(rid,'scenario_review')
             artifact=self.store.get('artifact',state['scenario_ref'])
             self.store.publish(rid,[artifact['id']],'已生成场景并达到本任务停止位置。明确允许生成用例后再继续。',waiting=True)
             response=interrupt({'type':'scenario_review','artifact_id':artifact['id'],'items':artifact['items'],
+                'title':'确认测试场景','confirm_label':'确认场景，生成用例草稿','next_stage':'cases',
                 'stop_after':'scenarios','message':'本任务暂时停止在场景，请明确允许生成用例后继续。'})
             if response.get('approved') is not True:
                 raise DomainError('请确认场景后继续')
@@ -498,7 +498,7 @@ class WorkflowEngine(FlowEngine):
 
     async def node_review(self,state):
         rid=state['run_id'];run=self.store.run(rid)
-        if run.get('graph_version')==7 and run.get('stop_after')=='cases' and state.get('cases_ref'):
+        if run.get('pause_contract',1)<2 and run.get('graph_version')==7 and run.get('stop_after')=='cases' and state.get('cases_ref'):
             artifact=self.store.get('artifact',state['cases_ref'])
             self.store.publish(rid,[artifact['id']],'用例已生成并达到本任务停止位置。明确允许评审后再继续。',waiting=True)
             interrupt({'type':'workflow_paused','node':'review','reason':'stop_after',
@@ -507,6 +507,46 @@ class WorkflowEngine(FlowEngine):
             snapshot=self.store.run(state['run_id']).get('_artifact_snapshot')
             state={**state,'cases_ref':snapshot['id']}
         return await super().node_review(state)
+
+    async def node_case_draft_gate(self,state):
+        rid=state['run_id'];run=self.store.run(rid)
+        if run.get('pause_contract',1)<2 or not state.get('cases_ref'):
+            return {}
+        artifact=self.store.get('artifact',state['cases_ref'])
+        if run['mode']=='hitp' or run.get('stop_after')=='cases':
+            self.stage(rid,'case_draft_review')
+            message='请检查用例草稿的步骤、预期和覆盖。可通过聊天微调或联动修改；确认后才开始 AI 评审。'
+            self.store.publish(rid,[artifact['id']],message,waiting=True)
+            response=interrupt({'type':'case_draft_review','artifact_id':artifact['id'],
+                'items':artifact['items'],'title':'确认用例草稿','message':message,
+                'confirm_label':'确认用例草稿，开始评审','next_stage':'review',
+                **({'stop_after':'cases'} if run.get('stop_after')=='cases' else {})})
+            if response.get('approved') is not True:
+                raise DomainError('请确认当前用例草稿后再评审')
+        return {'cases_ref':artifact['id'],'output_ref':artifact['id']}
+
+    async def node_review_result_gate(self,state):
+        rid=state['run_id'];run=self.store.run(rid)
+        # This node replays on confirmation. Publish the original review once;
+        # edits made while waiting are part of the version being approved.
+        with self.store.transaction():
+            artifact=self.store.get('artifact',state['output_ref'])
+            if not self.store.cache_get(rid,'v7:review_report_attached'):
+                reports=self.store.cache_get(rid,'v4:review_reports') or []
+                if reports:
+                    artifact=self.save_report(artifact,{'review_reports':reports})
+                self.store.cache_set(rid,'v7:review_report_attached',
+                    {'artifact_id':artifact['id'],'revision':artifact['revision']})
+        if run.get('pause_contract',1)>=2 and run['mode']=='hitp' and artifact['type']=='cases':
+            self.stage(rid,'case_result_review')
+            message='请检查评审结论和当前用例。可以继续提问、微调、查看覆盖或保存格式样例；确认后完成本轮任务。'
+            self.store.publish(rid,[artifact['id']],message,waiting=True)
+            response=interrupt({'type':'case_result_review','artifact_id':artifact['id'],
+                'items':artifact['items'],'title':'确认评审结果','message':message,
+                'confirm_label':'确认评审结果，完成任务','next_stage':'publish'})
+            if response.get('approved') is not True:
+                raise DomainError('请确认当前评审结果后完成任务')
+        return {'output_ref':artifact['id']}
 
     async def node_conversation(self,state):
         from .dialogue_context import answer_dialogue
@@ -616,7 +656,7 @@ class WorkflowEngine(FlowEngine):
             return {'summary':f'已检查 {len(rows)} 条用例的模板字段，保留原用例与已有内容。'+note}
         if artifact['type'] in ('answer','proposal'):
             return {'summary':'\n'.join(i.get('description','') for i in artifact['items'])}
-        reports=self.store.cache_get(rid,'v4:review_reports') or []
+        reports=artifact.get('report',{}).get('review_reports',[])
         context={'intent':state['intent'],'artifact_type':artifact['type'],'count':len(artifact['items']),
                  'items':[{k:i.get(k) for k in ('id','title','priority')} for i in artifact['items']],
                  'report':artifact.get('report',{}),'review_reports':reports,
@@ -640,7 +680,8 @@ class WorkflowEngine(FlowEngine):
         rid=state['run_id'];artifact=self.store.get('artifact',state['output_ref'])
         content=state.get('summary') or self.store.cache_get(rid,'v7:summary') or '已保存当前结果。'
         reports=self.store.cache_get(rid,'v4:review_reports') or []
-        if reports and not artifact.get('report',{}).get('review_reports'):
+        if (reports and 'review_reports' not in artifact.get('report',{})
+                and not self.store.cache_get(rid,'v7:review_report_attached')):
             artifact = self.save_report(artifact, {'review_reports': reports})
         proposal=None
         if artifact['type']=='proposal':

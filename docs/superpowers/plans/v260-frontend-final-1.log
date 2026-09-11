@@ -1,0 +1,13 @@
+✔ task prompt fills an empty/default draft but preserves user text (1.054569ms)
+✔ scenario card exposes deterministic Excel export without case completion UI (352.026685ms)
+✔ task selection fills the composer and preserves edited drafts across every task selector (354.668073ms)
+✔ case scoped proposal use-once keeps target scenario settings and edited case settings (43.042724ms)
+✔ App carries learned template metadata into the proposal editor for the active target Profile (106.212673ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1834.161139

@@ -11,7 +11,8 @@ export type AgentState = {depth?:Depth;rationale?:string;plan?:{id:string;title:
 export type Recovery = {category:string;title:string;detail:string;suggestions:string[];preserved:string[];retryable:boolean};
 export type RunProgress = {phase:string;completed:number;total:number;label:string};
 export type QuestionSuggestion = {question:string;answer:string;basis:string;refs:string[];confidence:'supported'|'assumption'};
-export type Run = {id:string;chat_id?:string;interrupt_id?:string;control_version?:number;artifact_revision?:number;status:string;intent:string;mode:string;stage:string;error?:string;created_at?:string;updated_at:string;diagnostic?:Json|null;artifact_ids:string[];experience?:'legacy'|'agent'|'reliable';progress?:RunProgress;graph_version?:number;draft_artifact_id?:string;edit_in_progress?:boolean;generation_plan?:{input_groups:number;reason:string;context_tokens:number;output_reserve:number;token_estimate:number};agent?:AgentState;recovery?:Recovery;interrupt?:{type:string;questions?:string[];question_suggestions?:QuestionSuggestion[];artifact_id?:string;sources?: Array<{id:string;name:string;role:string}>; message?:string; suggested_text?:string; recommended_depth?:string;items?:Json[]}};
+export type RunInterrupt = {type:string;questions?:string[];question_suggestions?:QuestionSuggestion[];artifact_id?:string;artifact_revision?:number;sources?:Array<{id:string;name:string;role:string}>;message?:string;suggested_text?:string;recommended_depth?:string;items?:Json[];title?:string;confirm_label?:string;next_stage?:string;phase?:string;reason?:string;stop_after?:string};
+export type Run = {id:string;chat_id?:string;interrupt_id?:string;control_version?:number;artifact_revision?:number;status:string;intent:string;mode:string;stage:string;stop_after?:string;pause_contract?:number;error?:string;created_at?:string;updated_at:string;diagnostic?:Json|null;artifact_ids:string[];experience?:'legacy'|'agent'|'reliable';progress?:RunProgress;graph_version?:number;draft_artifact_id?:string;edit_in_progress?:boolean;generation_plan?:{input_groups:number;reason:string;context_tokens:number;output_reserve:number;token_estimate:number};agent?:AgentState;recovery?:Recovery;interrupt?:RunInterrupt};
 export type MemoryEntry = {id:string;content:string;kind:'preference'|'business';active:boolean};
 export type Snapshot = {chat:Chat;messages:Message[];sources:Source[];runs:Run[];memory?:Json};
 export type Artifact = {id:string;project_id?:string;chat_id?:string;type:string;title:string;revision:number;items:Json[];report?:Json};
@@ -29,6 +30,7 @@ export type TurnPart=
  |{type:'case_details';artifact_id:string;revision:number;items:Json[];title?:string}
  |{type:'diff';proposal_id:string;changes:Json[]}
  |{type:'coverage';data:Json}
+ |{type:'source_impact';data:Json}
  |{type:'files';files:{name:string;url:string}[]}
  |{type:'clarification_draft';draft:ClarificationDraft}
  |{type:'estimate';data:Json};

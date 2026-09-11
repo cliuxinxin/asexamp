@@ -1,9 +1,10 @@
 """Registered conversation controls around the existing fixed authoring graph."""
 import copy
 import json
+from pydantic import ValidationError
 
 from .clarification import get_draft, update_draft, save_draft, share_draft, register_routes
-from .schemas import DomainError
+from .schemas import DomainError, MessageInput
 from .storage import public
 
 
@@ -113,8 +114,9 @@ def _apply_scope(store, run, args):
         if 'scope' in changes:
             changes['_profile'] = {**run['_profile'], 'scope': changes['scope'] if isinstance(changes['scope'], str)
                 else json.dumps(changes['scope'], ensure_ascii=False)}
-        input_version = run.get('input_version', 0) + 1
-        changes.update(input_version=input_version, _input_version=input_version)
+        if any(key in changes and changes[key] != run.get(key) for key in ('scope','_source_ids','_source_roles')):
+            input_version = run.get('input_version', 0) + 1
+            changes.update(input_version=input_version, _input_version=input_version)
         changes['_request'] = {**run['_request'], **{key: changes[key] for key in ('stop_after', 'goal', 'scope') if key in changes}}
         run = store.update_run(run['id'], **changes)
     return run
@@ -162,9 +164,13 @@ async def execute(store, engine, chat, name, args, turn_id=None):
                 graph_intent = 'generate_case' if requested_intent in ('generate_scenario', 'review_requirement') else requested_intent
                 # A fresh request with new requirements must not silently pick
                 # a historical scenario. The controller resolves explicit focus.
-                request.update(content=content, intent=graph_intent, mode=args.get('mode', 'hitp'), experience='reliable', stop_after=goal)
-                if request['mode'] not in ('auto', 'hitp'):
-                    raise DomainError('mode 必须为 auto 或 hitp')
+                request.update(content=content, intent=graph_intent, mode=args.get('mode', 'hitp'), experience='reliable')
+                try:
+                    request = MessageInput.model_validate(request).model_dump()
+                except ValidationError as exc:
+                    fields = list(dict.fromkeys(str(error['loc'][0]) for error in exc.errors()))
+                    raise DomainError('工作流参数无效：' + '、'.join(fields)) from None
+                request['stop_after'] = goal
                 if args.get('conversation_turn_id'):
                     request['_conversation_turn_id'] = args['conversation_turn_id']
                 _, run = store.create_run(chat['id'], request)
@@ -238,6 +244,7 @@ async def execute(store, engine, chat, name, args, turn_id=None):
             kind = run.get('interrupt', {}).get('type')
             if (kind == 'scenario_review' and run.get('stop_after') == 'scenarios') or (
                     kind == 'strategy_review' and run.get('stop_after') == 'analysis') or (
+                    kind == 'case_draft_review' and run.get('stop_after') == 'cases') or (
                     kind == 'workflow_paused' and run.get('interrupt', {}).get('reason') == 'stop_after'
                     and run.get('stop_after') == 'cases'):
                 return _receipt(store, turn_id, _result('needs_input',
@@ -258,7 +265,7 @@ async def execute(store, engine, chat, name, args, turn_id=None):
                 if args.get('save_to_project'):
                     draft = share_draft(store, rid)
                 response.update(answer=draft['answer'], source_id=draft['source_id'], save_to_project=False)
-            elif kind in ('scenario_review', 'strategy_review'):
+            elif kind in ('scenario_review', 'strategy_review', 'case_draft_review', 'case_result_review'):
                 response.setdefault('approved', True)
             run = engine.resume(rid, response)
             return _receipt(store, turn_id, _result('succeeded', '已确认当前节点并继续，持久停止条件仍生效。', run))

@@ -1,4 +1,6 @@
-# TCG Case Agent 2.7.0
+# TCG Case Agent 2.7.1
+
+人工模式依次确认需求、场景、用例草稿、评审结果；自动模式执行相同阶段。页面选择的模式优先于模型推断。
 
 固定的需求→场景→用例→评审流程保留；独立的 LangGraph 对话图负责流程前后和暂停期间的自然语言操作。直接在聊天框提要求，系统选择已注册能力并解析目标、范围和版本。
 
@@ -10,9 +12,11 @@
 - 每次模型调用保存输入版本、引用、覆盖、预算、状态及服务返回的用量记录；对话回执接口为 `GET /api/chats/{chat_id}/turns/{turn_id}/contexts`。
 - 澄清建议采用后收起，先进入可编辑草稿，提交后按项目共享设置复用。场景/用例模板、Profile 样例、Excel 导出与紧凑输入框保留。
 
-**演示：[一段连续对话覆盖全部要点](docs/DEMO-v2.7.0.md)**。配套资料在 `examples/conversation-v260/`。
+**演示：[一段连续对话覆盖全部要点](docs/DEMO-v2.7.1.md)**。配套资料在 `examples/conversation-v260/`。
 
-架构说明：[工作流框架](docs/TCG-WORKFLOW-FRAMEWORK-ARCHITECTURE.md)。验证记录：[v2.7.0 定向验证](docs/VALIDATION-v2.7.0.md)。本轮使用真实 HTTP、LangGraph 和 SQLite，模型响应可控；尚未验证你的内网模型的自然语言识别效果。
+架构说明：[工作流框架](docs/TCG-WORKFLOW-FRAMEWORK-ARCHITECTURE.md)。验证记录：[v2.7.1 定向验证](docs/VALIDATION-v2.7.1.md)。本轮使用真实 HTTP、LangGraph 和 SQLite，模型响应可控；尚未验证你的内网模型的自然语言识别效果。
+
+交互约定：[自动、人工与聊天的协作规则](docs/INTERACTION-v2.7.1.md)。新建任务采用四阶段确认；旧任务保留创建时的检查点与确认顺序。演示请新建对话并选择 Human · 人工逐步确认。
 
 升级前停止旧服务并备份原数据目录，使用新目录启动，保留原数据和模型配置。首次打开历史资料时，已有证据无法恢复的旧版本会明确提示，不会伪造快照。同项目共享需访问同一服务；当前仍不含成员账号/权限管理。
 

@@ -22,6 +22,7 @@ def error_details(exc):
     validation_error = None
     validation_errors = []
     parse_error = None
+    dependency_details = {}
     while exc is not None and id(exc) not in seen and len(types) < 8:
         seen.add(id(exc))
         types.append(type(exc).__name__)
@@ -29,6 +30,10 @@ def error_details(exc):
             validation_error = exc.issue
         if getattr(exc,'errors',None):validation_errors=exc.errors
         if getattr(exc,'parse_error',None):parse_error=exc.parse_error
+        from .dependencies import DependencyConflict
+        if isinstance(exc, DependencyConflict) and not dependency_details:
+            dependency_details = {key: getattr(exc, key) for key in (
+                'dependency_changes', 'dependency_phase', 'dependency_task', 'dependency_kind') if hasattr(exc, key)}
         remote = getattr(exc, 'status_code', None)
         local = getattr(exc, 'status', None)
         if isinstance(remote, int):
@@ -49,6 +54,7 @@ def error_details(exc):
         result['validation_error'] = validation_error
     if validation_errors:result['validation_errors']=validation_errors
     if parse_error:result['parse_error']=parse_error
+    result.update(dependency_details)
     return result
 
 
