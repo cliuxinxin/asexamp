@@ -18,6 +18,7 @@ from langgraph.types import Command, interrupt
 
 from .diagnostics import Diagnostics, endpoint_origin, error_details
 from .documents import parse_text
+from .workflow_bindings import bind_interrupt, validate_confirmation
 from .schemas import DomainError, OutputValidationError, INTENTS, apply_operations, profile_config, validate_items
 from .storage import now, public, uid
 
@@ -82,11 +83,36 @@ class Engine:
             gateway.diagnostics = self.diagnostics
         if hasattr(gateway, 'request_recorder'):
             gateway.request_recorder = self.record_model_request
+        gateway.usage_recorder = self.record_model_usage
         self.tasks = {}
         self.edit_tasks = {}
         self.stopping = False
         self.saver_context = None
         self.graph = None
+        self.on_safe_boundary = None
+
+    def request_boundary(self, run_id, reason='write', command_id=None):
+        """Persist a boundary request without interrupting a valid in-flight step."""
+        with self.store.transaction():
+            run = self.store.run(run_id)
+            if run['status'] not in ('queued', 'running', 'waiting'):
+                raise DomainError('当前任务没有可暂停的生成步骤', 409)
+            request = run.get('_boundary_requested') or {}
+            if command_id and request.get('command_id') == command_id and request.get('reason') == reason:
+                return run
+            version = run.get('control_version', 0) + (1 if reason == 'pause' else 0)
+            fields = {'control_version': version, '_control_version': version}
+            if reason == 'pause':
+                fields['_control_hold'] = True
+            if run['status'] in ('queued', 'running'):
+                fields['_boundary_requested'] = {'reason': reason, 'command_id': command_id, 'control_version': version}
+            return self.store.update_run(run_id, **fields)
+
+    async def notify_safe_boundary(self, run_id):
+        from .conversation_workflow import apply_pending_scope
+        apply_pending_scope(self.store, run_id)
+        if self.on_safe_boundary:
+            await self.on_safe_boundary(run_id)
 
     async def start(self):
         self.saver_context = AsyncSqliteSaver.from_conn_string(str(self.store.directory / 'checkpoints.sqlite3'))
@@ -149,7 +175,23 @@ class Engine:
             'attempt': binding.get('attempt'),
         })
         self.diagnostics.record('model.request_saved', request_available=True,
-                                message_count=len(request['messages']))
+                                message_count=len(request.get('messages', [])))
+
+    def record_model_usage(self, usage):
+        from .context_receipts import USAGE_FIELDS
+        call_id = self.diagnostics.context.get().get('call_id')
+        if not call_id:
+            return
+        with self.store.transaction():
+            try:
+                receipt = self.store.get('context_receipt', 'context:' + call_id)
+            except DomainError as exc:
+                if exc.status == 404:
+                    return
+                raise
+            receipt['usage'] = {key: value for key, value in usage.items()
+                                if key in USAGE_FIELDS and type(value) in (int, float) and value >= 0}
+            self.store.put('context_receipt', receipt)
 
     def schedule(self, run_id):
         if run_id in self.tasks and not self.tasks[run_id].done():
@@ -220,7 +262,18 @@ class Engine:
             self.trace('checkpoint.loading', run_id)
             snapshot = await graph.aget_state(self.config(run_id))
             self.trace('checkpoint.loaded', run_id, has_state=bool(snapshot.values), next_nodes=list(snapshot.next), interrupt_count=len(snapshot.interrupts))
+            run = self.store.run(run_id)
+            if run['status'] not in ('queued', 'running'):
+                return
             pending = run.get('_resume')
+            # A later hold cancels a queued confirmation before consuming its
+            # existing interrupt. Preserve that exact gate and saved input.
+            if run.get('_boundary_requested') and snapshot.interrupts:
+                paused = snapshot.interrupts[0]
+                self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=bind_interrupt(self.store, paused.value),
+                    _interrupt_id=paused.id, interrupt_id=paused.id, _resume=None, _boundary_requested=None)
+                await self.notify_safe_boundary(run_id)
+                return
             if pending and any(item.id == pending['interrupt_id'] for item in snapshot.interrupts):
                 argument = Command(resume={pending['interrupt_id']: pending['value']})
             elif snapshot.values:
@@ -249,7 +302,9 @@ class Engine:
                         self.store.update_run(run_id, status='queued', stage='applying_instruction', _interrupt_id=paused.id,
                             _resume={'interrupt_id': paused.id, 'value': {'instruction': True}})
                     else:
-                        self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=paused.value, _interrupt_id=paused.id, _resume=None)
+                        self.store.update_run(run_id, status='waiting', stage=paused.value['type'], interrupt=bind_interrupt(self.store, paused.value),
+                            _interrupt_id=paused.id, interrupt_id=paused.id, _resume=None, _boundary_requested=None)
+                await self.notify_safe_boundary(run_id)
             elif self.store.run(run_id)['status'] != 'completed' and run.get('graph_version') != 2:
                 await self.node_finish(snapshot.values)
         except asyncio.CancelledError:
@@ -345,6 +400,10 @@ class Engine:
         raise AssertionError('unreachable')
 
     async def invoke_model(self, task, context, run_id=None):
+        from .generation_guards import begin_generation
+        from .dependencies import assert_manifest
+        guard = begin_generation(self.store, run_id, task, context)
+        input_version = self.store.run(run_id).get('input_version', 0) if run_id else None
         fields = {'task': task, 'call_id': uid('call_'), 'timeout_seconds': self.settings.value['timeout_seconds'],
                   'provider': self.settings.value['provider'], 'model': self.settings.value['model'],
                   'endpoint': endpoint_origin(self.settings.value['base_url']),
@@ -360,6 +419,11 @@ class Engine:
             fields['previous_items'] = len(context.get('previous_items', []))
         started = time.monotonic()
         with self.diagnostics.bind(**fields):
+            from . import context_receipts
+            from .context_budget import request_budget
+            receipt_id = context_receipts.start(self.store, task, context,
+                binding=self.diagnostics.context.get(), call_id=fields['call_id'],
+                budget=request_budget(self.store.directory, task, context, self.settings.value))
             call_key=self.diagnostics.context.get().get('call_key')
             if run_id and call_key:self.store.cache_set(run_id,'call_id:'+call_key,fields['call_id'])
             self.diagnostics.record('model.start', streaming=hasattr(self.gateway, 'generate_stream'))
@@ -396,18 +460,25 @@ class Engine:
                 result = await self._invoke_model(task, context, on_text)
                 if self.stopping or (run_id and self.store.run(run_id)['status'] == 'cancelled'):
                     raise asyncio.CancelledError
+                if run_id and self.store.run(run_id).get('input_version', 0) != input_version:
+                    raise DomainError('工作流输入版本已更新，拒绝旧输入生成的结果；已有阶段保留', 409)
+                if guard is not None:
+                    assert_manifest(self.store, guard)
                 if not hasattr(self.gateway, 'generate_stream'):
                     await on_text(json.dumps(result, ensure_ascii=False))
                 await flush()
                 self.diagnostics.record('model.complete', elapsed_ms=round((time.monotonic() - started) * 1000),
                                         items=len(result.get('items', [])) if isinstance(result.get('items'), list) else None)
+                context_receipts.complete(self.store, receipt_id, 'succeeded')
                 return result
             except asyncio.CancelledError:
                 await flush()
+                context_receipts.complete(self.store, receipt_id, 'cancelled')
                 self.diagnostics.record('model.cancelled', elapsed_ms=round((time.monotonic() - started) * 1000))
                 raise
             except Exception as exc:
                 await flush()
+                context_receipts.complete(self.store, receipt_id, 'failed', error=exc)
                 self.diagnostics.record('model.error', level='ERROR', elapsed_ms=round((time.monotonic() - started) * 1000), **error_details(exc))
                 raise
             finally:
@@ -767,10 +838,16 @@ class Engine:
             run = self.store.run(run_id)
             if run['status'] != 'waiting':
                 raise DomainError('任务当前未等待人工输入', 409)
+            validate_confirmation(self.store, run, response)
             if run.get('_edit_token'):
                 blocked_by_edit = True
             else:
                 kind = run['interrupt']['type']
+                if ((kind == 'scenario_review' and run.get('stop_after') == 'scenarios') or
+                        (kind == 'strategy_review' and run.get('stop_after') == 'analysis') or
+                        (kind == 'workflow_paused' and run['interrupt'].get('reason') == 'stop_after'
+                         and run.get('stop_after') == 'cases')):
+                    raise DomainError('已达到任务的持久停止位置，请先明确修改后续目标', 409)
                 if kind=='source_review':
                     selected=response.get('source_ids') or []
                     if not set(selected).issubset(set(run['_source_ids'])) or (not selected and not (response.get('answer') or '').strip()):
@@ -782,9 +859,20 @@ class Engine:
                 if kind == 'strategy_review' and response.get('approved') is not True:
                     raise DomainError('请确认策略后继续，或使用补充指令修订策略')
                 if kind == 'clarification':
+                    if run.get('graph_version') == 7:
+                        from .clarification import get_draft, save_draft
+                        draft = get_draft(self.store, run_id)
+                        if not draft.get('submitted') or response['answer'] != draft['answer']:
+                            draft = save_draft(self.store, run_id, {'answer': response['answer']})
+                        response = {**response, 'source_id': draft['source_id'], 'answer': draft['answer']}
+                        run = self.store.run(run_id)
                     run['_save_clarification_to_project'] = response.get('save_to_project', True)
+                version = run.get('control_version', 0) + 1
+                run.update(control_version=version, _control_version=version, _control_hold=False, _boundary_requested=None)
+                response = {**response, '_control_version': version}
                 run.update(status='queued', stage='resuming', _resume={'interrupt_id': run['_interrupt_id'], 'value': response}, _edit_token=None)
                 run.pop('interrupt', None)
+                run.pop('interrupt_id', None)
                 self.store.save_run(run)
         if blocked_by_edit:
             self.trace('resume.blocked_by_edit', run_id)
@@ -817,8 +905,13 @@ class Engine:
             run = self.store.run(run_id)
             if run['status'] in ('completed', 'cancelled'):
                 return run
-            run.update(status='cancelled', stage='cancelled', _resume=None, _edit_token=None)
+            version = run.get('control_version', 0) + 1
+            input_version = run.get('input_version', 0) + 1
+            run.update(status='cancelled', stage='cancelled', _resume=None, _edit_token=None,
+                control_version=version, _control_version=version, input_version=input_version, _input_version=input_version,
+                _control_hold=True, _boundary_requested=None, _pending_scope_updates=[])
             run.pop('interrupt', None)
+            run.pop('interrupt_id', None)
             self.store.save_run(run)
         self.trace('run.cancelled', run_id)
         task = self.tasks.get(run_id)
@@ -877,6 +970,8 @@ class Engine:
                     if current['status'] != 'waiting' or current.get('_edit_token') != token:
                         raise DomainError('任务已继续或取消，拒绝过期编辑结果', 409)
                     updated = self.store.revise_artifact(artifact['id'], artifact['revision'], items, 'ai_waiting_edit', report={**artifact.get('report',{}),**result['report_patch']} if artifact['type']=='analysis' and isinstance(result.get('report_patch'),dict) else None)
+                    # Revision commit refreshes the gate binding in this transaction.
+                    current = self.store.run(run_id)
                     current['interrupt']['items'] = updated['items']
                     current['_edit_token'] = None
                     self.store.save_run(current)

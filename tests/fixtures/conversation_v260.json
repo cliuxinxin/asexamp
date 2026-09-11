@@ -1,0 +1,27 @@
+{
+  "purpose": "Controlled semantic-model integration fixture; these inputs do not certify a real model or graph runtime.",
+  "requirement": "注册用户使用账号和密码登录。正确密码进入首页；错误密码返回统一错误提示。连续失败五次会锁定账号，锁定时长需要确认。用户可以主动退出当前会话。",
+  "change": "账号被锁定时，系统立即注销该账号的其他活动会话。锁定结束后，失败计数归零。",
+  "clarification_question": "连续失败五次后的账号锁定时长是多少？",
+  "suggested_answer": "建议暂按锁定五分钟设计测试，此时长未经确认。",
+  "confirmed_answer": "锁定时间为 10 分钟。",
+  "human_note": "人工备注：由测试负责人复核；不要覆盖。",
+  "turns": [
+    {"number": 1, "text": "分别学习这两份模板，并应用到当前 Profile。", "checks": ["scenario_and_case_columns_separate", "profile_version_increased", "no_generation_run"]},
+    {"number": 2, "text": "按这份需求设计测试，需要确认的地方再问，先做到场景。", "checks": ["persisted_stop_at_scenarios", "real_clarification_interrupt"]},
+    {"number": 3, "text": "采用全部建议，锁定时间改为 10 分钟，保存到项目，但先别继续。", "checks": ["shared_draft_consistent", "shared_answer_exact", "workflow_still_waiting"]},
+    {"number": 4, "text": "本项目确认的锁定时长是多少，依据是什么？", "checks": ["second_chat_reads_shared_evidence", "no_generation_run"]},
+    {"number": 5, "text": "按这些答案继续。理解正确，继续生成场景。", "checks": ["each_interrupt_resolved_separately", "no_duplicate_clarification_source", "stops_before_cases"]},
+    {"number": 6, "text": "只估第二、第三个场景要多少条用例，先不生成。那只算异常的呢？", "checks": ["same_actual_scenario_ids", "computed_totals", "no_artifact_revision"]},
+    {"number": 7, "text": "结合这份强制下线说明更新需求理解和场景，仍然先别生成用例。", "checks": ["source_retained", "history_and_refs_preserved", "stop_constraint_retained"]},
+    {"number": 8, "text": "把需求理解中的失败计数说明写清楚，并同步到相关场景，先给我看差异。应用这些修改。", "checks": ["no_write_before_apply", "upstream_and_downstream_diffs", "unrelated_rows_unchanged"]},
+    {"number": 9, "text": "现在按最新场景生成用例，并评审；展开每一步操作和预期。", "checks": ["latest_input_revision", "real_review", "case_details_contains_actions_and_expectations"]},
+    {"number": 10, "text": "解释第三条，再把它的步骤写清楚，保留人工备注，先不保存。应用这项修改。", "checks": ["explain_before_preview", "third_view_row_resolves_to_stable_id", "manual_note_preserved"]},
+    {"number": 11, "text": "把刚才用例对应的场景写清楚，并把这个场景的关联用例一起更新；其他场景别动，先看差异。应用。", "checks": ["actual_lineage_resolution", "sync_uses_new_scenario_draft", "precise_revision_and_scope"]},
+    {"number": 12, "text": "展示需求、场景和用例的覆盖，哪些缺用例、哪些没同步？", "checks": ["real_structural_coverage", "stale_links_identified"]},
+    {"number": 13, "text": "把当前第一条用例的写法保存为本项目 Profile 的样例。", "checks": ["versioned_sample_snapshot", "second_chat_profile_uses_sample", "sample_not_requirement_evidence"]},
+    {"number": 14, "text": "用产品经理能理解的方式总结这些用例，再列出锁定相关编号；不要修改。", "checks": ["current_ids_in_answer", "no_artifact_revision"]},
+    {"number": 15, "text": "按刚才学的模板，把最新场景和最终用例分别导出 Excel。", "checks": ["two_actual_xlsx_files", "separate_sheet_names_and_columns", "frozen_revisions"]},
+    {"number": 16, "text": "第三条再写简洁些，先预览。取消这个修改，其他任务保留。", "checks": ["specific_proposal_discarded", "artifact_unchanged", "workflow_not_cancelled"]}
+  ]
+}

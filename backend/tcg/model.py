@@ -34,14 +34,15 @@ from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
+from .context_budget import capacity_settings, request_budget, request_messages, validate_capacity
 from .diagnostics import error_details
-from .environment import model_environment, runtime_value
+from .environment import model_environment
 from .schemas import DomainError
 from .json_output import parse_model_object, parse_issue, close_finished_containers
 
 MODEL_TIMEOUT_SECONDS = 300
 MAX_MODEL_TIMEOUT_SECONDS = 3600
-DEFAULT_SETTINGS = {'provider': 'ollama', 'base_url': 'http://127.0.0.1:11434', 'model': '', 'timeout_seconds': MODEL_TIMEOUT_SECONDS}
+DEFAULT_SETTINGS = {'provider': 'ollama', 'base_url': 'http://127.0.0.1:11434', 'model': '', 'timeout_seconds': MODEL_TIMEOUT_SECONDS, 'context_window': 32768, 'output_tokens': 8192, 'output_limit_mode': 'request', 'server_output_tokens': None}
 
 
 def validate_headers(headers, auth_mode='bearer'):
@@ -240,6 +241,8 @@ class Settings:
             self.value = candidate
             validate_headers(self.headers(), candidate.get('auth_mode', 'bearer'))
 
+        self.value.update(capacity_settings(self.directory, self.value))
+
     def headers(self):
         if self._environment_headers is not None:
             return dict(self._environment_headers) if isinstance(self._environment_headers, dict) else self._environment_headers
@@ -299,7 +302,8 @@ class Settings:
         if self.environment_managed:
             raise DomainError('模型连接由 .env 或环境变量管理，请修改配置文件并重启服务', 409)
         self.validate_address(request['base_url'])
-        result = {key: request[key] for key in DEFAULT_SETTINGS}
+        result = {key: request.get(key, self.value.get(key, default)) for key, default in DEFAULT_SETTINGS.items()}
+        result = validate_capacity(result)
         result['auth_mode'] = request.get('auth_mode', 'bearer')
         try:
             result['timeout_seconds'] = int(result['timeout_seconds'])
@@ -383,16 +387,19 @@ class LangChainGateway:
             request.headers.update(headers)
         async def configured_async_auth(request):
             configured_auth(request)
-        messages = [
-            {'role': 'system', 'content': [{'type': 'text', 'text': SYSTEM + '\nTASK CONTRACT:\n' + TASK_INSTRUCTIONS[task]}]},
-            {'role': 'user', 'content': [{'type': 'text', 'text': json.dumps(context, ensure_ascii=False)}]},
-        ]
+        budget = request_budget(self.settings.directory, task, context, settings)
+        if not budget['fits']:
+            if self.request_recorder:
+                self.request_recorder({'task': task, 'budget': budget, 'request_digest': budget['request_digest'],
+                                       'representation': 'rejected_before_transport'})
+            raise DomainError('本次最终模型请求超过上下文容量；请缩小范围或按模型实际能力调整容量，未截断业务原文。')
+        messages = request_messages(task, context)
         if settings['provider'] == 'ollama':
             from langchain_core.messages import HumanMessage, SystemMessage
             from langchain_ollama import ChatOllama
             model = ChatOllama(model=settings['model'], base_url=settings['base_url'], temperature=0, format='json',
-                **({'num_ctx': int(runtime_value(self.settings.directory, 'TCG_MODEL_CONTEXT_TOKENS', '0'))} if int(runtime_value(self.settings.directory, 'TCG_MODEL_CONTEXT_TOKENS', '0')) > 0 else {}),
-                num_predict=int(runtime_value(self.settings.directory, 'TCG_OUTPUT_TOKENS', '8192')),
+                num_ctx=budget['window'],
+                **({'num_predict': budget['output_tokens']} if budget['output_limit_mode'] == 'request' else {}),
                 client_kwargs={'timeout': settings['timeout_seconds'], 'headers': headers, 'follow_redirects': False},
                 sync_client_kwargs={'event_hooks': {'request': [configured_auth]}},
                 async_client_kwargs={'event_hooks': {'request': [configured_async_auth]}})
@@ -412,7 +419,8 @@ class LangChainGateway:
                     'timeout_seconds': settings['timeout_seconds'],
                     'headers': {name: '••••••' for name in headers},
                     'messages': recorded_messages,
-                    'parameters': ({'temperature': 0, 'format': 'json'} if settings['provider'] == 'ollama' else {}),
+                    'budget': budget, 'request_digest': budget['request_digest'],
+                    'parameters': ({'temperature': 0, 'format': 'json', 'num_ctx': budget['window'], **({'num_predict': budget['output_tokens']} if budget['output_limit_mode'] == 'request' else {})} if settings['provider'] == 'ollama' else ({'max_tokens': budget['output_tokens']} if budget['output_limit_mode'] == 'request' else {})),
                     'representation': 'gateway_messages_and_explicit_parameters',
                 })
             if self.diagnostics:
@@ -441,6 +449,8 @@ class LangChainGateway:
                 content = self.visible_text(response.content)
             if self.diagnostics:
                 self.diagnostics.record('model.transport_response', finish_reason=finish_reason, response_characters=len(content), input_tokens=usage.get('input_tokens') or usage.get('prompt_tokens'), output_tokens=usage.get('output_tokens') or usage.get('completion_tokens'))
+            if getattr(self, 'usage_recorder', None):
+                self.usage_recorder(usage)
             if finish_reason in ('length', 'max_tokens'):
                 raise DomainError('模型输出达到长度限制；请提高服务输出预算或拆分需求后重试，未接受截断结果')
             return parse_model_object(content)
@@ -492,8 +502,9 @@ class LangChainGateway:
         else:
             url = base + suffix
         payload = {'model': settings['model'], 'messages': messages}
-        if runtime_value(self.settings.directory, 'TCG_SEND_OUTPUT_LIMIT', 'false').lower() == 'true':
-            payload['max_tokens'] = int(runtime_value(self.settings.directory, 'TCG_OUTPUT_TOKENS', '8192'))
+        capacity = capacity_settings(self.settings.directory, settings)
+        if capacity['output_limit_mode'] == 'request':
+            payload['max_tokens'] = capacity['output_tokens']
         try:
             response = await self._http_client.post(
                 url, headers=headers, json=payload,

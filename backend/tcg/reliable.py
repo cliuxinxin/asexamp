@@ -534,7 +534,9 @@ class ReliableEngine(Engine):
         if errors:
             raise ContractFailure(errors)
         with self.store.transaction():
-            updated = self.store.revise_artifact(artifact['id'], snapshot['revision'], final, 'ai_review', run_id, 'v4:review_applied')
+            from .generation_guards import commit_arguments
+            updated = self.store.revise_artifact(artifact['id'], snapshot['revision'], final, 'ai_review', run_id, 'v4:review_applied',
+                                                  **commit_arguments(self.store, run_id, 'cases'))
             self.store.cache_set(run_id, 'v4:review_reports', reports)
         return {'output_ref': updated['id']}
 

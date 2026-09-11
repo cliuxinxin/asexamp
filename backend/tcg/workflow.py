@@ -19,6 +19,7 @@ class WorkflowState(State, total=False):
     clarification_answer: str
     clarification_questions: list[str]
     summary: str
+    boundary_again: bool
 
 
 class WorkflowEngine(FlowEngine):
@@ -37,22 +38,54 @@ class WorkflowEngine(FlowEngine):
                  'understanding_gate','scenarios','scenario_gate','cases','review',
                  'conversation','single','summarize','publish')
         for name in nodes:
+            boundary='boundary_'+name
+            graph.add_node(boundary, self.workflow_boundary(name))
             graph.add_node(name, self.observed_node(name))
-        graph.add_edge(START,'dispatch')
-        graph.add_conditional_edges('dispatch', lambda s: 'conversation' if s['intent']=='query' else 'single' if s['intent'] in ('modify','learn_template') else 'inputs')
-        graph.add_conditional_edges('inputs', self.next_input)
-        graph.add_conditional_edges('understand', self.next_understanding)
-        graph.add_edge('clarification_gate','apply_answer')
-        graph.add_edge('apply_answer','understanding_gate')
-        graph.add_conditional_edges('understanding_gate',lambda s:'summarize' if s['intent']=='review_requirement' else 'scenarios')
-        graph.add_conditional_edges('scenarios',lambda s:'scenario_gate' if s.get('scenario_ref') else 'scenarios')
-        graph.add_conditional_edges('scenario_gate',lambda s:'summarize' if s['intent']=='generate_scenario' else 'cases')
-        graph.add_conditional_edges('cases',lambda s:'review' if s.get('cases_ref') else 'cases')
+            graph.add_conditional_edges(boundary,lambda s:bool(s.get('boundary_again')),{True:boundary,False:name})
+        def edge(source,target):graph.add_edge(source,'boundary_'+target)
+        def branch(source,choose,targets):
+            graph.add_conditional_edges(source,choose,{target:'boundary_'+target for target in targets})
+        edge(START,'dispatch')
+        branch('dispatch',lambda s:'conversation' if s['intent']=='query' else 'single' if s['intent'] in ('modify','learn_template') else 'inputs',('conversation','single','inputs'))
+        branch('inputs',self.next_input,('scenario_gate','understanding_gate','review','cases','understand'))
+        branch('understand',self.next_understanding,('clarification_gate','understanding_gate'))
+        edge('clarification_gate','apply_answer')
+        edge('apply_answer','understanding_gate')
+        branch('understanding_gate',lambda s:'summarize' if s['intent']=='review_requirement' else 'scenarios',('summarize','scenarios'))
+        branch('scenarios',lambda s:'scenario_gate' if s.get('scenario_ref') else 'scenarios',('scenario_gate','scenarios'))
+        branch('scenario_gate',lambda s:'summarize' if s['intent']=='generate_scenario' else 'cases',('summarize','cases'))
+        branch('cases',lambda s:'review' if s.get('cases_ref') else 'cases',('review','cases'))
         for name in ('review','conversation','single'):
-            graph.add_edge(name,'summarize')
-        graph.add_edge('summarize','publish')
+            edge(name,'summarize')
+        edge('summarize','publish')
         graph.add_edge('publish',END)
         return graph.compile(checkpointer=saver)
+
+    def workflow_boundary(self,name):
+        """A separate fixed node owns the only control interrupt (index zero).
+
+        Natural clarification/confirmation nodes keep their original interrupt
+        order. Existing v7 checkpoints still refer to unchanged business names.
+        """
+        async def boundary(state):
+            rid=state['run_id'];run=self.store.run(rid);marker='boundary_'+name
+            request=run.get('_boundary_requested')
+            if not request and run.get('_boundary_node')!=marker:
+                return {'boundary_again':False}
+            if run.get('_boundary_node')!=marker:
+                run=self.store.update_run(rid,_boundary_node=marker,
+                    _boundary_reason=(request or {}).get('reason','write'))
+            response=interrupt({'type':'workflow_paused','node':name,'reason':run.get('_boundary_reason','write'),
+                'message':'已在安全步骤边界暂停，已保存成果保留。'})
+            current=self.store.run(rid)
+            if current.get('_control_hold') and current.get('control_version',0)>response.get('_control_version',-1):
+                # A hold accepted after scheduling must reach a fresh guard
+                # invocation, not consume an earlier approval and enter work.
+                self.store.update_run(rid,_boundary_node=None)
+                return {'boundary_again':True}
+            self.store.update_run(rid,_boundary_node=None,_boundary_requested=None)
+            return {'boundary_again':False}
+        return boundary
 
     def stage(self, run_id, stage):
         super().stage(run_id,stage)
@@ -103,6 +136,10 @@ class WorkflowEngine(FlowEngine):
 
     def small_context(self,run_id,**extra):
         context=super().small_context(run_id,**extra)
+        run=self.store.run(run_id)
+        if run.get('scope'):
+            context['current_scope']=copy.deepcopy(run['scope'])
+            context['scope_instruction']='本轮后续生成遵循 current_scope；它是用户指定的测试范围，不是新增业务事实或可引用原文。已保存且不受影响的阶段保持不变。'
         # Formatting examples are separate from business evidence and only sent to authoring/review.
         if self.store.run(run_id).get('graph_version')==7 and any(key in extra for key in ('analysis','scenarios','cases')):
             context['format_references']=[e for e in self.all_evidence(run_id) if e['role']=='example']
@@ -130,11 +167,13 @@ class WorkflowEngine(FlowEngine):
         return result
 
     def save_report(self,artifact,fields):
-        from .storage import dump
-        with self.store.transaction():
-            artifact['report']={**artifact.get('report',{}),**fields}
-            self.store.put('artifact',artifact)
-            self.store.db.execute('UPDATE revisions SET payload=? WHERE artifact_id=? AND revision=?',(dump(artifact),artifact['id'],artifact['revision']))
+        # Reports are part of a consumed snapshot, so annotations get a new revision.
+        current = self.store.get('artifact', artifact['id'])
+        if all(current.get('report', {}).get(k) == v for k, v in fields.items()):
+            return current
+        saved = self.store.annotate_artifact(current['id'], current['revision'], {'report': {**current.get('report', {}), **fields}})
+        artifact.update(saved)
+        return saved
 
     async def node_review(self,state):
         result=await super().node_review(state)
@@ -259,9 +298,9 @@ class WorkflowEngine(FlowEngine):
         self.trace('case_fields.completion_complete',rid,completed_count=sum(len(v.get('fields',{})) for v in replacements.values()),unresolved_count=len(remaining))
         return rows
 
-    def understanding_signature(self, source_ids, roles):
-        values=[(sid,roles.get(sid,self.store.get('source',sid)['role'])) for sid in source_ids]
-        return sorted((sid,role) for sid,role in values if role!='example')
+    def understanding_signature(self, source_ids, roles, profile=None, scope=None):
+        from .context_service import analysis_signature
+        return analysis_signature(self.store, source_ids, roles, profile or {}, scope)
 
     async def invoke_model(self, task, context, run_id=None):
         if run_id and self.store.run(run_id).get('graph_version')==7:
@@ -303,21 +342,13 @@ class WorkflowEngine(FlowEngine):
     async def paused_dialogue(self, run_id, content):
         run=self.store.run(run_id)
         if run['status']!='waiting':raise DomainError('当前任务未等待确认',409)
-        context=self.context(run_id)
-        aid=run.get('interrupt',{}).get('artifact_id')
-        if aid:context['artifact']=public(self.store.get('artifact',aid))
-        context['request']={**context['request'],'content':content,'intent':'query'}
-        context['pending_confirmation']=run.get('interrupt',{})
-        result=await self.invoke_model('dialogue',context,run_id)
+        from .dialogue_context import answer_dialogue
+        result=await answer_dialogue(self,run_id,content=content,pending=run.get('interrupt',{}))
         refs=result.get('refs',[])
-        valid={e['id'] for e in context['evidence'] if e['role']!='example'}
-        if not isinstance(result.get('answer'),str) or not isinstance(refs,list) or not set(refs)<=valid:
-            raise DomainError('对话回答格式或引用无效，请重新提问；当前确认节点保留')
         with self.store.transaction():
-            if self.store.run(run_id)['status']!='waiting':raise DomainError('任务已继续，请在最新结果上提问',409)
             for role,text in [('user',content),('assistant',result['answer'])]:
-                self.store.put('message',{'id':uid('msg_'),'project_id':run['project_id'],'chat_id':run['chat_id'],'role':role,'content':text,'created_at':now(),'metadata':{'dialogue_run_id':run_id,'refs':refs if role=='assistant' else []}})
-        return {'answer':result['answer']}
+                self.store.put('message',{'id':uid('msg_'),'project_id':run['project_id'],'chat_id':run['chat_id'],'role':role,'content':text,'created_at':now(),'metadata':{'dialogue_run_id':run_id,'refs':refs if role=='assistant' else [],'coverage':result.get('coverage',{}) if role=='assistant' else {}}})
+        return result
 
     async def node_dispatch(self,state):
         rid=state['run_id'];self.stage(rid,'routing')
@@ -379,15 +410,16 @@ class WorkflowEngine(FlowEngine):
 
     async def node_understand(self,state):
         rid=state['run_id'];run=self.store.run(rid)
-        signature=self.understanding_signature(run['_source_ids'],run['_source_roles'])
+        signature=self.understanding_signature(run['_source_ids'],run['_source_roles'],run['_profile'],run.get('scope'))
         reusable=[a for a in self.store.list('artifact',chat_id=run['chat_id']) if a['type']=='analysis'
-            and self.understanding_signature(a['_source_ids'],a.get('_source_roles',{}))==signature]
+            and a.get('report', {}).get('analysis_signature') == signature]
         if reusable:
             artifact=max(reusable,key=lambda a:(a['created_at'],a['revision']))
             self.trace('analysis.reused',rid,artifact_id=artifact['id'],revision=artifact['revision'],requirement_count=len(artifact['items']))
             self.store.cache_set(rid,'v6:requirement_map',artifact.get('report',{}))
         else:
             artifact=await self.analyze(rid,'v7:analysis')
+            artifact=self.save_report(artifact, {'analysis_signature':signature})
         return {'analysis_ref':artifact['id'],'output_ref':artifact['id']}
 
     def next_understanding(self,state):
@@ -410,9 +442,14 @@ class WorkflowEngine(FlowEngine):
         answer='问题：\n'+'\n'.join(state['clarification_questions'])+'\n用户回答：\n'+state['clarification_answer']
         saved=self.store.cache_get(rid,'v7:clarification_source')
         if not saved:
-            text,chunks=parse_text(answer)
+            from .clarification import _stored
+            draft = _stored(self.store, rid)
             with self.store.transaction():
-                source=self.store.add_source(run['chat_id'],'用户澄清','clarification',text,chunks)
+                if draft and draft.get('submitted') and draft.get('source_id'):
+                    source = self.store.get('source', draft['source_id'])
+                else:
+                    text,chunks=parse_text(answer)
+                    source=self.store.add_source(run['chat_id'],'用户澄清','clarification',text,chunks)
                 saved=self.store.cache_set(rid,'v7:clarification_source',{'id':source['id']})
         if run.get('_save_clarification_to_project',True):
             from .project_context import share_clarification
@@ -429,7 +466,7 @@ class WorkflowEngine(FlowEngine):
 
     async def node_understanding_gate(self,state):
         rid=state['run_id'];run=self.store.run(rid)
-        if run['mode']=='hitp':
+        if run['mode']=='hitp' or run.get('stop_after')=='analysis':
             self.stage(rid,'strategy_review')
             artifact=self.store.get('artifact',state['analysis_ref'])
             self.store.publish(rid,[artifact['id']],'请确认需求理解、业务图和测试方案。剩余不确定项可在此修订，不会自动反复追问。',waiting=True)
@@ -444,36 +481,52 @@ class WorkflowEngine(FlowEngine):
         return {'output_ref':artifact['id']}
 
     async def node_scenario_gate(self,state):
-        result=await super().node_scenario_gate(state)
+        rid=state['run_id'];run=self.store.run(rid)
+        if run.get('stop_after') == 'scenarios':
+            artifact=self.store.get('artifact',state['scenario_ref'])
+            self.store.publish(rid,[artifact['id']],'已生成场景并达到本任务停止位置。明确允许生成用例后再继续。',waiting=True)
+            response=interrupt({'type':'scenario_review','artifact_id':artifact['id'],'items':artifact['items'],
+                'stop_after':'scenarios','message':'本任务暂时停止在场景，请明确允许生成用例后继续。'})
+            if response.get('approved') is not True:
+                raise DomainError('请确认场景后继续')
+            result={}
+        else:
+            result=await super().node_scenario_gate(state)
         artifact=self.store.get('artifact',state['scenario_ref'])
         self.store.cache_set(state['run_id'],'workspace:scenario_parent',{'id':artifact['id'],'revision':artifact['revision']})
         return result
 
     async def node_review(self,state):
+        rid=state['run_id'];run=self.store.run(rid)
+        if run.get('graph_version')==7 and run.get('stop_after')=='cases' and state.get('cases_ref'):
+            artifact=self.store.get('artifact',state['cases_ref'])
+            self.store.publish(rid,[artifact['id']],'用例已生成并达到本任务停止位置。明确允许评审后再继续。',waiting=True)
+            interrupt({'type':'workflow_paused','node':'review','reason':'stop_after',
+                'artifact_id':artifact['id'],'message':'用例已保存，等待明确允许评审。'})
         if self.store.run(state['run_id']).get('graph_version')==7 and not state.get('cases_ref'):
             snapshot=self.store.run(state['run_id']).get('_artifact_snapshot')
             state={**state,'cases_ref':snapshot['id']}
         return await super().node_review(state)
 
     async def node_conversation(self,state):
-        rid=state['run_id'];self.stage(rid,'query');context=self.context(rid)
-        context['instruction']='允许解释系统流程或当前产物，无需求时也能对话。只有业务事实需要引用证据，不得编造业务规则。'
-        valid_refs={e['id'] for e in context['evidence'] if e['role']!='example'}
-        result=await self.validated(rid,'v7:conversation','dialogue',context,
-            lambda r: [] if isinstance(r.get('answer'),str) and isinstance(r.get('refs',[]),list) and set(r.get('refs',[]))<=valid_refs else [{'path':'answer/refs','code':'answer','expected':'text and valid optional refs'}])
+        from .dialogue_context import answer_dialogue
+        rid=state['run_id'];self.stage(rid,'query')
+        result=await answer_dialogue(self,rid)
         artifact=self.answer(rid,'v7:answer',result['answer'],result.get('refs',[]))
         return {'output_ref':artifact['id']}
 
     async def node_single(self,state):
         rid=state['run_id'];run=self.store.run(rid)
         if run['_request'].get('complete_fields_only') or run['_request'].get('complete_descriptions_only'):
+            from .generation_guards import commit_arguments
             self.stage(rid,'modify')
             artifact=run['_artifact_snapshot'];selected=set(run['_request']['selected_ids'])
             context=self.context(rid)
             rows=await self.complete_template_fields(rid,[r for r in artifact['items'] if r['id'] in selected],context,retry_unresolved=True)
             mapping={r['id']:r for r in rows}
             updated=self.store.revise_artifact(artifact['id'],artifact['revision'],[mapping.get(r['id'],r) for r in artifact['items']],
-                'complete_template_fields',rid,'v7:template_fields_applied')
+                'complete_template_fields',rid,'v7:template_fields_applied',
+                **commit_arguments(self.store,rid,'cases'))
             return {'output_ref':updated['id']}
         if run.get('graph_version')==7 and state['intent']=='learn_template':
             self.stage(rid,'learn_template')
@@ -514,7 +567,9 @@ class WorkflowEngine(FlowEngine):
                 except DomainError as exc:return [getattr(exc,'issue',{'path':'operations','code':'case_edit','expected':str(exc)})]
             result=await self.validated(rid,'v7:case_edit','modify',context,validate)
             rows=apply_operations(snapshot['items'],result['operations'],context.get('selected_ids'))
-            artifact=self.store.revise_artifact(snapshot['id'],snapshot['revision'],rows,'ai_modify',rid,'v7:case_edit_applied')
+            from .generation_guards import commit_arguments
+            artifact=self.store.revise_artifact(snapshot['id'],snapshot['revision'],rows,'ai_modify',rid,'v7:case_edit_applied',
+                **commit_arguments(self.store,rid,'cases'))
             return {'output_ref':artifact['id']}
         return await super().node_single(state)
 
@@ -586,11 +641,7 @@ class WorkflowEngine(FlowEngine):
         content=state.get('summary') or self.store.cache_get(rid,'v7:summary') or '已保存当前结果。'
         reports=self.store.cache_get(rid,'v4:review_reports') or []
         if reports and not artifact.get('report',{}).get('review_reports'):
-            from .storage import dump
-            with self.store.transaction():
-                artifact['report']={**artifact.get('report',{}),'review_reports':reports}
-                self.store.put('artifact',artifact)
-                self.store.db.execute('UPDATE revisions SET payload=? WHERE artifact_id=? AND revision=?',(dump(artifact),artifact['id'],artifact['revision']))
+            artifact = self.save_report(artifact, {'review_reports': reports})
         proposal=None
         if artifact['type']=='proposal':
             report=artifact.get('report',{})

@@ -1,0 +1,16 @@
+{
+  "tests": 84,
+  "errors": 0,
+  "failures": 0,
+  "counts": {
+    "test_conversation_v260.py": 9,
+    "test_conversation_review_v260.py": 13,
+    "test_conversation_e2e_v260.py": 6,
+    "test_conversation_artifacts_v260.py": 17,
+    "test_conversation_project_v260.py": 10,
+    "test_conversation_clarification_v260.py": 6,
+    "test_conversation_boundary_v260.py": 4,
+    "test_workspace_actions_v2512.py": 13,
+    "test_project_context_v2512.py": 6
+  }
+}

@@ -1,23 +1,14 @@
 """Whole-document authoring; partition only when the complete request cannot fit."""
 import copy
 import json
-import math
 import re
 
 from langgraph.types import interrupt
 from .documents import parse_text
-from .environment import runtime_value
 from .graph import Engine
-from .model import SYSTEM, TASK_INSTRUCTIONS
+from .context_budget import request_budget, capacity_settings, token_estimate
 from .reliable import ReliableEngine
 from .schemas import DomainError, validate_items
-
-
-def token_estimate(value):
-    # Conservative fallback for arbitrary local models; not a model tokenizer.
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    ascii_count = sum(ord(c) < 128 for c in text)
-    return math.ceil(ascii_count / 3) + (len(text) - ascii_count) * 2
 
 
 class DirectEngine(ReliableEngine):
@@ -41,20 +32,12 @@ class DirectEngine(ReliableEngine):
         return context
 
     def limits(self):
-        try:
-            window = int(runtime_value(self.store.directory, 'TCG_MODEL_CONTEXT_TOKENS', '0'))
-            reserve = int(runtime_value(self.store.directory, 'TCG_OUTPUT_TOKENS', '8192'))
-            if window < 0 or reserve < 1024 or (window and (window < 4096 or reserve >= window - 1024)):
-                raise ValueError()
-        except ValueError:
-            raise DomainError('模型容量配置无效：输出预留须小于上下文窗口，至少保留 1024 tokens 输入空间。') from None
-        return window, reserve
+        settings = capacity_settings(self.store.directory)
+        output = settings['server_output_tokens'] if settings['output_limit_mode'] == 'server' else settings['output_tokens']
+        return settings['context_window'], output
 
     def fits(self, task, context):
-        window, reserve = self.limits()
-        if window == 0:
-            return True
-        return token_estimate(SYSTEM + TASK_INSTRUCTIONS.get(task, '')) + token_estimate(context) + 512 <= window - reserve and len(json.dumps(context, ensure_ascii=False)) <= 490000
+        return request_budget(self.store.directory, task, context)['fits']
 
     async def invoke_model(self, task, context, run_id=None):
         if run_id and self.direct(run_id):

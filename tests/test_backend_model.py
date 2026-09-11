@@ -52,7 +52,8 @@ def test_real_langchain_openai_gateway_requests_json_and_rejects_truncation(tmp_
     with completion_server({'ok': True}) as (endpoint, captured):
         gateway = LangChainGateway(saved(tmp_path, endpoint))
         asyncio.run(gateway.test())
-        assert set(captured[0]) == {'model', 'messages'}
+        assert set(captured[0]) == {'model', 'messages', 'max_tokens'}
+        assert captured[0]['max_tokens'] == 8192
         assert all(isinstance(message['content'], list) for message in captured[0]['messages'])
     with completion_server({'ok': True}, finish_reason='length') as (endpoint, _):
         gateway = LangChainGateway(saved(tmp_path, endpoint))

@@ -139,11 +139,42 @@ class FlowEngine(DirectEngine):
         return super().progress(run_id, phase, completed, total, label)
 
     def with_evidence(self, run_id, fields, include_changes=False):
+        from .context_service import artifact_context, rule_projection
+        from .workspace_coverage import PARENT_KEYS
         context = super().with_evidence(run_id, fields, include_changes)
+        run = self.store.run(run_id)
+        field = next((key for key in ('cases', 'scenarios', 'analysis') if fields.get(key)), None)
+        if field:
+            keys = PARENT_KEYS.get(field, ('v4:cases_artifact', 'cases_artifact'))
+            artifact = None
+            for key in keys:
+                cached = self.store.cache_get(run_id, key)
+                if not isinstance(cached, dict) or not cached.get('id'):
+                    continue
+                candidate = self.store.get('artifact', cached['id'])
+                if candidate['type'] == field:
+                    artifact = candidate
+                    break
+            snapshot = run.get('_artifact_snapshot') or {}
+            if artifact is None and snapshot.get('type') == field:
+                artifact = snapshot
+            if artifact is not None:
+                rows = fields[field]
+                pack = artifact_context(self.store,
+                    {'analysis': 'generate_scenarios', 'scenarios': 'generate_cases', 'cases': 'review_cases'}[field],
+                    artifact, rows, self.all_evidence(run_id), run['_request'].get('content', ''),
+                    extra={k: v for k, v in fields.items() if k != field}, admit=False)
+                # The stage fields and current effective profile own generation.
+                context.update(pack)
+                context.update(fields)
+                context['profile'] = run['_profile']
+                context.pop('artifact', None)
         if self.full_flow(run_id):
             global_map = self.store.cache_get(run_id, 'v6:requirement_map')
             if global_map:
-                context['global_requirement_map'] = global_map
+                rows = [row for value in fields.values() if isinstance(value, list)
+                        for row in value if isinstance(row, dict)]
+                context['global_requirement_map'] = rule_projection(global_map, rows)
         return context
 
     async def ensure_question_suggestions(self, run_id, key, report, evidence):
@@ -211,6 +242,14 @@ class FlowEngine(DirectEngine):
         if not items:
             raise DomainError('没有提取到业务规则。请补充功能需求；文档元数据不会作为业务需求。')
         report = dict(reports[0]) if len(reports)==1 else {'summary':'已按容量分组理解需求','segments':reports,'diagrams':[d for r in reports for d in r.get('diagrams',[])]}
+        if len(groups) > 1:
+            from .requirement_reconciliation import reconcile_requirements
+            reconciled = await reconcile_requirements(self, run_id, key + ':reconcile', items, reports, evidence)
+            report.update(reconciled)
+        report['source_coverage'] = {'total_chunks': len(evidence), 'processed_chunks': len(evidence),
+            'processed_evidence_ids': [e['id'] for e in evidence], 'extraction_groups': len(groups),
+            'scope': 'all_selected_non_example_chunks',
+            'note': '章节处理完成不等于所有业务语义已经充分验证。'}
         report['questions'] = list(dict.fromkeys(q for r in reports for q in r.get('questions',[])))
         report['assumptions'] = list(dict.fromkeys(q for r in reports for q in r.get('assumptions',[])))
         report['question_suggestions'] = valid_question_suggestions(
@@ -223,7 +262,9 @@ class FlowEngine(DirectEngine):
         else:
             report['question_suggestions'] = await self.ensure_question_suggestions(
                 run_id, key + ':question_suggestions', report, {e['id']: e for e in evidence})
-        self.store.cache_set(run_id, 'v6:requirement_map', {k:report[k] for k in ('summary','in_scope','out_of_scope','requirement_map','assumptions') if k in report})
+        self.store.cache_set(run_id, 'v6:requirement_map', {k:report[k] for k in (
+            'summary','in_scope','out_of_scope','requirement_map','assumptions',
+            'relationships','global_rules','conflicts','reconciliation_coverage') if k in report})
         return self.store.artifact(run_id, key+':artifact', 'analysis','需求理解与业务图',items,report)
 
     async def node_analysis(self, state):
@@ -293,12 +334,10 @@ class FlowEngine(DirectEngine):
         else:
             content='已完成本次任务。可以继续提问、修改结果或进入下一阶段。'
         if reports:
-            # Store review summary with the final revision without an extra model call.
-            with self.store.transaction():
-                artifact['report']={**artifact.get('report',{}),'summary':content,'review_reports':reports}
-                self.store.put('artifact',artifact)
-                from .storage import dump
-                self.store.db.execute('UPDATE revisions SET payload=? WHERE artifact_id=? AND revision=?',(dump(artifact),artifact['id'],artifact['revision']))
+            # Report changes create an immutable revision without a model call.
+            fields = {'summary': content, 'review_reports': reports}
+            if any(artifact.get('report', {}).get(k) != v for k, v in fields.items()):
+                artifact = self.store.annotate_artifact(artifact['id'], artifact['revision'], {'report': {**artifact.get('report', {}), **fields}})
         proposal=artifact.get('report',{}).get('config') if artifact['type']=='proposal' else None
         self.store.publish(run_id,[artifact['id']],content,proposal=proposal)
         self.store.update_run(run_id,progress={'phase':'completed','completed':1,'total':1,'label':'已完成并保存'})

@@ -1,9 +1,12 @@
-"""Explicit artifact actions: preview first, then atomically apply versioned changes."""
+"""Snapshot reads and validated, atomic versioned artifact changes."""
 import copy
 import hashlib
 import json
+import re
 from contextlib import contextmanager
 
+from .context_service import artifact_context
+from .dependencies import manifest, assert_manifest
 from .schemas import DomainError, apply_operations, validate_items
 from .storage import now, public, uid
 from .case_fields import protect_non_ai_fields
@@ -23,7 +26,7 @@ def item_diff(before, after):
 def selected_rows(artifact, selected=None):
     ids = [r['id'] for r in artifact['items']]
     if selected is not None:
-        if not isinstance(selected, list) or not selected or len(set(selected)) != len(selected) or not set(selected) <= set(ids):
+        if not isinstance(selected, list) or not selected or any(not isinstance(i, str) for i in selected) or len(set(selected)) != len(selected) or not set(selected) <= set(ids):
             raise DomainError('请选择当前成果中的有效条目')
         ids = selected
     return [r for r in artifact['items'] if r['id'] in ids]
@@ -51,7 +54,7 @@ def validate_estimate(value, scenarios):
     return rows
 
 
-def checked_operations(artifact, result, allowed_ids, evidence, allowed_scenarios=None, allow_add=False, supplied_evidence=None):
+def checked_operations(artifact, result, allowed_ids, evidence, allowed_scenarios=None, allow_add=False, supplied_evidence=None, allow_relink=False):
     operations = result.get('operations')
     if not isinstance(operations, list):
         raise DomainError('修改预览必须返回 operations')
@@ -68,6 +71,10 @@ def checked_operations(artifact, result, allowed_ids, evidence, allowed_scenario
         seen.add(target)
         if isinstance(op.get('item'), dict) and any(k.startswith('_') for k in op['item']):
             raise DomainError('AI 不能修改内部字段')
+        if op.get('op') == 'update' and isinstance(op.get('item'), dict) and target in before and not allow_relink:
+            field = {'cases': 'scenario_id', 'scenarios': 'requirement_ids'}.get(artifact['type'])
+            if field and field in op['item'] and op['item'][field] != before[target].get(field):
+                raise DomainError('普通局部修改不能改变条目的上游关联；请使用有范围校验的联动更新')
         if op.get('op') == 'delete':
             if not isinstance(op.get('reason'), str) or not op['reason'].strip():
                 raise DomainError('删除条目需要给出具体理由')
@@ -88,7 +95,16 @@ def checked_operations(artifact, result, allowed_ids, evidence, allowed_scenario
     if artifact['type'] == 'cases':
         # Protect execution data only on changed/new rows, leaving all other rows byte-for-byte intact.
         touched = set(item_diff(artifact['items'], items)['updated'] + item_diff(artifact['items'], items)['added'])
-        protected = protect_non_ai_fields([r for r in items if r['id'] in touched], artifact.get('_profile', {}), artifact['items'])
+        from .case_fields import MANUAL_FIELDS
+        profile = copy.deepcopy(artifact.get('_profile', {}))
+        columns = list(profile.get('excel_columns', []))
+        declared = {column['field'] for column in columns}
+        fields = {key for row in items for key in row}
+        for field in fields:
+            if field not in declared and re.sub(r'[\s_-]', '', field).lower() in MANUAL_FIELDS:
+                columns.append({'field': field, 'header': field, 'value_source': 'manual'})
+        profile['excel_columns'] = columns
+        protected = protect_non_ai_fields([r for r in items if r['id'] in touched], profile, artifact['items'])
         by_id = {r['id']: r for r in protected}
         items = [by_id.get(r['id'], r) for r in items]
     validate_items(artifact['type'], items, evidence)
@@ -105,10 +121,14 @@ def report_patch(artifact, result):
     report = copy.deepcopy(artifact.get('report', {}))
     patch = result.get('report_patch')
     if patch is not None and patch != {}:
-        if artifact['type'] != 'analysis' or not isinstance(patch, dict):
-            raise DomainError('仅需求理解成果支持报告修改')
-        allowed = {'summary', 'diagrams', 'questions', 'question_suggestions', 'assumptions',
-                   'in_scope', 'out_of_scope', 'requirement_map', 'strategy', 'limitations'}
+        if not isinstance(patch, dict):
+            raise DomainError('报告修改必须为对象')
+        allowed = {'analysis': {'summary', 'diagrams', 'questions', 'question_suggestions', 'assumptions',
+                   'in_scope', 'out_of_scope', 'requirement_map', 'strategy', 'limitations'},
+                   'cases': {'review_reports'},
+                   'review': {'summary', 'issues', 'coverage', 'score', 'limitations'}}.get(artifact['type'], set())
+        if 'review_reports' in patch and (not isinstance(patch['review_reports'], list) or any(not isinstance(r, dict) for r in patch['review_reports'])):
+            raise DomainError('评审记录必须为报告对象数组')
         if set(patch) - allowed:
             raise DomainError('报告修改不能覆盖关联关系或执行记录')
         if 'diagrams' in patch and (not isinstance(patch['diagrams'], list) or any(
@@ -116,6 +136,28 @@ def report_patch(artifact, result):
             raise DomainError('业务图必须包含 Mermaid 文本')
         report.update(patch)
     return report
+
+
+def linked_gate(store, artifacts, gate_id):
+    from .workspace_coverage import parent_artifact
+    def ancestry(artifact):
+        ids = {artifact['id']}
+        while artifact['type'] in ('scenarios', 'cases'):
+            artifact = parent_artifact(store, artifact, 'analysis' if artifact['type'] == 'scenarios' else 'scenarios')
+            if not artifact or artifact['id'] in ids:
+                break
+            ids.add(artifact['id'])
+        return ids
+    if not gate_id:
+        return False
+    try:
+        gate = store.get('artifact', gate_id)
+    except DomainError:
+        return False
+    if gate['chat_id'] != artifacts[0]['chat_id'] or gate['project_id'] != artifacts[0]['project_id']:
+        return False
+    gate_ancestors = ancestry(gate)
+    return any(gate_id in ancestry(artifact) or artifact['id'] in gate_ancestors for artifact in artifacts)
 
 
 def active_guard(store, artifacts):
@@ -128,7 +170,10 @@ def active_guard(store, artifacts):
             if run['status'] != 'waiting':
                 raise DomainError('当前资料正在生成，请完成或停止任务后再操作成果', 409)
             pending = run.get('interrupt', {})
-            if pending.get('type') not in ('strategy_review', 'scenario_review') or pending.get('artifact_id') not in ids:
+            safe_boundary = pending.get('type') == 'workflow_paused'
+            matching_gate = (pending.get('type') in ('strategy_review', 'scenario_review', 'clarification')
+                             and (pending.get('artifact_id') in ids or linked_gate(store, artifacts, pending.get('artifact_id'))))
+            if not safe_boundary and not matching_gate:
                 raise DomainError('请先完成当前确认，再操作其他成果', 409)
             if run.get('_edit_token'):
                 raise DomainError('当前成果正在修改，请稍候', 409)
@@ -175,7 +220,7 @@ def assert_waiting_snapshots(store, snapshots):
 
 def visible_artifact(store, artifact_id):
     artifact = store.get('artifact', artifact_id)
-    if not artifact.get('_visible') or artifact['type'] not in ('analysis', 'scenarios', 'cases'):
+    if not artifact.get('_visible') or artifact['type'] not in ('analysis', 'scenarios', 'cases', 'review'):
         raise DomainError('请选择已保存的需求理解、场景或用例成果', 404)
     return artifact
 
@@ -226,7 +271,7 @@ def local_evidence(evidence, rows, explicit_ids=()):
 
 def proposal_change(artifact, items, report=None, operations=None, instruction=''):
     value = {'artifact_id': artifact['id'], 'title': artifact['title'],
-             'expected_revision': artifact['revision'], 'items': items,
+             'expected_revision': artifact['revision'], 'before_items': copy.deepcopy(artifact['items']), 'items': items,
              'diff': item_diff(artifact['items'], items)}
     if report is not None:
         value['report'] = copy.deepcopy(report)
@@ -267,140 +312,377 @@ def scenario_baselines(store, scenario_artifact, case_artifact, ids):
     return found
 
 
-async def preview_action(store, engine, artifact_id, body):
-    artifact = visible_artifact(store, artifact_id)
+def resolved_children(store, artifact, explicit_ids=None):
+    """Resolve descendants by stored lineage; row ID overlap is never ancestry."""
+    from .workspace_coverage import lineage, resolve_related_case_artifacts
+    if artifact['type'] not in ('analysis', 'scenarios'):
+        raise DomainError('联动更新需要从需求理解或场景成果发起')
+    if explicit_ids is not None:
+        if not isinstance(explicit_ids, list) or not explicit_ids or any(not isinstance(i, str) for i in explicit_ids):
+            raise DomainError('请选择有效关联成果')
+        explicit_ids = list(dict.fromkeys(explicit_ids))
+    if artifact['type'] == 'scenarios':
+        children = resolve_related_case_artifacts(store, artifact, explicit_ids)
+        if explicit_ids is None and len(children) > 1:
+            raise DomainError('此场景有多套关联用例，请明确选择本次同步的用例成果')
+        return children
+    candidates = [a for a in store.list('artifact', chat_id=artifact['chat_id'])
+                  if a.get('_visible') and a.get('project_id') == artifact['project_id']]
+    scenarios = [a for a in candidates if a['type'] == 'scenarios'
+                 and lineage(a).get('analysis_artifact_id') == artifact['id']]
+    if explicit_ids is None:
+        if len(scenarios) > 1:
+            raise DomainError('此需求有多套关联场景，请明确选择本次同步的场景成果')
+        children = list(scenarios)
+        for scenario in scenarios:
+            children += resolved_children(store, scenario)
+        return children
+    selected = [visible_artifact(store, aid) for aid in explicit_ids]
+    valid_scenarios = {a['id']: a for a in scenarios}
+    needed_scenarios = set()
+    for child in selected:
+        if child['type'] == 'scenarios' and child['id'] in valid_scenarios:
+            needed_scenarios.add(child['id'])
+        elif child['type'] == 'cases' and lineage(child).get('scenario_artifact_id') in valid_scenarios and child['chat_id'] == artifact['chat_id'] and child['project_id'] == artifact['project_id']:
+            needed_scenarios.add(lineage(child)['scenario_artifact_id'])
+        else:
+            raise DomainError('所选成果不属于当前需求分支')
+    return [a for a in scenarios if a['id'] in needed_scenarios] + [a for a in selected if a['type'] == 'cases']
+
+
+def changed_requirement_ids(store, analysis, scenarios):
+    from .workspace_coverage import changed_scenario_ids
+    # The same version comparison applies to requirement→scenario lineage.
+    source = scenarios.get('report', {}).get('lineage', {})
+    translated = {'scenario_artifact_id': source.get('analysis_artifact_id'),
+                  'scenario_revision': source.get('analysis_revision'),
+                  'scenario_revisions': source.get('analysis_revisions', {})}
+    rows = [{'scenario_id': rid} for row in scenarios['items'] for rid in row.get('requirement_ids', [])]
+    return changed_scenario_ids(store, analysis, {'items': rows, 'report': {'lineage': translated}})
+
+
+def synced_scenario_report(store, analysis, scenarios, requirement_ids):
+    from .workspace_coverage import synced_case_report
+    source = scenarios.get('report', {}).get('lineage', {})
+    translated = {'scenario_artifact_id': source.get('analysis_artifact_id'),
+                  'scenario_revision': source.get('analysis_revision'),
+                  'scenario_revisions': source.get('analysis_revisions', {})}
+    rows = [{'scenario_id': rid} for row in scenarios['items'] for rid in row.get('requirement_ids', [])]
+    updated = synced_case_report(store, analysis, {'items': rows, 'report': {'lineage': translated}}, requirement_ids)['lineage']
+    report = copy.deepcopy(scenarios.get('report', {}))
+    report['lineage'] = {**source, **{key.replace('scenario_', 'analysis_'): value for key, value in updated.items()}}
+    if 'scenario_revisions' not in updated:
+        report['lineage'].pop('analysis_revisions', None)
+    return report
+
+
+async def snapshot_action(store, engine, artifact, body):
+    """No action lease, run guard, proposal write or post-model freshness check."""
+    artifact = copy.deepcopy(artifact)
+    action = body['action']
+    chosen = selected_rows(artifact, body.get('selected_ids'))
+    instruction = body.get('instruction', '').strip()
+    if action == 'estimate' and artifact['type'] != 'scenarios':
+        raise DomainError('请打开场景成果后估算用例数量')
+    _, _, evidence = evidence_for(store, [artifact], body.get('source_ids')) if action != 'estimate' else ([], {}, [])
+    output = {'id': uid('action_'), 'artifact_id': artifact['id'], 'revision': artifact['revision'],
+              'action': action, 'changes': [], 'project_id': artifact['project_id'], 'chat_id': artifact['chat_id']}
+    if action == 'estimate':
+        profile = artifact.get('_profile', {})
+        def build(rows):
+            return artifact_context(store, 'artifact_estimate', artifact, rows, [], instruction,
+                extra={'contract': '仅估算设计工作量；不生成测试用例、步骤或需求事实。明确不确定性，逐场景给出范围。'}, admit=False)
+        estimates = []
+        for group in bounded_groups(engine, 'artifact_estimate', chosen, build):
+            result = await engine.invoke_model('artifact_estimate', build(group), None)
+            if not isinstance(result, dict):
+                raise DomainError('估算输出必须为对象')
+            estimates += validate_estimate(result, group)
+        output['estimate'] = {'artifact_id': artifact['id'], 'artifact_revision': artifact['revision'], 'title': artifact['title'],
+                              'instruction': instruction, 'scenarios': estimates,
+                              'min_count': sum(r['min_count'] for r in estimates), 'max_count': sum(r['max_count'] for r in estimates)}
+        output['summary'] = f'已估算 {len(estimates)} 个场景，建议设计 {output["estimate"]["min_count"]}–{output["estimate"]["max_count"]} 条用例。'
+    else:
+        def build(rows):
+            return artifact_context(store, 'artifact_explain', artifact, rows, evidence, instruction,
+                body.get('source_ids') or [], admit=False, extra={
+                    'contract': '解释当前提供的成果和实际步骤，保留原文事实；不修改或生成用例，不声称已经执行测试。'})
+        answers, refs = [], []
+        groups = bounded_groups(engine, 'artifact_explain', chosen or [None], lambda rows: build([r for r in rows if r is not None]))
+        for group in groups:
+            context = build([r for r in group if r is not None])
+            value = await engine.invoke_model('artifact_explain', context, None)
+            supplied = {e['id'] for e in context['evidence']}
+            if not isinstance(value, dict) or not isinstance(value.get('answer'), str) or not value['answer'].strip() or not isinstance(value.get('refs', []), list) or not all(isinstance(r, str) and r in supplied for r in value.get('refs', [])):
+                raise DomainError('解释内容或引用格式无效，请重试')
+            answers.append(value['answer'])
+            refs += value.get('refs', [])
+        output.update(answer='\n\n'.join(answers), refs=list(dict.fromkeys(refs)), summary='已根据选定版本解释成果。')
+    return output
+
+
+def validate_added_links(store, artifact, items):
+    from .workspace_coverage import parent_artifact
+    parent_type = {'scenarios': 'analysis', 'cases': 'scenarios'}.get(artifact['type'])
+    if not parent_type:
+        return
+    parent = parent_artifact(store, artifact, parent_type)
+    if not parent:
+        return  # Imported legacy artifacts have no established parent branch.
+    valid = {row['id'] for row in parent['items']}
+    existing = {row['id'] for row in artifact['items']}
+    for row in items:
+        if row['id'] in existing:
+            continue
+        links = row.get('requirement_ids') if artifact['type'] == 'scenarios' else [row.get('scenario_id')]
+        if not isinstance(links, list) or not links or any(not isinstance(i, str) or i not in valid for i in links):
+            raise DomainError('新增条目必须引用当前分支中有效的上游条目')
+
+
+async def modify_draft(engine, artifact, body, evidence, store=None):
+    from .generation_guards import merge_manifests
+    store = store or engine.store
+    consumed = []
+    chosen = selected_rows(artifact, body.get('selected_ids'))
+    current, operations, summaries = copy.deepcopy(artifact), [], []
+    def build(rows):
+        return artifact_context(store, 'artifact_modify', artifact, rows, evidence, body['instruction'],
+            body.get('source_ids') or [], admit=False, extra={
+                'contract': '仅局部修改提供的条目，保留 ID、自定义字段及人工数据。删除需要 reason 和 refs；不得顺带修改其他成果。'})
+    for group in bounded_groups(engine, 'artifact_modify', chosen or [None], lambda rows: build([r for r in rows if r is not None])):
+        context = build([r for r in group if r is not None])
+        result = await engine.invoke_model('artifact_modify', context, None)
+        consumed.append(context['dependency_manifest'])
+        if not isinstance(result, dict):
+            raise DomainError('修改输出必须为对象')
+        current['items'] = checked_operations(current, result, context['selected_ids'], {e['id']: e for e in evidence},
+            allow_add=body.get('selected_ids') is None, supplied_evidence={e['id']: e for e in context['evidence']})
+        current['report'] = report_patch(current, result)
+        operations.extend(result['operations'])
+        summaries.append(str(result.get('summary', '已生成局部修改预览')))
+    change = proposal_change(artifact, current['items'], current.get('report'), operations, body['instruction'])
+    change['_provenance'] = merge_manifests(*consumed)
+    current.update(revision=artifact['revision'] + 1, report=change.get('report', current.get('report', {})))
+    return current, change, summaries
+
+
+async def sync_scenario_draft(store, engine, analysis, artifact, affected, body, evidence):
+    from .generation_guards import merge_manifests
+    consumed = []
+    current, operations, summaries = copy.deepcopy(artifact), [], []
+    by_id = {r['id']: r for r in analysis['items']}
+    # Each scenario is sent once even when it depends on several selected requirements.
+    affected_rows = [r for r in artifact['items'] if set(r.get('requirement_ids', [])) & set(affected)]
+    units = [{'row': row} for row in affected_rows]
+    assigned = {rid for row in affected_rows for rid in row.get('requirement_ids', [])}
+    units += [{'requirement_id': rid} for rid in sorted(set(affected) - assigned)]
+    def build(group):
+        rows = [u['row'] for u in group if 'row' in u]
+        own = set(rid for row in rows for rid in row.get('requirement_ids', []) if rid in affected)
+        own.update(u['requirement_id'] for u in group if 'requirement_id' in u)
+        requirements = [by_id[rid] for rid in sorted(own) if rid in by_id]
+        deletion_basis = [v for rid, v in analysis.get('report', {}).get('item_deletions', {}).items() if rid in own]
+        return artifact_context(store, 'artifact_sync_scenarios', artifact, rows, evidence, body['instruction'],
+            body.get('source_ids') or [], admit=False, extra={
+                'analysis': requirements, 'selected_requirement_ids': sorted(own),
+                'removed_requirement_ids': sorted(own - set(by_id)), 'deletion_basis': deletion_basis,
+                'upstream_draft': {'artifact_id': analysis['id'], 'revision': analysis['revision']}})
+    for group in bounded_groups(engine, 'artifact_sync_scenarios', units, build):
+        context = build(group)
+        result = await engine.invoke_model('artifact_sync_scenarios', context, None)
+        consumed.append(context['dependency_manifest'])
+        if not isinstance(result, dict):
+            raise DomainError('场景同步输出必须为对象')
+        updated = checked_operations(current, result, context['selected_ids'], {e['id']: e for e in evidence},
+            allow_add=True, supplied_evidence={e['id']: e for e in context['evidence']}, allow_relink=True)
+        touched = set(item_diff(current['items'], updated)['added'] + item_diff(current['items'], updated)['updated'])
+        old = {r['id']: r for r in current['items']}
+        own = set(context['selected_requirement_ids'])
+        for row in updated:
+            if row['id'] not in touched:
+                continue
+            links = row.get('requirement_ids')
+            if not isinstance(links, list) or not links or any(not isinstance(i, str) or i not in by_id for i in links) or not set(links) & own:
+                raise DomainError('场景同步必须保留有效的所选需求关联')
+            previous_other = set(old.get(row['id'], {}).get('requirement_ids', [])) - own
+            if not previous_other <= set(links):
+                raise DomainError('同步不能删除未选择的需求关联')
+        if any(set(row.get('requirement_ids', [])) & set(context['removed_requirement_ids']) for row in updated):
+            raise DomainError('已删除需求仍有关联场景，请重试同步')
+        current['items'] = updated
+        operations += result['operations']
+        summaries.append(str(result.get('summary', '已生成关联场景修改预览')))
+    covered = {rid for row in current['items'] for rid in row.get('requirement_ids', [])}
+    if (set(affected) & set(by_id)) - covered:
+        raise DomainError('同步后仍有选中需求缺少场景；请补齐覆盖或明确移除需求')
+    report = synced_scenario_report(store, analysis, current, affected)
+    change = proposal_change(artifact, current['items'], report, operations, body['instruction'])
+    change['_provenance'] = merge_manifests(*consumed)
+    change['_draft_inputs'] = [{'id': analysis['id'], 'revision': analysis['revision']}]
+    current.update(revision=artifact['revision'] + 1, report=change['report'])
+    return current, change, summaries
+
+
+async def sync_case_draft(store, engine, scenarios, artifact, affected, body, evidence):
+    from .generation_guards import merge_manifests
+    consumed = []
+    from .workspace_coverage import synced_case_report
+    current, operations, summaries = copy.deepcopy(artifact), [], []
+    current_scenarios = {r['id']: r for r in scenarios['items']}
+    baselines = scenario_baselines(store, scenarios, artifact, affected)
+    deletions = scenarios.get('report', {}).get('item_deletions', {})
+    units = [{'scenario_id': sid, 'scenario': current_scenarios.get(sid),
+              'cases': [r for r in current['items'] if r.get('scenario_id') == sid]} for sid in sorted(affected)]
+    def build(group):
+        rows = [r for unit in group for r in unit['cases']]
+        selected = [u['scenario'] for u in group if u['scenario']]
+        own_ids = {u['scenario_id'] for u in group}
+        previous = [r for r in baselines if r['id'] in own_ids]
+        deletion_basis = [deletions[sid] for sid in own_ids if sid in deletions]
+        return artifact_context(store, 'artifact_sync', artifact, rows, evidence, body['instruction'],
+            body.get('source_ids') or [], admit=False, extra={
+                'scenarios': selected, 'removed_scenario_ids': [u['scenario_id'] for u in group if not u['scenario']],
+                'baseline_scenarios': previous, 'deletion_basis': deletion_basis,
+                'upstream_draft': {'artifact_id': scenarios['id'], 'revision': scenarios['revision']},
+                'contract': '仅同步这些场景关联的用例；保留有效稳定 ID 和人工/自定义数据。新增覆盖缺失，删除有依据的失效用例；删除必须返回 reason 和 refs。'})
+    for group in bounded_groups(engine, 'artifact_sync', units, build):
+        context = build(group)
+        result = await engine.invoke_model('artifact_sync', context, None)
+        consumed.append(context['dependency_manifest'])
+        if not isinstance(result, dict):
+            raise DomainError('用例同步输出必须为对象')
+        current['items'] = checked_operations(current, result, context['selected_ids'], {e['id']: e for e in evidence},
+            {u['scenario_id'] for u in group if u['scenario']}, supplied_evidence={e['id']: e for e in context['evidence']})
+        if any(r.get('scenario_id') in set(context['removed_scenario_ids']) for r in current['items']):
+            raise DomainError('已删除场景仍有关联用例，请修改同步要求后重试')
+        operations += result['operations']
+        summaries.append(str(result.get('summary', '已生成关联用例修改预览')))
+    covered = {r.get('scenario_id') for r in current['items']}
+    if (set(affected) & set(current_scenarios)) - covered:
+        raise DomainError('同步后仍有选中场景没有用例；请补齐覆盖或明确移除场景后重试')
+    report = synced_case_report(store, scenarios, current, affected)
+    change = proposal_change(artifact, current['items'], report, operations, body['instruction'])
+    change['_provenance'] = merge_manifests(*consumed)
+    change['_draft_inputs'] = [{'id': scenarios['id'], 'revision': scenarios['revision']}]
+    current.update(revision=artifact['revision'] + 1, report=change['report'])
+    return current, change, summaries
+
+
+async def preview_action(store, engine, artifact_id, body, on_saved=None):
+    with store.lock:
+        artifact = copy.deepcopy(visible_artifact(store, artifact_id))
     action = body.get('action')
     if action not in ('estimate', 'explain', 'modify', 'sync'):
         raise DomainError('不支持的成果操作')
-    instruction = body.get('instruction', '').strip()
-    if not instruction:
+    instruction = body.get('instruction', '')
+    if not isinstance(instruction, str) or not instruction.strip():
         raise DomainError('请填写本次操作要求')
-    chosen = selected_rows(artifact, body.get('selected_ids'))
+    body = {**body, 'instruction': instruction.strip()}
+    expected = body.get('expected_revision', body.get('artifact_revision'))
+    if expected is not None and (type(expected) is not int or expected < 1):
+        raise DomainError('请选择有效的成果版本')
+    if expected is not None and artifact['revision'] != expected:
+        if action in ('estimate', 'explain'):
+            artifact = store.revision(artifact_id, expected)
+        else:
+            raise DomainError('成果已更新，请刷新后重试', 409)
+    if action in ('estimate', 'explain'):
+        return await snapshot_action(store, engine, artifact, body)
+    selected_rows(artifact, body.get('selected_ids'))
     artifacts = [artifact]
-    if action == 'estimate' and artifact['type'] != 'scenarios':
-        raise DomainError('请打开场景成果后估算用例数量')
-    if action == 'sync':
-        if artifact['type'] != 'scenarios':
-            raise DomainError('联动更新需要从场景成果发起')
-        from .workspace_coverage import resolve_related_case_artifacts
-        artifacts += resolve_related_case_artifacts(store, artifact, body.get('related_artifact_ids'))
-        if len(artifacts) > 2 and body.get('related_artifact_ids') is None:
-            raise DomainError('此场景有多套关联用例，请明确选择本次同步的用例成果')
+    if action == 'sync' or body.get('sync_related'):
+        artifacts += resolved_children(store, artifact, body.get('related_artifact_ids'))
         if len(artifacts) == 1:
-            raise DomainError('没有关联用例，请先选择需要联动的用例成果')
-    source_ids, roles, evidence = evidence_for(store, artifacts, body.get('source_ids')) if action != 'estimate' else ([], {}, [])
+            raise DomainError('没有关联成果，请先生成或选择需要联动的成果')
+    source_ids, roles, evidence = evidence_for(store, artifacts, body.get('source_ids'))
     with action_lease(store, artifacts) as waiting:
         versions = {a['id']: a['revision'] for a in artifacts}
         sources = source_versions(store, source_ids)
+        # Bind the complete known ancestry before any model call.
+        inputs = {a['id']: a for a in artifacts}
+        queue = list(artifacts)
+        while queue:
+            current = queue.pop()
+            lineage = current.get('report', {}).get('lineage', {})
+            for field in ('analysis_artifact_id', 'scenario_artifact_id'):
+                parent_id = lineage.get(field)
+                if parent_id and parent_id not in inputs:
+                    parent = store.get('artifact', parent_id)
+                    if parent['project_id'] != artifact['project_id'] or parent['chat_id'] != artifact['chat_id']:
+                        raise DomainError('上游成果不属于当前工作范围', 403)
+                    inputs[parent_id] = parent
+                    queue.append(parent)
+        dependency_manifest = manifest(store, artifact_ids=list(inputs), source_ids=source_ids)
         changes, summaries = [], []
-        output = {'id': uid('action_'), 'artifact_id': artifact_id, 'action': action,
-                  'project_id': artifact['project_id'], 'chat_id': artifact['chat_id'],
-                  'created_at': now(), 'changes': changes}
-        profile = artifact.get('_profile', {})
-        if action == 'estimate':
-            def build(rows):
-                return {'instruction': instruction, 'scenarios': rows,
-                        'profile': {k: profile[k] for k in ('case_level', 'scenario_level', 'case_types', 'language', 'scope') if k in profile},
-                        'contract': '仅估算设计工作量；不生成测试用例、步骤或需求事实。明确不确定性，逐场景给出范围。'}
-            estimates = []
-            for group in bounded_groups(engine, 'artifact_estimate', chosen, build):
-                estimates += validate_estimate(await engine.invoke_model('artifact_estimate', build(group), None), group)
-            output['estimate'] = {'scenarios': estimates, 'min_count': sum(r['min_count'] for r in estimates),
-                                  'max_count': sum(r['max_count'] for r in estimates)}
-            summaries.append(f'已估算 {len(estimates)} 个场景，建议设计 {output["estimate"]["min_count"]}–{output["estimate"]["max_count"]} 条用例；未生成用例。')
-        elif action == 'explain':
-            def build(rows):
-                return {'instruction': instruction, 'artifact': {**public(artifact), 'items': rows},
-                        'evidence': local_evidence(evidence, rows, body.get('source_ids') or []),
-                        'contract': '解释当前提供的成果，保留原文事实；不修改或生成用例，不声称已经执行测试。'}
-            answers, refs = [], []
-            for group in bounded_groups(engine, 'artifact_explain', chosen, build):
-                context = build(group)
-                value = await engine.invoke_model('artifact_explain', context, None)
-                supplied = {e['id'] for e in context['evidence']}
-                if not isinstance(value.get('answer'), str) or not value['answer'].strip() or not isinstance(value.get('refs', []), list) or not all(isinstance(r, str) for r in value.get('refs', [])) or not set(value.get('refs', [])) <= supplied:
-                    raise DomainError('解释内容或引用格式无效，请重试')
-                answers.append(value['answer']); refs += value.get('refs', [])
-            output.update(answer='\n\n'.join(answers), refs=list(dict.fromkeys(refs)))
-            summaries.append('已根据选定版本解释成果，原成果保持不变。')
-        elif action == 'modify':
-            current = copy.deepcopy(artifact)
-            operations = []
-            def build(rows):
-                return {'instruction': instruction, 'artifact': {**public(artifact), 'items': rows},
-                        'selected_ids': [r['id'] for r in rows], 'profile': profile,
-                        'evidence': local_evidence(evidence, rows, body.get('source_ids') or []),
-                        'contract': '仅局部修改提供的条目，保留 ID、自定义字段及人工数据。删除需要 reason 和 refs；不得顺带修改其他成果。'}
-            for group in bounded_groups(engine, 'artifact_modify', chosen, build):
-                context = build(group)
-                result = await engine.invoke_model('artifact_modify', context, None)
-                allowed = [r['id'] for r in group]
-                current['items'] = checked_operations(current, result, allowed, {e['id']: e for e in evidence},
-                    allow_add=body.get('selected_ids') is None, supplied_evidence={e['id']: e for e in context['evidence']})
-                current['report'] = report_patch(current, result)
-                operations.extend(result['operations'])
-                summaries.append(str(result.get('summary', '已生成局部修改预览')))
-            changes.append(proposal_change(artifact, current['items'], current.get('report'), operations, instruction))
-        else:
-            from .workspace_coverage import changed_scenario_ids, synced_case_report
-            current_scenarios = {r['id']: r for r in artifact['items']}
-            for case_artifact in artifacts[1:]:
-                affected = set(body['selected_ids']) if body.get('selected_ids') is not None else set(changed_scenario_ids(store, artifact, case_artifact))
-                if not affected:
-                    continue
-                current = copy.deepcopy(case_artifact)
-                operations = []
-                baselines = scenario_baselines(store, artifact, case_artifact, affected)
-                deletions = artifact.get('report', {}).get('item_deletions', {})
-                units = [{'scenario_id': sid, 'scenario': current_scenarios.get(sid),
-                          'cases': [r for r in current['items'] if r.get('scenario_id') == sid]} for sid in sorted(affected)]
-                def build(group):
-                    rows = [r for unit in group for r in unit['cases']]
-                    scenarios = [u['scenario'] for u in group if u['scenario']]
-                    own_ids = {u['scenario_id'] for u in group}
-                    previous_scenarios = [r for r in baselines if r['id'] in own_ids]
-                    deletion_basis = [deletions[sid] for sid in own_ids if sid in deletions]
-                    return {'instruction': instruction, 'artifact': {**public(case_artifact), 'items': rows},
-                            'scenarios': scenarios, 'removed_scenario_ids': [u['scenario_id'] for u in group if not u['scenario']],
-                            'baseline_scenarios': previous_scenarios, 'deletion_basis': deletion_basis,
-                            'selected_ids': [r['id'] for r in rows], 'profile': case_artifact.get('_profile', {}),
-                            'evidence': local_evidence(evidence, rows + scenarios + previous_scenarios + deletion_basis, body.get('source_ids') or []),
-                            'contract': '仅同步这些场景关联的用例；保留有效稳定 ID 和人工/自定义数据。新增覆盖缺失，删除有依据的失效用例；删除必须返回 reason 和 refs。'}
-                for group in bounded_groups(engine, 'artifact_sync', units, build):
-                    context = build(group)
-                    result = await engine.invoke_model('artifact_sync', context, None)
-                    allowed = context['selected_ids']
-                    current['items'] = checked_operations(current, result, allowed, {e['id']: e for e in evidence},
-                        {u['scenario_id'] for u in group if u['scenario']}, supplied_evidence={e['id']: e for e in context['evidence']})
-                    removed = set(context['removed_scenario_ids'])
-                    if any(r.get('scenario_id') in removed for r in current['items']):
-                        raise DomainError('已删除场景仍有关联用例，请修改同步要求后重试')
-                    operations.extend(result['operations'])
-                    summaries.append(str(result.get('summary', '已生成关联用例修改预览')))
-                covered = {r.get('scenario_id') for r in current['items']}
-                if (affected & set(current_scenarios)) - covered:
-                    raise DomainError('同步后仍有选中场景没有用例；请补齐覆盖或明确移除场景后重试')
-                report = synced_case_report(store, artifact, current, sorted(affected))
-                changes.append(proposal_change(case_artifact, current['items'], report, operations, instruction))
-        output['summary'] = '\n'.join(summaries) or '关联用例已与当前场景版本一致，无需修改。'
+        output = {'id': uid('action_'), 'artifact_id': artifact_id, 'revision': artifact['revision'], 'action': action,
+                  'project_id': artifact['project_id'], 'chat_id': artifact['chat_id'], 'created_at': now(), 'changes': changes}
+        upstream = artifact
+        if action == 'modify':
+            upstream, change, notes = await modify_draft(engine, artifact, body, evidence, store)
+            validate_added_links(store, artifact, upstream['items'])
+            changes.append(change)
+            summaries += notes
+        if len(artifacts) > 1:
+            from .workspace_coverage import changed_scenario_ids
+            drafts = {artifact_id: upstream}
+            affected_scenarios = {}
+            for child in artifacts[1:]:
+                source = child.get('report', {}).get('lineage', {})
+                if child['type'] == 'scenarios':
+                    affected = body.get('selected_ids')
+                    if affected is None:
+                        affected = changed_requirement_ids(store, upstream, child)
+                    if not affected:
+                        continue
+                    draft, change, notes = await sync_scenario_draft(store, engine, upstream, child, affected, body, evidence)
+                    drafts[child['id']] = draft
+                    delta = change['diff']
+                    affected_scenarios[child['id']] = delta['added'] + delta['updated'] + delta['deleted']
+                else:
+                    parent_id = source.get('scenario_artifact_id') or artifact_id
+                    parent = drafts.get(parent_id)
+                    if parent is None:
+                        continue
+                    affected = affected_scenarios.get(parent_id)
+                    if affected is None:
+                        affected = body.get('selected_ids')
+                    if affected is None:
+                        affected = changed_scenario_ids(store, parent, child)
+                    if not affected:
+                        continue
+                    draft, change, notes = await sync_case_draft(store, engine, parent, child, affected, body, evidence)
+                    drafts[child['id']] = draft
+                changes.append(change)
+                summaries += notes
+        output['summary'] = '\n'.join(summaries) or '关联成果已与当前版本一致，无需修改。'
         with store.transaction():
             assert_waiting_snapshots(store, waiting)
+            assert_manifest(store, dependency_manifest)
             for aid, revision in versions.items():
                 if store.get('artifact', aid)['revision'] != revision:
                     raise DomainError('成果已更新，请重新生成预览', 409)
+            for sid, signature in sources.items():
+                if fingerprint(store.get('source', sid)) != signature:
+                    raise DomainError('本次资料已变化，请重新生成预览', 409)
             saved = {**copy.deepcopy(output), '_input_versions': versions, '_waiting': waiting,
-                     '_source_versions': sources, '_source_ids': source_ids, '_source_roles': roles}
+                     '_source_versions': sources, '_source_ids': source_ids, '_source_roles': roles,
+                     '_dependency_manifest': dependency_manifest}
             store.put('action_proposal', saved)
+            if on_saved is not None:
+                on_saved(output)
         return output
 
 
-def apply_action(store, artifact_id, proposal_id):
+def apply_action(store, artifact_id, proposal_id, emit_message=True):
     with store.transaction():
         proposal = store.get('action_proposal', proposal_id)
         if proposal['artifact_id'] != artifact_id or proposal['action'] not in ('modify', 'sync'):
             raise DomainError('此预览不能应用到当前成果')
+        if proposal.get('_discarded'):
+            raise DomainError('此修改预览已取消，不能应用', 409)
         if proposal.get('_applied'):
-            return {'artifacts': [public(store.get('artifact', c['artifact_id'])) for c in proposal['changes']],
+            return {'artifacts': copy.deepcopy(proposal.get('_applied_artifacts')) if proposal.get('_applied_artifacts') is not None else
+                        [public(store.revision(c['artifact_id'], c['expected_revision'] + 1)) for c in proposal['changes']],
                     'summary': proposal['summary'], 'already_applied': True}
         artifacts = [visible_artifact(store, aid) for aid in proposal['_input_versions']]
         for artifact in artifacts:
@@ -410,6 +692,8 @@ def apply_action(store, artifact_id, proposal_id):
             if fingerprint(store.get('source', sid)) != signature:
                 raise DomainError('预览使用的资料已变更，请重新预览', 409)
         assert_waiting_snapshots(store, proposal['_waiting'])
+        if proposal.get('_dependency_manifest'):
+            assert_manifest(store, proposal['_dependency_manifest'])
         with action_lease(store, artifacts):
             updated = []
             for change in proposal['changes']:
@@ -417,19 +701,61 @@ def apply_action(store, artifact_id, proposal_id):
                 # New references join only at the same atomic commit as the revision.
                 enriched = {**original, '_source_ids': list(dict.fromkeys(original.get('_source_ids', []) + proposal['_source_ids'])),
                             '_source_roles': {**original.get('_source_roles', {}), **proposal['_source_roles']}}
-                store.put('artifact', enriched)
+                validate_added_links(store, enriched, change['items'])
+                from .generation_guards import merge_manifests
+                consumed = change.get('_provenance')
+                if change.get('_draft_inputs'):
+                    # Upstream drafts have now been committed earlier in this same
+                    # transaction. Record those exact versions, never today's head.
+                    consumed = merge_manifests(consumed, manifest(store, artifact_ids=change['_draft_inputs']))
                 value = store.revise_artifact(change['artifact_id'], change['expected_revision'], change['items'],
-                                              reason='workspace_action', report=change.get('report'))
+                    reason='workspace_action', report=change.get('report'), source_ids=proposal['_source_ids'],
+                    source_roles=proposal['_source_roles'], command_id=proposal_id + ':' + change['artifact_id'],
+                    provenance=consumed)
                 updated.append(public(value))
                 for pending in proposal['_waiting']:
                     if pending['artifact_id'] == value['id']:
                         run = store.run(pending['id'])
                         run['interrupt']['items'] = value['items']
                         store.save_run(run)
-            store.put('action_proposal', {**proposal, '_applied': True, '_applied_at': now()})
-            store.put('message', {'id': uid('msg_'), 'project_id': proposal['project_id'], 'chat_id': proposal['chat_id'],
-                                 'role': 'assistant', 'content': proposal['summary'], 'created_at': now(),
-                                 'metadata': {'artifact_ids': [a['id'] for a in updated], 'action_proposal_id': proposal_id}})
+            for pending in proposal['_waiting']:
+                run = store.run(pending['id'])
+                from .workspace_coverage import PARENT_KEYS
+                input_changed = False
+                for saved_artifact in updated:
+                    kind = saved_artifact['type']
+                    if kind not in ('analysis', 'scenarios', 'cases'):
+                        continue
+                    cached_ids = {cached.get('id') for key in PARENT_KEYS.get(kind, ())
+                                  if isinstance(cached := store.cache_get(run['id'], key), dict)}
+                    snapshot_matches = (run.get('_artifact_snapshot') or {}).get('id') == saved_artifact['id']
+                    gate_matches = linked_gate(store, [saved_artifact], pending.get('artifact_id'))
+                    if saved_artifact['id'] not in cached_ids and not snapshot_matches and not gate_matches:
+                        continue
+                    input_changed = True
+                    if snapshot_matches:
+                        run['_artifact_snapshot'] = store.get('artifact', saved_artifact['id'])
+                    if kind == 'analysis':
+                        store.cache_set(run['id'], 'v6:requirement_map',
+                            {**saved_artifact.get('report', {}), 'confirmed_requirements': saved_artifact['items']})
+                        store.cache_set(run['id'], 'workspace:analysis_parent',
+                            {'id': saved_artifact['id'], 'revision': saved_artifact['revision']})
+                    elif kind == 'scenarios':
+                        store.cache_set(run['id'], 'workspace:scenario_parent',
+                            {'id': saved_artifact['id'], 'revision': saved_artifact['revision']})
+                previous_ids = run.get('_source_ids', [])
+                merged_ids = list(dict.fromkeys(previous_ids + proposal['_source_ids']))
+                merged_roles = {**run.get('_source_roles', {}), **proposal['_source_roles']}
+                if input_changed or merged_ids != previous_ids or merged_roles != run.get('_source_roles', {}):
+                    run['_source_ids'] = merged_ids
+                    run['_source_roles'] = merged_roles
+                    run['input_version'] = run['_input_version'] = max(run.get('input_version', 0), run.get('_input_version', 0)) + 1
+                    store.save_run(run)
+            store.put('action_proposal', {**proposal, '_applied': True, '_applied_at': now(), '_applied_artifacts': copy.deepcopy(updated)})
+            if emit_message:
+                store.put('message', {'id': uid('msg_'), 'project_id': proposal['project_id'], 'chat_id': proposal['chat_id'],
+                                     'role': 'assistant', 'content': proposal['summary'], 'created_at': now(),
+                                     'metadata': {'artifact_ids': [a['id'] for a in updated], 'action_proposal_id': proposal_id}})
             return {'artifacts': updated, 'summary': proposal['summary']}
 
 
@@ -444,6 +770,8 @@ def register_artifact_routes(app):
         selected_ids: list[str] | None = None
         source_ids: list[str] | None = None
         related_artifact_ids: list[str] | None = None
+        sync_related: bool = False
+        expected_revision: int | None = None
 
     class ApplyInput(BaseModel):
         proposal_id: str

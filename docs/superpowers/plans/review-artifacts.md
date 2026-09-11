@@ -1,0 +1,15 @@
+# Artifact capability peer review — 2026-09-11
+
+Reviewed `artifact_actions.py` and `conversation_artifacts.py` for snapshot reads, scope, provenance, lineage, version checks and cancellation. No artifact-owner production files edited by this reviewer. Findings sent directly to that owner and root.
+
+1. **High — ordinary edits can rewrite structural parent links.** `checked_operations` validates case `scenario_id` against an allowed set only for synchronization; ordinary `modify_draft` supplies none. Reproduced against the actual Store and `preview_action` / `apply_action`: request “Only clarify title”, selected `C1`, model update `{title: "Clear title", scenario_id: "invented-parent"}` committed the invented parent. Ordinary case/scenario prose edits should preserve their parent links unless a specialized explicit relinking operation validates the destination. The same normal modification path permits scenario `requirement_ids` replacement without validating parent requirement existence.
+
+2. **Medium — already-applied proposals return later live revisions.** `apply_action` reads live artifacts for `_applied` proposals. Actual Store reproduction: first apply returned revision 2; another independent edit created revision 3; replay of the original proposal returned revision 3. Return the frozen revisions committed by the proposal. Per-command receipts prevent duplicate execution of the same command but do not correct a new command replaying an already-applied proposal.
+
+3. **Medium — generic analysis drops input version from its displayed result.** `snapshot_action` correctly returns a snapshot artifact ID and revision, but `conversation_artifacts.execute` converts it into an answer part containing only text/refs. If the run advances during the read, the answer has no explicit saved input revision for the user. Preserve and display the analyzed version, as estimate already does.
+
+Positive checks: model reads use immutable local copies with no action lease or post-model run-status invalidation; write previews recheck artifact/source fingerprints and waiting interrupt identity; cancellation is checked before receipt-plus-apply commits; unrelated artifact branches are resolved through persisted lineage; changed cases retain protected manual/default fields; staged upstream drafts feed scoped downstream previews in the same eventual Store transaction.
+
+The reproductions use real SQLite domain services and a controlled model adapter. Full HTTP/LangGraph integration was unavailable because runtime dependencies were not installed. Owners may update this record after applying and verifying fixes.
+
+Follow-up verification: the owner fixed all three findings. Re-running the first two actual-Store reproductions now rejects an invented parent with `DomainError(400)` and replays the original revision 2 even when the live artifact is revision 3. Normal edits protect existing `scenario_id` / `requirement_ids`; additions validate the established parent branch. Generic analysis now includes `artifact_id` / `revision` and a visible “依据：… · v…” label. No remaining blocker found in this scoped peer review.

@@ -52,7 +52,7 @@ def test_openai_gateway_records_exact_wire_messages_and_configured_timeout(tmp_p
         assert snapshots[0]['messages'] == captured[0]['messages']
         assert json.loads(snapshots[0]['messages'][1]['content'][0]['text']) == context
         assert snapshots[0]['timeout_seconds'] == 5
-        assert snapshots[0]['parameters'] == {}
+        assert snapshots[0]['parameters'] == {'max_tokens': 8192}
         context['request']['content'] = 'LATER-CHANGE'
         assert 'LATER-CHANGE' not in json.dumps(snapshots[0])
         asyncio.run(gateway.close())

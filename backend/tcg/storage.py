@@ -88,6 +88,15 @@ class Store:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS event_run ON events(run_id,id);
             CREATE TABLE IF NOT EXISTS model_requests(run_id TEXT NOT NULL,call_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(run_id,call_id));
+            CREATE TABLE IF NOT EXISTS operation_receipts(command_id TEXT PRIMARY KEY,artifact_id TEXT NOT NULL,run_id TEXT,payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS cancelled_commands(command_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS artifact_dependencies(artifact_id TEXT,revision INTEGER,payload TEXT NOT NULL,PRIMARY KEY(artifact_id,revision));
+            CREATE TABLE IF NOT EXISTS source_evidence_versions(source_id TEXT,version INTEGER,payload TEXT NOT NULL,PRIMARY KEY(source_id,version));
+            CREATE TRIGGER IF NOT EXISTS immutable_source_evidence_update BEFORE UPDATE ON source_evidence_versions BEGIN SELECT RAISE(ABORT, 'Source evidence versions are immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS immutable_source_evidence_delete BEFORE DELETE ON source_evidence_versions BEGIN SELECT RAISE(ABORT, 'Source evidence versions are immutable'); END;
+            CREATE TABLE IF NOT EXISTS input_versions(object_id TEXT,kind TEXT,version INTEGER,payload TEXT NOT NULL,PRIMARY KEY(object_id,kind,version));
+            CREATE TRIGGER IF NOT EXISTS immutable_revision_update BEFORE UPDATE ON revisions BEGIN SELECT RAISE(ABORT, 'Artifact revisions are immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS immutable_revision_delete BEFORE DELETE ON revisions BEGIN SELECT RAISE(ABORT, 'Artifact revisions are immutable'); END;
             CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,object_id TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL);
         ''')
         if 'kind' not in {row['name'] for row in self.db.execute('PRAGMA table_info(events)')}:
@@ -115,7 +124,50 @@ class Store:
             self.db.close()
 
     def put(self, kind, value):
-        self.db.execute('INSERT INTO objects VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload', (value['id'], kind, value.get('project_id'), value.get('chat_id'), dump(value)))
+        with self.transaction():
+            changed_chunk_source = None
+            if kind == 'chunk':
+                prior = self.db.execute('SELECT payload FROM objects WHERE id=? AND kind=?', (value['id'], kind)).fetchone()
+                sid = value.get('source_id')
+                recorded = self.db.execute('SELECT 1 FROM source_evidence_versions WHERE source_id=? LIMIT 1', (sid,)).fetchone()
+                if recorded and (prior is None or json.loads(prior[0]) != value):
+                    self.source_snapshot(sid)
+                    changed_chunk_source = sid
+            if kind == 'artifact':
+                head = self.db.execute('SELECT MAX(revision) FROM revisions WHERE artifact_id=?', (value['id'],)).fetchone()[0]
+                existing_head = self.db.execute('SELECT payload FROM objects WHERE id=? AND kind=?', (value['id'], 'artifact')).fetchone()
+                if head is None and existing_head and value.get('revision') != json.loads(existing_head[0]).get('revision'):
+                    raise DomainError('成果新版本必须通过统一提交创建', 409)
+                if head is not None and value.get('revision', 0) > head:
+                    raise DomainError('成果新版本必须通过统一提交创建', 409)
+                if head is not None and value.get('revision', 0) < head:
+                    raise DomainError('成果版本已更新，不可回退当前版本', 409)
+                saved = self.db.execute('SELECT payload FROM revisions WHERE artifact_id=? AND revision=?', (value['id'], value.get('revision'))).fetchone()
+                if saved:
+                    baseline = json.loads(saved[0])
+                    immutable_fields = ('items', 'report', '_source_ids', '_source_roles', '_profile', 'type', 'title', 'project_id', 'chat_id', '_dependencies', '_write_dependencies')
+                    if any(value.get(key) != baseline.get(key) for key in immutable_fields):
+                        raise DomainError('成果内容不可原地修改，请创建新版本', 409)
+            if kind in ('source', 'profile'):
+                from .dependencies import digest
+                previous_row = self.db.execute('SELECT payload FROM objects WHERE id=? AND kind=?', (value['id'], kind)).fetchone()
+                previous = json.loads(previous_row[0]) if previous_row else None
+                value = dict(value)
+                if kind == 'source':
+                    content = {k: v for k, v in value.items() if k not in ('version', '_content_digest')}
+                    changed = previous is None or content != {k: v for k, v in previous.items() if k not in ('version', '_content_digest')}
+                    value['version'] = (previous.get('version', 1) + int(changed)) if previous else 1
+                    value['_content_digest'] = digest(value.get('_text', ''))
+                if previous:
+                    self.db.execute('INSERT OR IGNORE INTO input_versions VALUES(?,?,?,?)', (previous['id'], kind, previous.get('version', 1), dump(previous)))
+                self.db.execute('INSERT OR IGNORE INTO input_versions VALUES(?,?,?,?)', (value['id'], kind, value.get('version', 1), dump(value)))
+            self.db.execute('INSERT INTO objects VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload', (value['id'], kind, value.get('project_id'), value.get('chat_id'), dump(value)))
+            if changed_chunk_source:
+                from .dependencies import digest
+                source = self.get('source', changed_chunk_source)
+                chunks = sorted((c for c in self.list('chunk', chat_id=source['chat_id']) if c['source_id'] == changed_chunk_source), key=lambda c: c['id'])
+                self.put('source', {**source, '_evidence_digest': digest(chunks)})
+                self.source_snapshot(changed_chunk_source)
         return value
 
     def get(self, kind, object_id):
@@ -169,10 +221,34 @@ class Store:
         source_id = source_id or uid('src_')
         with self.transaction():
             source = {'id': source_id, 'project_id': chat['project_id'], 'chat_id': chat_id, 'name': name, 'role': role, 'characters': len(text), 'created_at': now(), '_text': text, '_active': True, '_file': file_path}
-            self.put('source', source)
+            source = self.put('source', source)
             for index, chunk in enumerate(chunks, 1):
                 self.put('chunk', {'id': f'{source_id}#P{index}', 'project_id': chat['project_id'], 'chat_id': chat_id, 'source_id': source_id, 'role': role, **chunk})
+            self.source_snapshot(source_id)
         return source
+
+    def source_snapshot(self, source_id, version=None):
+        """Capture current evidence, or read an exact immutable historical version."""
+        with self.transaction():
+            if version is not None:
+                row = self.db.execute('SELECT payload FROM source_evidence_versions WHERE source_id=? AND version=?', (source_id, version)).fetchone()
+                if row is None:
+                    raise DomainError('历史来源证据版本不可用；不可用当前内容代替', 404)
+                return json.loads(row[0])
+            source = self.get('source', source_id)
+            chunks = sorted((c for c in self.list('chunk', chat_id=source.get('chat_id')) if c['source_id'] == source_id), key=lambda c: c['id'])
+            value = {'source': source, 'chunks': chunks}
+            version = source.get('version', 1)
+            row = self.db.execute('SELECT payload FROM source_evidence_versions WHERE source_id=? AND version=?', (source_id, version)).fetchone()
+            if row and json.loads(row[0]) != value:
+                raise DomainError('来源版本内容已改变，请创建新来源版本', 409)
+            self.db.execute('INSERT OR IGNORE INTO source_evidence_versions VALUES(?,?,?)', (source_id, version, dump(value)))
+            return value
+
+    def evidence_version(self, source_id, version, role=None):
+        snapshot = self.source_snapshot(source_id, version)
+        return [{**chunk, 'role': role or snapshot['source'].get('role'), 'source_version': version}
+                for chunk in snapshot['chunks']]
 
     def evidence(self, source_ids, role_snapshot=None):
         evidence = []
@@ -231,7 +307,14 @@ class Store:
                 if not artifact or not set(request['selected_ids']).issubset({i['id'] for i in artifact['items']}):
                     raise DomainError('所选条目不属于当前 Artifact')
             run_id = uid('run_')
-            message = self.put('message', {'id': uid('msg_'), 'project_id': chat['project_id'], 'chat_id': chat_id, 'role': 'user', 'content': request['content'], 'created_at': now(), 'metadata': {'run_id': run_id}})
+            turn_id = request.get('_conversation_turn_id')
+            if turn_id:
+                existing_message = self.get('message', 'input:' + turn_id)
+                if existing_message['chat_id'] != chat_id:
+                    raise DomainError('对话消息不属于当前任务')
+                message = self.put('message', {**existing_message, 'metadata': {**existing_message.get('metadata', {}), 'run_id': run_id}})
+            else:
+                message = self.put('message', {'id': uid('msg_'), 'project_id': chat['project_id'], 'chat_id': chat_id, 'role': 'user', 'content': request['content'], 'created_at': now(), 'metadata': {'run_id': run_id}})
             history = sorted(self.list('message', chat_id=chat_id), key=lambda item: (item['created_at'], item['id']))
             run = {'id': run_id, 'chat_id': chat_id, 'project_id': chat['project_id'], 'status': 'queued', 'intent': request['intent'], 'mode': request['mode'], 'stage': 'queued', 'created_at': now(), 'updated_at': now(), 'artifact_ids': [], '_request': request, '_profile': profile['config'], '_profile_id': profile['id'], '_source_ids': sources, '_artifact_snapshot': artifact, '_conversation': [{'role': m['role'], 'content': m['content'], 'metadata': m['metadata']} for m in history[-12:]], '_resume': None}
             # Keep provenance separate until routing determines whether this is
@@ -349,58 +432,25 @@ class Store:
             self.db.execute('INSERT INTO cache VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET payload=excluded.payload', (run_id, key, dump(value)))
         return value
 
-    def artifact(self, run_id, key, kind, title, items, report=None):
-        with self.transaction():
-            self.assert_running(run_id)
-            existing = self.cache_get(run_id, key)
-            if existing:
-                return self.get('artifact', existing['id'])
-            run = self.run(run_id)
-            evidence = {e['id']: e for e in self.evidence(run['_source_ids'], run.get('_source_roles'))}
-            validate_items(kind, items, evidence)
-            value = {'id': uid('art_'), 'chat_id': run['chat_id'], 'project_id': run['project_id'], 'type': kind, 'title': title, 'revision': 1, 'items': items, 'created_at': now(), '_source_ids': run['_source_ids'], '_source_roles': run.get('_source_roles', {}), '_profile': run['_profile'], '_visible': False}
-            from .workspace_coverage import creation_report
-            generated_report = creation_report(self, run, kind, report)
-            if report is not None or generated_report:
-                value['report'] = generated_report
-            self.put('artifact', value)
-            self.db.execute('INSERT INTO revisions VALUES(?,?,?,?,?,?)', (value['id'], 1, dump(value), now(), 'generated', dump({'added': [i['id'] for i in items], 'updated': [], 'deleted': []})))
-            self.cache_set(run_id, key, {'id': value['id']})
-            self.audit(value['id'], 'artifact_create', {'run_id': run_id})
-            return value
+    def artifact(self, run_id, key, kind, title, items, report=None, *, command_id=None, dependencies=None, provenance=None):
+        from .operations import create_artifact
+        return create_artifact(self, run_id, key, kind, title, items, report,
+                               command_id=command_id, dependencies=dependencies, provenance=provenance)
 
-    def revise_artifact(self, artifact_id, expected_revision, items, reason='manual_edit', run_id=None, cache_key=None, report=None):
+    def revise_artifact(self, artifact_id, expected_revision, items, reason='manual_edit', run_id=None,
+                        cache_key=None, report=None, *, source_ids=None, source_roles=None,
+                        command_id=None, dependencies=None, provenance=None):
+        from .operations import revise_artifact
+        return revise_artifact(self, artifact_id, expected_revision, items, reason, run_id, cache_key, report,
+                               source_ids=source_ids, source_roles=source_roles,
+                               command_id=command_id, dependencies=dependencies, provenance=provenance)
+
+    def annotate_artifact(self, artifact_id, expected_revision, fields, reason='report_update', run_id=None):
+        from .operations import revise_artifact
         with self.transaction():
-            if run_id:
-                self.assert_running(run_id)
-                if cache_key and self.cache_get(run_id, cache_key):
-                    return self.get('artifact', artifact_id)
             previous = self.get('artifact', artifact_id)
-            if reason != 'workspace_action' and getattr(self, '_workspace_action_tokens', {}).get(previous['chat_id']):
-                raise DomainError('项目成果正在预览或应用修改，请稍候', 409)
-            if previous['revision'] != expected_revision:
-                raise DomainError('Artifact 已更新，请刷新后重试', 409)
-            source_ids = previous['_source_ids']
-            roles = dict(previous.get('_source_roles', {}))
-            if run_id:
-                source_ids = list(dict.fromkeys(source_ids + self.run(run_id)['_source_ids']))
-                roles.update(self.run(run_id).get('_source_roles', {}))
-            validate_items(previous['type'], items, {e['id']: e for e in self.evidence(source_ids, roles)})
-            before, after = {i['id']: i for i in previous['items']}, {i['id']: i for i in items}
-            diff = {'added': [i for i in after if i not in before], 'deleted': [i for i in before if i not in after], 'updated': [i for i in after if i in before and before[i] != after[i]]}
-            result = {**previous, 'items': items, 'revision': expected_revision + 1, '_source_ids': source_ids, '_source_roles': roles}
-            if previous.get('report'):
-                from .agent_contracts import refreshed_report
-                result['report'] = refreshed_report(previous['type'], items, previous['report'], {e['id']: e for e in self.evidence(source_ids, roles)})
-            if report is not None:
-                if not isinstance(report,dict): raise DomainError('分析报告必须为对象')
-                result['report'] = report
-            self.put('artifact', result)
-            self.db.execute('INSERT INTO revisions VALUES(?,?,?,?,?,?)', (artifact_id, result['revision'], dump(result), now(), reason, dump(diff)))
-            self.audit(artifact_id, reason, {'revision': result['revision'], 'diff': diff})
-            if cache_key:
-                self.cache_set(run_id, cache_key, {'id': artifact_id})
-            return result
+            return revise_artifact(self, artifact_id, expected_revision, previous['items'], reason, run_id,
+                                   fields=fields)
 
     def revisions(self, artifact_id):
         self.get('artifact', artifact_id)

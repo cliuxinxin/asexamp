@@ -69,16 +69,22 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                 gateway = model_gateway if model_gateway is not None else LangChainGateway(settings)
                 engine = Engine(store, gateway, settings)
                 app.state.store, app.state.settings, app.state.engine = store, settings, engine
+                from .conversation import ConversationController
+                app.state.conversation = ConversationController(store, engine)
+                engine.on_safe_boundary = app.state.conversation.safe_boundary
                 await engine.start()
+                await app.state.conversation.recover()
                 yield
             finally:
+                if getattr(app.state, 'conversation', None):
+                    await app.state.conversation.close()
                 if engine:
                     await engine.stop()
                 if 'gateway' in locals() and hasattr(gateway, 'close'):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.5.13', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.7.0', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -137,7 +143,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.5.13', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.7.0', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -247,7 +253,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     def chat_get(chat_id: str):
         store = app.state.store
         chat = store.get('chat', chat_id)
-        return {'chat': chat, 'memory': chat.get('memory'), 'messages': [message_public(m) for m in sorted(store.list('message', chat_id=chat_id), key=lambda m: m['created_at'])], 'sources': [public(s) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
+        return {'chat': chat, 'memory': chat.get('memory'), 'messages': [message_public(m) for m in sorted(store.list('message', chat_id=chat_id), key=lambda m: m['created_at'])], 'sources': [public({**s, 'role': chat.get('_source_roles', {}).get(s['id'], s['role'])}) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
 
     @app.post('/api/chats/{chat_id}/sources')
     async def sources_upload(chat_id: str, file: UploadFile = File(...), role: str = Form('auto')):
@@ -345,7 +351,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.5.13', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.7.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -571,6 +577,17 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     register_artifact_routes(app)
     register_coverage_routes(app)
     register_chat_estimate_routes(app)
+    from .conversation import register_routes as register_conversation_routes
+    from .conversation_workflow import register_routes as register_draft_routes
+    from .conversation_project import register_routes as register_conversation_project_routes
+    register_conversation_routes(app)
+    register_draft_routes(app)
+    register_conversation_project_routes(app)
+
+    @app.get('/api/chats/{chat_id}/turns/{turn_id}/contexts')
+    def turn_contexts(chat_id: str, turn_id: str):
+        from .context_receipts import list_turn_contexts
+        return {'items': list_turn_contexts(app.state.store, chat_id, turn_id)}
 
     @app.get('/{path:path}', include_in_schema=False)
     def frontend(path: str):

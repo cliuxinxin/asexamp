@@ -1,0 +1,7 @@
+{
+  "backend/tcg/conversation.py": "8952bc4e05dc13f1604bc84402f78f4ffe59b390f603c9e02e4c9785f7ae9950",
+  "backend/tcg/conversation_context.py": "a03519a977c9fbcef946c222089884019d1fec346414a00eecd14f1d5201c8bf",
+  "backend/tcg/conversation_receipts.py": "e18379a8d178f7198fe1d88e549381c6692b948627e9ce312afb734915b4aa3f",
+  "backend/tcg/storage.py": "796295a6d2a8930c28adc184fe4a377c62552ba93586120257f20d2e28bd01a0",
+  "backend/tcg/main.py": "bd5561fa40561a33a3cf9836eae5052d6bc449f6d07a587d6ba0c9479b970600"
+}

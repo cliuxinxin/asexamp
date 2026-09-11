@@ -36,7 +36,7 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
  const learnedKeys=scopedProposalKeys(proposal);
  const [config,setConfig]=useState(()=>JSON.stringify(learnedKeys?applyTemplateFields(initialProfile?.config??{},proposal!.config,learnedKeys):(proposal?.config??proposal??initialProfile?.config??{}),null,2));
  const [error,setError]=useState('');const [notice,setNotice]=useState('');const [working,setWorking]=useState(false);
- useEffect(()=>{let active=true;api<Settings>('/settings').then(value=>active&&setSettings(value)).catch(e=>active&&setError(errText(e)));return()=>{active=false;};},[]);
+ useEffect(()=>{let active=true;api<Settings>('/settings').then(value=>active&&setSettings({...value,context_window:value.context_window??32768,output_tokens:value.output_tokens??8192,output_limit_mode:value.output_limit_mode??'request',server_output_tokens:value.server_output_tokens??null})).catch(e=>active&&setError(errText(e)));return()=>{active=false;};},[]);
  function changeEndpoint(provider:Settings['provider'],base_url:string){
   if(!settings)return;
   setSettings({...settings,provider,base_url,has_api_key:false,has_headers:false,header_names:[]});
@@ -45,6 +45,10 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
  async function saveModel(test=false){
   if(!settings)return;setWorking(true);setError('');setNotice('');
   try{
+   const enforcedOutput=settings.output_limit_mode==='server'?settings.server_output_tokens:settings.output_tokens;
+   if(settings.output_limit_mode==='server'&&(!enforcedOutput||enforcedOutput<=0))throw new Error('服务端输出上限必须大于 0。');
+   if(settings.context_window<=0||settings.output_tokens<=0)throw new Error('上下文窗口和输出预留必须大于 0。');
+   if(enforcedOutput!+1024>settings.context_window)throw new Error('上下文窗口必须在输出上限之外至少预留 1024 Token。');
    if(!settings.environment_managed){
     let parsed:Record<string,string>|undefined;
     if(headers.trim()&&!clearHeaders){
@@ -52,7 +56,7 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
      if(!parsed||Array.isArray(parsed)||typeof parsed!=='object'||Object.values(parsed).some(value=>typeof value!=='string'))throw new Error('每个 Header 的名称和值都必须是字符串。');
     }
     const updated=await api<Settings>('/settings',{
-     provider:settings.provider,base_url:settings.base_url,model:settings.model,timeout_seconds:settings.timeout_seconds,
+     provider:settings.provider,base_url:settings.base_url,model:settings.model,timeout_seconds:settings.timeout_seconds,context_window:settings.context_window,output_tokens:settings.output_tokens,output_limit_mode:settings.output_limit_mode,server_output_tokens:settings.server_output_tokens??null,
      auth_mode:settings.auth_mode??'bearer',...(key?{api_key:key}:{}),...(clearKey?{clear_api_key:true}:{}),
      ...(parsed?{headers:parsed}:{}),...(clearHeaders?{clear_headers:true}:{}),
     },'PUT');
@@ -89,6 +93,13 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
    <label>模型服务<select disabled={managed} value={settings.provider} onChange={e=>{const provider=e.target.value as Settings['provider'];changeEndpoint(provider,provider==='ollama'?'http://127.0.0.1:11434':'http://10.206.3.151:8000/api/v1');}}><option value="ollama">Ollama · 本地模型</option><option value="openai">Chat Completions · 私有网关</option></select></label>
    <label>服务地址<input disabled={managed} value={settings.base_url} onChange={e=>changeEndpoint(settings.provider,e.target.value)} spellCheck={false}/></label>
    <label>模型名称<input disabled={managed} value={settings.model} onChange={e=>setSettings({...settings,model:e.target.value})} placeholder={settings.provider==='ollama'?'填写 ollama list 中已安装的模型名称':'填写服务支持的模型 ID'} spellCheck={false}/></label>
+   <details className="capacity-settings" open><summary>上下文与输出容量</summary>
+    <p className="muted small-text">请填写模型的真实容量。每次请求会为输出预留空间，并额外保留至少 1024 Token 的安全余量。</p>
+    <label>上下文窗口 Token 数<input aria-label="上下文窗口 Token 数" type="number" min={1} disabled={managed} value={settings.context_window} onChange={e=>setSettings({...settings,context_window:Number(e.target.value)})}/></label>
+    <label>单次输出预留 Token 数<input aria-label="单次输出预留 Token 数" type="number" min={1} disabled={managed} value={settings.output_tokens} onChange={e=>setSettings({...settings,output_tokens:Number(e.target.value)})}/></label>
+    <fieldset><legend>输出上限的执行位置</legend><label className="check-label"><input type="radio" name="output-limit-mode" aria-label="随请求发送输出上限" disabled={managed} checked={settings.output_limit_mode==='request'} onChange={()=>setSettings({...settings,output_limit_mode:'request'})}/>随请求发送输出上限</label><label className="check-label"><input type="radio" name="output-limit-mode" aria-label="由服务端强制限制" disabled={managed} checked={settings.output_limit_mode==='server'} onChange={()=>setSettings({...settings,output_limit_mode:'server'})}/>由服务端强制限制</label></fieldset>
+    {settings.output_limit_mode==='server'&&<><label>服务端强制输出 Token 数<input aria-label="服务端强制输出 Token 数" type="number" min={1} disabled={managed} value={settings.server_output_tokens??''} onChange={e=>setSettings({...settings,server_output_tokens:e.target.value?Number(e.target.value):null})}/></label><p className="muted small-text">仅在网关已明确配置固定输出上限时使用，并填写该上限。</p></>}
+   </details>
    {settings.provider==='openai'&&(settings.auth_mode??'bearer')==='bearer'&&<><label>API Key（本地服务可留空）<input disabled={managed} type="password" autoComplete="new-password" value={key} onChange={e=>setKey(e.target.value)} placeholder={settings.has_api_key?'已保存，留空保留':'可选'}/></label>{settings.has_api_key&&<label className="check-label"><input disabled={managed} type="checkbox" checked={clearKey} onChange={e=>setClearKey(e.target.checked)}/>清除已保存的密钥</label>}</>}
    <details className="header-settings"><summary>自定义请求头</summary>
     <p className="muted small-text">适用于网关密钥、租户标识和自定义鉴权。保存后不回显请求头的值。</p>

@@ -13,20 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'backend'))
-# Use actual schema business functions without importing optional Pydantic requests.
-schema_path = ROOT / 'backend/tcg/schemas.py'
-tree = ast.parse(schema_path.read_text())
-body = []
-for node in tree.body:
-    if isinstance(node, ast.ImportFrom) and node.module == 'pydantic':
-        continue
-    if isinstance(node, ast.ClassDef) and any(isinstance(base, ast.Name) and base.id in ('BaseModel', 'NameInput') for base in node.bases):
-        continue
-    body.append(node)
-schema = types.ModuleType('tcg.schemas')
-schema.__package__ = 'tcg'
-sys.modules['tcg.schemas'] = schema
-exec(compile(ast.Module(body=body, type_ignores=[]), str(schema_path), 'exec'), schema.__dict__)
+# Pydantic is a required application dependency; test the actual shared schema module.
 from tcg.storage import Store, dump, now
 from tcg.schemas import DomainError, DEFAULT_PROFILE
 from tcg.artifact_actions import preview_action, apply_action, validate_estimate, action_lease

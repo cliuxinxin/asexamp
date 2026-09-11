@@ -11,6 +11,46 @@ MAX_SHARED_SOURCES = 100
 MAX_SHARED_CHARACTERS = 200000
 
 
+def merge_template_config(current, proposal, kinds):
+    """Apply only recognized template families, keeping manual/default ownership."""
+    from .schemas import DEFAULT_PROFILE, profile_config
+    from .case_fields import template_columns, MANUAL_FIELDS
+    import re
+    if not isinstance(proposal, dict) or not isinstance(kinds, list) or not kinds or any(
+            kind not in ('scenarios', 'cases') for kind in kinds):
+        raise DomainError('模板建议需要 config 对象及 scenarios/cases 类型')
+    scenario_keys = {'scenario_excel_columns', 'scenario_sheet_name', 'scenario_filename_pattern'}
+    case_keys = {'excel_columns', 'excel_layout', 'sheet_name', 'filename_pattern',
+                 'template_rules', 'case_level', 'case_types', 'additional_rules'}
+    allowed = (scenario_keys if 'scenarios' in kinds else set()) | (case_keys if 'cases' in kinds else set())
+    result, notes = copy.deepcopy(current), []
+    for key, value in proposal.items():
+        if key not in allowed:
+            continue
+        if value is None or value == [] or (isinstance(value, str) and not value.strip()):
+            notes.append(f'{key} 未识别到有效值，保留当前设置')
+            continue
+        column_key = 'scenario_excel_columns' if key in scenario_keys else 'excel_columns'
+        if proposal.get(column_key) == [] and value == DEFAULT_PROFILE.get(key):
+            continue
+        result[key] = '\n'.join(map(str, value)) if key == 'template_rules' and isinstance(value, list) else copy.deepcopy(value)
+    # Validate before inspecting model-provided column objects.
+    result = profile_config(result)
+    old_policies = {c['field']: c for c in template_columns(current)}
+    for column in result['excel_columns']:
+        previous = old_policies.get(column['field'], {})
+        manual_name = any(re.sub(r'[\s_-]', '', label).lower() in MANUAL_FIELDS
+                          for label in (column['field'], column.get('header', '')))
+        if previous.get('value_source') in ('manual', 'default'):
+            for key in ('value_source', 'required', 'default_value'):
+                if key in previous:
+                    column[key] = copy.deepcopy(previous[key])
+        elif manual_name:
+            column['value_source'] = 'manual'
+            column['required'] = False
+    return profile_config(result), notes
+
+
 def validate_sample_cases(value):
     if not isinstance(value, list) or len(value) > MAX_SAMPLES:
         raise DomainError('固定格式样例最多 5 条')
@@ -87,6 +127,12 @@ def pin_samples(store, artifact_id, profile_id, expected_version, selected_ids):
         if not set(selected_ids) <= rows.keys():
             raise DomainError('所选用例不属于当前结果')
         dropped = {'refs', 'source_ids', 'requirement_ids', 'scenario_id', 'project_id', 'chat_id', 'id'}
+        from .case_fields import MANUAL_FIELDS, template_columns
+        import re
+        dropped.update(column['field'] for column in template_columns(artifact.get('_profile', {})) + template_columns(profile['config'])
+                       if column['value_source'] == 'manual')
+        dropped.update(key for item_id in selected_ids for key in rows[item_id]
+                       if re.sub(r'[\s_-]', '', key).lower() in MANUAL_FIELDS)
         samples = [{key: copy.deepcopy(value) for key, value in rows[item_id].items()
                     if not key.startswith('_') and key not in dropped} for item_id in selected_ids]
         validate_sample_cases(samples)
@@ -103,6 +149,9 @@ def supplement_run(store, run_id, source_ids, content=''):
             raise DomainError('请在等待确认时补充资料；运行结束后可在新任务中使用新增资料', 409)
         if run.get('_edit_token'):
             raise DomainError('正在修改当前结果，请等待保存后再补充资料', 409)
+        tokens = getattr(store, '_workspace_action_tokens', {})
+        if tokens.get(run['chat_id']) or tokens.get(run['project_id']):
+            raise DomainError('项目成果正在修改，请等待保存后再补充资料', 409)
         if run['intent'] not in ('review_requirement', 'generate_scenario', 'generate_case'):
             raise DomainError('当前操作请先结束，再基于新增资料发起评审或其他任务', 409)
         if not isinstance(source_ids, list) or len(source_ids) > 100 or len(set(source_ids)) != len(source_ids):
@@ -129,6 +178,8 @@ def supplement_run(store, run_id, source_ids, content=''):
                        as_requirement=False, artifact_id=None, selected_ids=None)
         # Resuming from an old artifact would silently skip understanding the new sources.
         request['_fresh_after_supplement'] = True
+        if run.get('stop_after'):
+            request['stop_after'] = run['stop_after']
         for key in ('complete_fields_only', 'complete_descriptions_only'):
             request.pop(key, None)
         old = {**run, 'status': 'cancelled', 'stage': 'supplemented', '_resume': None, '_edit_token': None}
@@ -137,7 +188,8 @@ def supplement_run(store, run_id, source_ids, content=''):
         _, successor = store.create_run(run['chat_id'], request)
         roles = {sid: run.get('_source_roles', {}).get(sid, store.get('source', sid)['role'])
                  for sid in successor['_source_ids']}
-        successor = store.update_run(successor['id'], _source_roles=roles, previous_run_id=run_id)
+        controls = {key: copy.deepcopy(run[key]) for key in ('stop_after', 'goal', 'control_version', '_control_version', 'input_version', '_input_version') if key in run}
+        successor = store.update_run(successor['id'], _source_roles=roles, previous_run_id=run_id, **controls)
         store.save_run({**old, 'successor_run_id': successor['id']})
         store.audit(run_id, 'supplement_restart', {'successor_run_id': successor['id'], 'source_ids': added})
     return {'run': public(successor), 'previous_run_id': run_id,

@@ -101,6 +101,9 @@ class ResumeInput(BaseModel):
     depth: Literal['quick', 'standard', 'deep'] | None = None
     answer: str | None = Field(default=None, max_length=100_000)
     approved: bool | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
+    interrupt_id: str | None = Field(default=None, max_length=200)
+    expected_control_version: int | None = Field(default=None, ge=0)
 
 
 class SettingsInput(BaseModel):
@@ -113,6 +116,10 @@ class SettingsInput(BaseModel):
     clear_headers: bool = False
     auth_mode: Literal['bearer', 'headers'] = 'bearer'
     timeout_seconds: int = Field(default=3600, ge=5, le=3600)
+    context_window: int = Field(default=32768, ge=1)
+    output_tokens: int = Field(default=8192, ge=1)
+    output_limit_mode: Literal['request', 'server'] = 'request'
+    server_output_tokens: int | None = Field(default=None, ge=1)
 
 
 def scenario_template_columns(columns):
