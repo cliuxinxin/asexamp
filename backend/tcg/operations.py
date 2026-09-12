@@ -186,6 +186,9 @@ def revise_artifact(store, artifact_id, expected_revision, items, reason='manual
         result = _save(store, result, reason, diff, command_id, run_id)
         from .workflow_bindings import refresh_confirmation
         refresh_confirmation(store, result)
+        if reason != 'workspace_action':
+            from .artifact_actions import rebind_waiting_runs
+            rebind_waiting_runs(store, [result], source_ids=source_ids, source_roles=source_roles)
         if cache_key:
             store.cache_set(run_id, cache_key, {'id': artifact_id, 'revision': result['revision']})
         return result

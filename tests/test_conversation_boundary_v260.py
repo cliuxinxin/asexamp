@@ -15,6 +15,7 @@ import unittest
 from tcg.diagnostics import Diagnostics, endpoint_origin, error_details
 from tcg.schemas import DomainError
 from tcg.storage import Store, uid
+from tcg.workflow_bindings import bind_interrupt, validate_confirmation
 
 
 class CapturedInterrupt(BaseException):
@@ -32,6 +33,7 @@ methods = {'request_boundary', 'observed_node', 'resume', 'cancel', 'invoke_mode
 body = [node for node in original.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in methods]
 definition = ast.ClassDef(name='ProductionMethods', bases=[], keywords=[], body=body, decorator_list=[])
 namespace = {'__package__': 'tcg', 'asyncio': asyncio, 'json': json, 'time': time, 'uid': uid,
+             'bind_interrupt': bind_interrupt, 'validate_confirmation': validate_confirmation,
              'endpoint_origin': endpoint_origin, 'error_details': error_details, 'DomainError': DomainError,
              'GraphInterrupt': CapturedInterrupt, 'interrupt': capture}
 exec(compile(ast.fix_missing_locations(ast.Module(body=[definition], type_ignores=[])), 'graph.py', 'exec'), namespace)

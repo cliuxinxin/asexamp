@@ -148,10 +148,10 @@ class CoverageTests(unittest.TestCase):
         self.assertNotIn('lineage', creation_report(self.store, run, 'cases',
             {'lineage': {'scenario_artifact_id': 's', 'scenario_revision': 1}}))
 
-    def test_analysis_revision_change_is_visible(self):
+    def test_analysis_revision_without_item_change_is_not_stale(self):
         self.store.artifacts['a']['revision'] = 2
         result = workspace_context(self.store, self.cases)
-        self.assertTrue(result['stale']['analysis'])
+        self.assertFalse(result['stale']['analysis'])
         self.assertFalse(result['stale']['scenarios'])
 
     def test_workspace_sources_show_only_new_active_same_chat_metadata(self):

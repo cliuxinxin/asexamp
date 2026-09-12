@@ -84,6 +84,23 @@ def build_context(store, engine, chat, body, registry):
         'recent_messages':len(store.list('message',chat_id=chat['id'])),
         'active_turns':sum(t.get('status') in ('running','recoverable','deferred') for t in store.list('conversation_turn',chat_id=chat['id'])),
         'active_commands':sum(c.get('status') in ('running','deferred','pending','needs_input') for c in store.list('conversation_command',chat_id=chat['id']))}
+    from .workspace_changes import workspace_state
+    focus_id = body.get('artifact_id') or (state.get('focus') or {}).get('artifact_id')
+    if focus_id not in {a['id'] for a in artifacts if a['type'] != 'review'}:
+        focus_id = None
+    workspace = workspace_state(store, chat, focus_id)
+    impact = workspace['impact']
+    value['workspace'] = {
+        'artifact_id': workspace['artifact_id'], 'stages': workspace['stages'],
+        'impact': {'status': impact['status'], 'summary': impact['summary'],
+            'source_ids': impact['source_ids'][:40], 'source_count': len(impact['source_ids']),
+            'affected': [{k: a[k] for k in ('artifact_id','type','count','reason')} for a in impact['affected']]},
+        'next_action': {**workspace['next_action'], 'arguments': {
+            key: value for key, value in workspace['next_action']['arguments'].items()
+            if not isinstance(value, list) or len(value) <= 40}},
+        'pending_proposal': {k: workspace['pending_proposal'][k] for k in ('id','artifact_id','summary')}
+            if workspace.get('pending_proposal') else None,
+    }
     # Interrupt documents and whole reports never enter the interpreter.
     for run in value['runs']:
         interrupt=run.get('interrupt') or {}

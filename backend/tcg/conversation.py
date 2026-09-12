@@ -19,6 +19,7 @@ A read/estimate is independent of writes and Run controls. A turn-only negative 
 Target by actual artifact_id, exact artifact_title, artifact_type, selected_ids, or one-based ordinals. Preserve selected scope; scope:inherit_previous uses prior focus. from_case:true follows real case lineage to scenarios. Never guess among multiple plausible targets. Writes and workflow controls are version checked server-side. Do not change manual execution fields or invent test execution.
 Catalogs report totals and partial flags. Use conversation.catalog to expand omitted metadata with bounded offset/limit; expand before choosing an omitted or ambiguous target. Routing sees metadata; business capabilities retrieve context and evidence. Use conversation.resolve with an actual pending_id and listed choice_id to resume an unfinished action; unrelated requests leave pending intact.
 Cancellation must target the requested scope using its capability; a turn cancellation preserves saved effects. New evidence never silently alters an in-flight request. Template examples are formatting references, not business facts. Ask only for information necessary to execute; do not create unrequested work. For greeting or acknowledgment, actions:[] and a short honest response. Use Chinese user-visible messages.
+workspace describes the saved branch, actual upstream drift, pending sources and the next action. Use workspace.reconcile for requests to synchronize affected saved descendants or adopt new business facts into existing understanding and linked outputs. It prepares one preview; only explicit authorization to apply that identified preview permits artifact.apply. An upstream edit alone never authorizes confirmation or generation. Merely uploading a source leaves it pending. Questions about what changed or what to do next can be answered from workspace metadata without a write. Preserve a request to update only one artifact using scoped artifact capabilities. Never claim the understanding was updated merely because evidence was saved.
 '''
 
 INTERNAL_CAPABILITIES={
@@ -28,10 +29,10 @@ INTERNAL_CAPABILITIES={
 
 
 def default_registry():
-    from . import conversation_artifacts, conversation_workflow, conversation_project
+    from . import conversation_artifacts, conversation_workflow, conversation_project, conversation_workspace
     from .conversation_context import CATALOG_CAPABILITY
     registry={'conversation.catalog':CATALOG_CAPABILITY}
-    for adapter in (conversation_artifacts,conversation_workflow,conversation_project):
+    for adapter in (conversation_artifacts,conversation_workflow,conversation_project,conversation_workspace):
         for name,value in adapter.CAPABILITIES.items():registry[name]={**value,'execute':adapter.execute}
     return registry
 
@@ -518,7 +519,18 @@ class ConversationController:
         run=self.store.run(run_id)
         unresolved=[t for t in self.store.list('conversation_turn',chat_id=run['chat_id']) if t['status'] in ('deferred','failed','needs_input','needs_confirmation') and any(a.get('effect')=='write' for a in t.get('actions',[]))]
         if run['status']=='waiting' and run.get('interrupt',{}).get('type')=='workflow_paused' and run.get('interrupt',{}).get('reason') in ('write','scope') and not run.get('_control_hold') and not unresolved:
-            self.engine.resume(run_id,{'approved':True})
+            try:
+                self.engine.resume(run_id,{'approved':True})
+            except DomainError as exc:
+                if exc.status != 409:
+                    raise
+                # A concurrent upstream edit needs the same explicit reconciliation
+                # as a human gate; keep the saved boundary and its control token.
+                current = self.store.run(run_id)
+                if current['status'] == 'waiting':
+                    self.store.update_run(run_id, interrupt={**current.get('interrupt', {}),
+                        'message': str(exc)})
+                    self.engine.trace('workspace.reconciliation_required', run_id, message=str(exc))
 
     async def recover(self):
         for turn in self.store.list('conversation_turn'):

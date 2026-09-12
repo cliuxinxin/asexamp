@@ -4,6 +4,16 @@ from test_backend_api import Model, setup_chat, start, until
 
 class FlowModel(Model):
     async def generate(self, task, context):
+        if task == 'artifact_modify' and context['artifact']['type'] == 'analysis':
+            self.calls.append((task, context))
+            clarification = next(e for e in context['evidence'] if e['role'] == 'clarification')
+            row = context['artifact']['items'][0]
+            return {'operations': [{'op': 'update', 'id': row['id'], 'item': {
+                'description': row['description'] + '\n' + clarification['text'],
+                'refs': list(dict.fromkeys(row['refs'] + [clarification['id']]))}}],
+                'summary': '已依据已提交的澄清更新需求理解。',
+                'report_patch': {'summary': '理解登录规则；已纳入用户确认：' + clarification['text'],
+                    'questions': []}}
         if task=='summarize':
             self.calls.append((task,context))
             return {'summary':'覆盖登录正常路径；请按实际环境执行并复核。'}
@@ -39,6 +49,13 @@ def test_hitp_gates_and_latest_scenario(tmp_path):
         artifact=client.get('/api/artifacts/'+run['interrupt']['artifact_id']).json()
         artifact['items'][0]['title']='人工修改后的场景'
         assert client.put('/api/artifacts/'+artifact['id'],json={'expected_revision':artifact['revision'],'items':artifact['items']}).status_code==200
+        client.post('/api/runs/'+run['id']+'/resume',json={'approved':True})
+        run=until(client,run)
+        assert run['interrupt']['type']=='case_draft_review',run
+        assert not any(t=='review_cases' for t,_ in model.calls)
+        client.post('/api/runs/'+run['id']+'/resume',json={'approved':True})
+        run=until(client,run)
+        assert run['interrupt']['type']=='case_result_review',run
         client.post('/api/runs/'+run['id']+'/resume',json={'approved':True})
         run=until(client,run)
         assert run['status']=='completed',run

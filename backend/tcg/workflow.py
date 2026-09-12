@@ -72,13 +72,28 @@ class WorkflowEngine(FlowEngine):
         async def boundary(state):
             rid=state['run_id'];run=self.store.run(rid);marker='boundary_'+name
             request=run.get('_boundary_requested')
+            input_key={'scenarios':'analysis_ref','cases':'scenario_ref','review':'cases_ref'}.get(name)
+            guarded_input=state.get(input_key) if input_key else None
+            change_message=None
+            if input_key:
+                from .workspace_changes import assert_current_inputs
+                try:
+                    assert_current_inputs(self.store,{**run,'interrupt':{
+                        'type':'workflow_paused','node':name,
+                        **({'artifact_id':guarded_input} if guarded_input else {})}})
+                except DomainError as exc:
+                    if exc.status!=409:raise
+                    change_message=str(exc)
+                    request={'reason':'reconcile'}
+                    self.store.update_run(rid,_boundary_requested=request)
             if not request and run.get('_boundary_node')!=marker:
                 return {'boundary_again':False}
             if run.get('_boundary_node')!=marker:
                 run=self.store.update_run(rid,_boundary_node=marker,
                     _boundary_reason=(request or {}).get('reason','write'))
             response=interrupt({'type':'workflow_paused','node':name,'reason':run.get('_boundary_reason','write'),
-                'message':'已在安全步骤边界暂停，已保存成果保留。'})
+                **({'artifact_id':guarded_input} if guarded_input else {}),
+                'message':change_message or '已在安全步骤边界暂停，已保存成果保留。'})
             current=self.store.run(rid)
             if current.get('_control_hold') and current.get('control_version',0)>response.get('_control_version',-1):
                 # A hold accepted after scheduling must reach a fresh guard
@@ -92,7 +107,7 @@ class WorkflowEngine(FlowEngine):
     def stage(self, run_id, stage):
         super().stage(run_id,stage)
         names={'routing':'识别本次任务','input_check':'检查资料用途','requirement_analysis':'理解需求与业务图',
-            'applying_clarification':'保存澄清，沿用已有理解','strategy_review':'等待确认理解与方案',
+            'applying_clarification':'采用澄清并更新需求理解','strategy_review':'等待确认理解与方案',
             'scenario_generation':'生成测试场景','case_generation':'生成测试用例','case_review':'评审并优化用例',
             'scenario_review':'等待确认测试场景','case_draft_review':'等待确认用例草稿','case_result_review':'等待确认评审结果',
             'learn_template':'读取 Excel 格式建议','modify':'修改选定结果','query':'回答你的问题','summarizing':'整理本轮总结'}
@@ -451,11 +466,8 @@ class WorkflowEngine(FlowEngine):
             share_clarification(self.store,saved['id'],run['project_id'])
         self.store.update_run(rid,_source_ids=list(dict.fromkeys(run['_source_ids']+[saved['id']])),_source_roles={**run['_source_roles'],saved['id']:'clarification'})
         artifact=self.store.get('artifact',state['analysis_ref'])
-        report={**artifact.get('report',{}),'clarification':answer,'questions':[],'question_suggestions':[],
-                'clarification_note':'已保存用户补充，场景与用例生成将结合原需求和此补充；没有重新生成需求理解。',
-                'previous_questions':state['clarification_questions']}
-        artifact=self.store.revise_artifact(artifact['id'],artifact['revision'],artifact['items'],
-            'apply_clarification',rid,'v7:clarification_applied',report=report)
+        from .requirement_refresh import refresh_clarification
+        artifact=await refresh_clarification(self,rid,artifact,saved['id'],answer)
         self.trace('clarification.applied',rid,artifact_id=artifact['id'],revision=artifact['revision'],source_id=saved['id'])
         return {'analysis_ref':artifact['id'],'output_ref':artifact['id']}
 

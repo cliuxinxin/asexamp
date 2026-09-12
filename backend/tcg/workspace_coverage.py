@@ -276,7 +276,9 @@ def workspace_context(store, artifact, case_artifact_id=None):
                 item['linked'] = True
         if len(children) > 1:
             coverage['notes'].append('存在多个用例成果分支；当前仅统计所选的一个分支，未累加重复生成的用例。')
-    stale_analysis = bool(analysis and scenarios and lineage(scenarios).get('analysis_revision') != analysis['revision'])
+    from .artifact_actions import changed_requirement_ids
+    changed_requirements = changed_requirement_ids(store, analysis, scenarios) if analysis and scenarios else []
+    stale_analysis = bool(changed_requirements)
     changes = changed_scenario_ids(store, scenarios, cases) if scenarios and cases else []
     if stale_analysis:
         coverage['notes'].append('需求成果已更新，当前场景仍关联旧版本，请检查并联动更新。')
@@ -292,6 +294,7 @@ def workspace_context(store, artifact, case_artifact_id=None):
             'related_artifacts': related, 'coverage': coverage, 'sources': sources,
             'lineage': copy.deepcopy(lineage(artifact)),
             'stale': {'analysis': stale_analysis, 'scenarios': bool(changes),
+                      'changed_requirement_ids': changed_requirements,
                       'changed_scenario_ids': changes},
             'analysis_artifact_id': analysis['id'] if analysis else None,
             'scenario_artifact_id': scenarios['id'] if scenarios else None,

@@ -69,6 +69,8 @@ def refresh_confirmation(store, artifact):
 
 def validate_confirmation(store, run, response):
     """Old direct clients may omit bindings; supplied tokens are always checked."""
+    from .workspace_changes import assert_current_inputs
+    assert_current_inputs(store, run)
     if response.get('interrupt_id') is not None and response['interrupt_id'] != run.get('_interrupt_id'):
         raise DomainError('确认节点已改变，请刷新当前结果后确认', 409)
     if response.get('expected_control_version') is not None and response['expected_control_version'] != run.get('control_version', 0):

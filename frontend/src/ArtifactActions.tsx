@@ -9,7 +9,7 @@ type Action='estimate'|'explain'|'modify'|'sync';
 const names:Record<Action,string>={estimate:'估算用例数量',explain:'解释或总结用例',modify:'AI 微调',sync:'同步关联用例'};
 const presets=[['步骤更清楚','只优化步骤的表达，使每一步操作明确、可执行，并对应可验证的预期结果；不新增需求规则。'],['检查边界条件','根据已有需求检查选中条目的边界条件，仅修正有依据的遗漏；不臆造阈值。'],['统一术语','根据已有需求统一术语和表述，保留业务含义、编号、引用及已有人工填写内容。']];
 
-export function ArtifactActions({artifact,selected,onChanged,onSaved,syncRequest=0}:{artifact:Artifact;selected:string[];onChanged:()=>void;onSaved?:(artifacts:Artifact[])=>void;syncRequest?:number}){
+export function ArtifactActions({artifact,selected,onChanged,onSaved,syncRequest=0,centralized=false}:{centralized?:boolean;artifact:Artifact;selected:string[];onChanged:()=>void;onSaved?:(artifacts:Artifact[])=>void;syncRequest?:number}){
  const command=useConversationCommand();
  const [action,setAction]=useState<Action>();const [instruction,setInstruction]=useState('');const [scope,setScope]=useState<string[]>([]);
  const [workspace,setWorkspace]=useState<Json>();const [showSources,setShowSources]=useState(false);const [sourceIds,setSourceIds]=useState<string[]>([]);const [targets,setTargets]=useState<string[]>([]);const [proposal,setProposal]=useState<Json>();const [originals,setOriginals]=useState<Record<string,Artifact>>({});
@@ -27,6 +27,7 @@ export function ArtifactActions({artifact,selected,onChanged,onSaved,syncRequest
    const name=action==='estimate'?'artifact.estimate':action==='explain'?'artifact.analyze':action==='sync'?'artifact.sync_related':'artifact.preview';
    const result=await command({name,arguments:{instruction,...(action==='modify'?{action:'modify'}:{}),...(scope.length?{selected_ids:scope}:{}),...(action!=='estimate'&&sourceIds.length?{source_ids:sourceIds}:{}),...(action==='sync'?{related_artifact_ids:targets,preview:true}:{})}},instruction,artifact);
    const difference=result.parts?.find(part=>part.type==='diff');const answer=result.parts?.find(part=>part.type==='answer');const estimate=result.parts?.find(part=>part.type==='estimate');
+   if(centralized&&difference?.type==='diff'&&difference.proposal_id){if(token===seq.current){setAction(undefined);onChanged();}return;}
    const value={id:difference?.type==='diff'?difference.proposal_id:undefined,summary:result.message,changes:difference?.type==='diff'?difference.changes:[],answer:answer?.type==='answer'?answer.text:undefined,refs:answer?.type==='answer'?answer.refs:[],estimate:estimate?.type==='estimate'?estimate.data:undefined};
    const previous:Record<string,Artifact>={[artifact.id]:artifact};
    await Promise.all(value.changes.filter((change:Json)=>!change.before_items&&!previous[change.artifact_id]).map(async(change:Json)=>{previous[change.artifact_id]=await api<Artifact>('/artifacts/'+change.artifact_id+'/revisions/'+change.expected_revision);}));

@@ -91,16 +91,14 @@ test('gate chat shortcuts prepare a scoped draft without sending or continuing',
  assert.equal(posts.length,0);
 });
 
-test('reopening a human task hydrates both mode controls, locks them, and preserves that mode in chat requests',async()=>{
+test('reopening a human task hydrates the single settings mode control, locks it, and preserves that mode in chat requests',async()=>{
  const {posts}=fixture();render(<App/>);
+ fireEvent.click(await screen.findByRole('button',{name:'任务设置'}));
  const select=await screen.findByLabelText('运行模式');
  await waitFor(()=>assert.equal((select as HTMLSelectElement).value,'hitp'));
  assert.equal(select.hasAttribute('disabled'),true);
- fireEvent.click(screen.getByRole('button',{name:/本次方案/}));
- const human=screen.getByLabelText('人工确认关键节点') as HTMLInputElement;
- assert.equal(human.checked,true);assert.equal(human.disabled,true);
- const auto=screen.getByRole('radio',{name:'自动执行'}) as HTMLInputElement;
- assert.equal(auto.checked,false);assert.equal(auto.disabled,true);
+ assert.equal(screen.getAllByLabelText('运行模式').length,1);
+ assert.equal(screen.queryByRole('radio',{name:'自动执行'}),null);
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'只解释当前场景，不继续'}});
  fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
  await waitFor(()=>assert.equal(posts.length,1));

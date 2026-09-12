@@ -84,7 +84,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.7.1', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='2.8.0', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -143,7 +143,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.7.1', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '2.8.0', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -351,7 +351,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.7.1', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '2.8.0', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -580,9 +580,11 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     from .conversation import register_routes as register_conversation_routes
     from .conversation_workflow import register_routes as register_draft_routes
     from .conversation_project import register_routes as register_conversation_project_routes
+    from .conversation_workspace import register_routes as register_workspace_routes
     register_conversation_routes(app)
     register_draft_routes(app)
     register_conversation_project_routes(app)
+    register_workspace_routes(app)
 
     @app.get('/api/chats/{chat_id}/turns/{turn_id}/contexts')
     def turn_contexts(chat_id: str, turn_id: str):

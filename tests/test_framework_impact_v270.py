@@ -135,5 +135,8 @@ async def test_interrupted_update_reuses_completed_impact_partition_receipts(tmp
         calls=len(model.calls)
         repeated=await execute(store,model,chat,'project.update_from_sources',args,command_id)
         assert repeated==result and len(model.calls)==calls
-        assert store.revisions(analysis['id'])==before
+        revisions=store.revisions(analysis['id'])
+        assert revisions[1:]==before
+        assert revisions[0]['diff']=={'added':[],'updated':[],'deleted':[]}
+        assert new['id'] in store.get('artifact',analysis['id'])['_source_ids']
     finally:store.close()
