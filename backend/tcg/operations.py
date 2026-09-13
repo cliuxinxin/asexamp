@@ -1,9 +1,24 @@
 """Single short-transaction artifact commit boundary for Run and Turn callers."""
 import copy
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from . import dependencies as deps
 from .schemas import DomainError, validate_items
+
+
+_native = ContextVar('native_artifact_write', default=False)
+
+
+@contextmanager
+def native_writes():
+    """Keep data commits independent of deprecated workflow side effects."""
+    token = _native.set(True)
+    try:
+        yield
+    finally:
+        _native.reset(token)
 
 
 def cancel_command(store, command_id):
@@ -53,7 +68,6 @@ def _save(store, value, reason, diff, command_id, run_id):
 
 def create_artifact(store, run_id, key, kind, title, items, report=None, *, command_id=None, dependencies=None, provenance=None):
     from .storage import now, uid
-    from .workspace_coverage import creation_report
     command_id = command_id or 'artifact:' + run_id + ':' + key
     with store.transaction():
         receipt = _receipt(store, command_id, run_id=run_id)
@@ -77,7 +91,8 @@ def create_artifact(store, run_id, key, kind, title, items, report=None, *, comm
                  'title': title, 'revision': 1, 'items': copy.deepcopy(items), 'created_at': now(),
                  '_source_ids': run['_source_ids'], '_source_roles': run.get('_source_roles', {}),
                  '_profile': run['_profile'], '_visible': False}
-        generated_report = creation_report(store, run, kind, report)
+        generated_report = copy.deepcopy(report or {})
+        value['_runtime'] = 'native'
         if report is not None or generated_report:
             value['report'] = generated_report
         if provenance is None:
@@ -109,8 +124,6 @@ def revise_artifact(store, artifact_id, expected_revision, items, reason='manual
                 if cached:
                     return store.revision(artifact_id, cached.get('revision', expected_revision + 1))
         previous = store.get('artifact', artifact_id)
-        if reason != 'workspace_action' and getattr(store, '_workspace_action_tokens', {}).get(previous['chat_id']):
-            raise DomainError('项目成果正在预览或应用修改，请稍候', 409)
         if previous['revision'] != expected_revision:
             raise DomainError('Artifact 已更新，请刷新后重试', 409)
         if dependencies is not None:
@@ -147,9 +160,7 @@ def revise_artifact(store, artifact_id, expected_revision, items, reason='manual
                 'updated': [i for i in after if i in before and before[i] != after[i]]}
         result = {**previous, 'items': copy.deepcopy(items), 'revision': expected_revision + 1,
                   '_source_ids': sources, '_source_roles': roles}
-        if fields is None and previous.get('report'):
-            from .agent_contracts import refreshed_report
-            result['report'] = refreshed_report(previous['type'], items, previous['report'], evidence)
+        result['_runtime'] = 'native'
         if report is not None:
             if not isinstance(report, dict):
                 raise DomainError('分析报告必须为对象')
@@ -184,11 +195,6 @@ def revise_artifact(store, artifact_id, expected_revision, items, reason='manual
         if dependencies is not None:
             result['_write_dependencies'] = copy.deepcopy(dependencies)
         result = _save(store, result, reason, diff, command_id, run_id)
-        from .workflow_bindings import refresh_confirmation
-        refresh_confirmation(store, result)
-        if reason != 'workspace_action':
-            from .artifact_actions import rebind_waiting_runs
-            rebind_waiting_runs(store, [result], source_ids=source_ids, source_roles=source_roles)
         if cache_key:
             store.cache_set(run_id, cache_key, {'id': artifact_id, 'revision': result['revision']})
         return result

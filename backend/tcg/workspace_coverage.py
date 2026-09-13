@@ -116,6 +116,90 @@ def _revision(store, artifact_id, revision):
         return None
 
 
+def _parent_snapshot(store, artifact, parent_type, parent_id=None, child_id=None):
+    prefix = 'scenario' if parent_type == 'scenarios' else 'analysis'
+    source = lineage(artifact)
+    revision = (source.get(prefix + '_item_revisions') or {}).get(child_id,
+        (source.get(prefix + '_revisions') or {}).get(parent_id, source.get(prefix + '_revision')))
+    parent = _revision(store, source.get(prefix + '_artifact_id'), revision)
+    return parent if parent and parent.get('type') == parent_type and _same_scope(parent, artifact) else None
+
+
+def _row_evidence(store, artifact, row):
+    refs = set(row.get('refs', []))
+    versions = {}
+    for source in (artifact.get('_dependencies') or {}).get('sources', []):
+        versions[source['id']] = max(source['version'], versions.get(source['id'], 0))
+    result = []
+    for sid in sorted({ref.split('#', 1)[0] for ref in refs}):
+        try:
+            chunks = store.evidence_version(sid, versions[sid], artifact.get('_source_roles', {}).get(sid)) if sid in versions else store.evidence([sid], artifact.get('_source_roles'))
+            result.extend({**e, 'evidence_basis': 'historical_snapshot' if sid in versions else 'current_unversioned'}
+                          for e in chunks if e['id'] in refs and e.get('role') != 'example')
+        except DomainError:
+            continue  # Missing exact evidence is never replaced with a different version.
+    return result
+
+
+def lineage_rows(store, artifact):
+    """Exact per-row ancestry, including mixed revision partial synchronization."""
+    result = []
+    for row in artifact['items']:
+        linked = {'item_id': row['id'], 'scenario': None, 'requirements': [], 'status': 'linked'}
+        current, current_row = artifact, row
+        if artifact['type'] == 'cases':
+            current = _parent_snapshot(store, artifact, 'scenarios', row.get('scenario_id'), row['id'])
+            current_row = next((r for r in current['items'] if r['id'] == row.get('scenario_id')), None) if current else None
+            if current_row:
+                linked['scenario'] = {'artifact_id': current['id'], 'revision': current['revision'],
+                    'item': copy.deepcopy(current_row), 'evidence': _row_evidence(store, current, current_row)}
+            else:
+                linked['status'] = 'missing_parent'
+        if current and current_row and current['type'] == 'scenarios':
+            ids = current_row.get('requirement_ids', [])
+            if not ids:
+                linked['status'] = 'missing_parent'
+            for rid in ids:
+                analysis = _parent_snapshot(store, current, 'analysis', rid, current_row['id'])
+                requirement = next((r for r in analysis['items'] if r['id'] == rid), None) if analysis else None
+                if requirement:
+                    linked['requirements'].append({'artifact_id': analysis['id'], 'revision': analysis['revision'],
+                        'item': copy.deepcopy(requirement), 'evidence': _row_evidence(store, analysis, requirement)})
+                else:
+                    linked['status'] = 'missing_parent'
+        parents = ([linked['scenario']] if linked['scenario'] else []) + linked['requirements']
+        linked['stale'] = linked['status'] == 'missing_parent'
+        for parent in parents:
+            head = _get(store, parent['artifact_id'])
+            latest = next((r for r in head['items'] if r['id'] == parent['item']['id']), None) if head else None
+            parent['stale'] = latest != parent['item']
+            linked['stale'] = linked['stale'] or parent['stale']
+        result.append(linked)
+    return result
+
+
+def source_discrepancies(store, artifact, *, drafts=None, historical=False):
+    """Resolve only explicit saved evidence on every named parent row."""
+    result = copy.deepcopy((artifact.get('report') or {}).get('upstream_discrepancies', []))
+    if historical:
+        return result
+    for value in result:
+        refs = set(value.get('refs', []))
+        resolved = bool(value.get('parents'))
+        for parent in value.get('parents', []):
+            target = (drafts or {}).get(parent['artifact_id']) or _get(store, parent['artifact_id'])
+            rows = {r['id']: r for r in (target or {}).get('items', [])}
+            matches = target and _same_scope(target, artifact) and all(
+                pid in rows and refs <= set(rows[pid].get('refs', [])) for pid in parent.get('item_ids', []))
+            if matches:
+                parent['resolved_revision'] = target['revision']
+            else:
+                parent.pop('resolved_revision', None)
+            resolved = resolved and bool(matches)
+        value['status'] = 'resolved' if resolved else 'pending'
+    return result
+
+
 def changed_scenario_ids(store, scenario_artifact, case_artifact):
     """Return changed/new/deleted IDs against the exact generation/sync snapshot."""
     source = lineage(case_artifact)
@@ -132,6 +216,17 @@ def changed_scenario_ids(store, scenario_artifact, case_artifact):
     revisions = {}
     changed = []
     for item_id in sorted(ids):
+        dependents = [r for r in case_artifact['items'] if r.get('scenario_id') == item_id]
+        row_versions = source.get('scenario_item_revisions') or {}
+        if row_versions and dependents and any(r.get('id') in row_versions for r in dependents):
+            for row in dependents:
+                version = row_versions.get(row['id'], per_item.get(item_id, source.get('scenario_revision')))
+                old = _revision(store, scenario_artifact['id'], version)
+                old_row = next((r for r in old['items'] if r['id'] == item_id), None) if old else None
+                if not old or old_row != current.get(item_id):
+                    changed.append(item_id)
+                    break
+            continue
         version = per_item.get(item_id)
         if version is not None:
             if type(version) is not int or version < 1:
@@ -148,7 +243,7 @@ def changed_scenario_ids(store, scenario_artifact, case_artifact):
     return changed
 
 
-def synced_case_report(store, scenario_artifact, case_artifact, scenario_ids):
+def synced_case_report(store, scenario_artifact, case_artifact, scenario_ids, item_ids=None):
     """Advance only the synchronized scenario versions; retain all other drift."""
     selected = set(scenario_ids)
     known = {item['id'] for item in scenario_artifact['items']}
@@ -160,13 +255,26 @@ def synced_case_report(store, scenario_artifact, case_artifact, scenario_ids):
     report = copy.deepcopy(case_artifact.get('report') or {})
     new = copy.deepcopy(source) if source.get('scenario_artifact_id') == scenario_artifact['id'] else {}
     new['scenario_artifact_id'] = scenario_artifact['id']
-    if known <= selected:
+    if item_ids is not None:
+        versions = dict(new.get('scenario_item_revisions') or {})
+        versions.update({item_id: scenario_artifact['revision'] for item_id in item_ids})
+        new['scenario_item_revisions'] = versions
+    elif known <= selected:
         new['scenario_revision'] = scenario_artifact['revision']
         new.pop('scenario_revisions', None)
+        new.pop('scenario_item_revisions', None)
     else:
         versions = dict(new.get('scenario_revisions') or {})
         versions.update({item_id: scenario_artifact['revision'] for item_id in selected})
         new['scenario_revisions'] = versions
+        row_versions = dict(new.get('scenario_item_revisions') or {})
+        for row in case_artifact['items']:
+            if row.get('scenario_id') in selected:
+                row_versions.pop(row.get('id'), None)
+        if row_versions:
+            new['scenario_item_revisions'] = row_versions
+        else:
+            new.pop('scenario_item_revisions', None)
     report['lineage'] = new
     return report
 
@@ -276,7 +384,7 @@ def workspace_context(store, artifact, case_artifact_id=None):
                 item['linked'] = True
         if len(children) > 1:
             coverage['notes'].append('存在多个用例成果分支；当前仅统计所选的一个分支，未累加重复生成的用例。')
-    from .artifact_actions import changed_requirement_ids
+    from .artifact_read import changed_requirement_ids
     changed_requirements = changed_requirement_ids(store, analysis, scenarios) if analysis and scenarios else []
     stale_analysis = bool(changed_requirements)
     changes = changed_scenario_ids(store, scenarios, cases) if scenarios and cases else []
@@ -290,9 +398,23 @@ def workspace_context(store, artifact, case_artifact_id=None):
                for source in store.list('source', chat_id=artifact['chat_id'])
                if _same_scope(source, artifact) and source.get('_active')
                and source.get('role') != 'example' and source['id'] not in used_source_ids]
+    from .storage import public
+    exact_scenarios = _parent_snapshot(store, artifact, 'scenarios') if artifact['type'] == 'cases' else artifact if artifact['type'] == 'scenarios' else None
+    exact_analysis = artifact if artifact['type'] == 'analysis' else _parent_snapshot(store, exact_scenarios, 'analysis') if exact_scenarios else None
+    historical = store.get('artifact', artifact['id'])['revision'] != artifact['revision']
+    from .artifact_read import item_diff
+    from .artifact_read import review_details
+    previous = _revision(store, artifact['id'], artifact['revision'] - 1)
+    revision_diff = item_diff(previous['items'] if previous else [], artifact['items'])
     return {'artifact_id': artifact['id'], 'revision': artifact['revision'],
             'related_artifacts': related, 'coverage': coverage, 'sources': sources,
             'lineage': copy.deepcopy(lineage(artifact)),
+            'parents': {'analysis': public(exact_analysis) if exact_analysis else None,
+                        'scenarios': public(exact_scenarios) if exact_scenarios else None},
+            'lineage_rows': lineage_rows(store, artifact), 'revision_diff': revision_diff,
+            'review': review_details(store, artifact if artifact['type'] == 'cases' else None),
+            'source_adoptions': copy.deepcopy(artifact.get('report', {}).get('source_adoptions', [])),
+            'upstream_discrepancies': source_discrepancies(store, artifact, historical=historical),
             'stale': {'analysis': stale_analysis, 'scenarios': bool(changes),
                       'changed_requirement_ids': changed_requirements,
                       'changed_scenario_ids': changes},
@@ -303,9 +425,11 @@ def workspace_context(store, artifact, case_artifact_id=None):
 
 def register_coverage_routes(app):
     @app.get('/api/artifacts/{artifact_id}/workspace')
-    def artifact_workspace(artifact_id: str, case_artifact_id: str | None = None):
+    def artifact_workspace(artifact_id: str, case_artifact_id: str | None = None, revision: int | None = None):
         store = app.state.store
         artifact = store.get('artifact', artifact_id)
         if not artifact.get('_visible'):
             raise DomainError('未找到已发布的 Artifact', 404)
+        if revision is not None:
+            artifact = store.revision(artifact_id, revision)
         return workspace_context(store, artifact, case_artifact_id)

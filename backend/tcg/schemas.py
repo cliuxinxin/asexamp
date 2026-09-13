@@ -116,7 +116,7 @@ class SettingsInput(BaseModel):
     clear_headers: bool = False
     auth_mode: Literal['bearer', 'headers'] = 'bearer'
     timeout_seconds: int = Field(default=3600, ge=5, le=3600)
-    context_window: int = Field(default=32768, ge=1)
+    context_window: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=8192, ge=1)
     output_limit_mode: Literal['request', 'server'] = 'request'
     server_output_tokens: int | None = Field(default=None, ge=1)
@@ -238,35 +238,3 @@ def validate_items(kind, items, evidence, scenario_ids=None):
                     if not isinstance(step.get(field), str):
                         raise OutputValidationError('步骤字段必须为字符串', step_path + '.' + field, 'string', step.get(field, MISSING))
     return items
-
-
-def apply_operations(items, operations, selected_ids=None):
-    if not isinstance(operations, list):
-        raise OutputValidationError('operations 必须为数组', 'operations', 'array', operations)
-    result = {item['id']: dict(item) for item in items}
-    for index, operation in enumerate(operations):
-        path = f'operations[{index}]'
-        if not isinstance(operation, dict):
-            raise OutputValidationError('修改操作必须为对象', path, 'object', operation)
-        op, item_id = operation.get('op'), operation.get('id')
-        item = operation.get('item')
-        if not isinstance(op, str) or op not in ('add', 'update', 'delete'):
-            raise OutputValidationError('仅支持 add/update/delete 操作', path + '.op', 'add|update|delete', op, 'invalid_operation')
-        if op in ('update', 'delete') and (not isinstance(item_id, str) or not item_id):
-            raise OutputValidationError('修改目标 ID 必须为非空字符串', path + '.id', 'nonempty_string', operation.get('id', MISSING))
-        if op == 'add':
-            if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or item['id'] in result:
-                raise OutputValidationError('ADD 必须使用新的条目 ID', path + '.item', 'object_with_new_id', item, 'invalid_add')
-            result[item['id']] = item
-        elif op in ('update', 'delete'):
-            if item_id not in result:
-                raise OutputValidationError('修改目标 ID 不存在', path + '.id', 'existing_item_id', item_id, 'unknown_target')
-            if selected_ids is not None and item_id not in selected_ids:
-                raise OutputValidationError('修改超出所选条目范围', path + '.id', 'selected_item_id', item_id, 'unselected_target')
-            if op == 'delete':
-                del result[item_id]
-            else:
-                if not isinstance(item, dict) or item.get('id', item_id) != item_id:
-                    raise OutputValidationError('UPDATE 必须为对象且不能修改稳定 ID', path + '.item', 'object_with_unchanged_id', item, 'invalid_update')
-                result[item_id] = {**result[item_id], **item, 'id': item_id}
-    return list(result.values())

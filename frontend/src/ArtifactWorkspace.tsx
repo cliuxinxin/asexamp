@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
 import type {ReactNode} from 'react';
-import {Check,FileText,RefreshCw,Sparkles,Upload} from 'lucide-react';
+import {Check,ChevronDown,ChevronUp,Maximize2,Minimize2,RefreshCw} from 'lucide-react';
 import {ArtifactCard} from './ArtifactCard';
 import {ChangePreview} from './ArtifactActions';
 import {api,errText} from './api';
@@ -16,9 +16,11 @@ const phaseNames:Record<Phase,string>={analysis:'需求理解',scenarios:'测试
 const statusNames:Record<string,string>={current:'已保存',stale:'待更新',missing:'未开始',running:'处理中',waiting:'待确认',completed:'已完成',needs_review:'需核对'};
 const typeNames:Record<string,string>={analysis:'需求',scenarios:'场景',cases:'用例'};
 
-export function ArtifactWorkspace({artifact,chatId='',refreshKey,onTarget,onChanged,onUpload,onGenerate,onSelectArtifact,sourceCount,running,currentRun,renderRun}:{artifact?:Artifact;chatId?:string;refreshKey:string;onTarget:(artifact:Artifact,ids:string[])=>void;onChanged:()=>void;onUpload:()=>void;onGenerate:(content?:string,intent?:string,args?:Json)=>void;onSelectArtifact?:(id:string,manual?:boolean)=>void;sourceCount:number;running:boolean;currentRun?:Run;renderRun?:(hideActions:boolean)=>ReactNode}){
+export function ArtifactWorkspace({chatOnly=false,artifact,chatId='',refreshKey,onTarget,onChanged,onUpload,onGenerate,onSelectArtifact,sourceCount,running,currentRun,renderRun,focused=false,onFocusChange,onEditingChange,selectionResetKey=0,onSelectionChange}:{chatOnly?:boolean;onSelectionChange?:(artifact:Artifact,ids:string[],viewOrder:string[])=>void;selectionResetKey?:number;onEditingChange?:(editing:boolean)=>void;focused?:boolean;onFocusChange?:(focused:boolean)=>void;artifact?:Artifact;chatId?:string;refreshKey:string;onTarget:(artifact:Artifact,ids:string[],viewOrder?:string[])=>void;onChanged:()=>void;onUpload:()=>void;onGenerate:(content?:string,intent?:string,args?:Json)=>void;onSelectArtifact?:(id:string,manual?:boolean)=>void;sourceCount:number;running:boolean;currentRun?:Run;renderRun?:(hideActions:boolean)=>ReactNode}){
  const command=useConversationCommand();
  const [state,setState]=useState<WorkspaceState>();
+ const [expanded,setExpanded]=useState(true);
+ useEffect(()=>setExpanded(true),[artifact?.id]);
  const [activePhase,setActivePhase]=useState<Phase>((artifact?.type as Phase)||'analysis');
  const [loading,setLoading]=useState(false),[working,setWorking]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[epoch,setEpoch]=useState(0);
  const [localProposal,setLocalProposal]=useState<Proposal>();
@@ -45,7 +47,8 @@ export function ArtifactWorkspace({artifact,chatId='',refreshKey,onTarget,onChan
   Promise.all(proposal.changes.filter(change=>!change.before_items).map(async change=>[change.artifact_id,await api<Artifact>('/artifacts/'+encodeURIComponent(change.artifact_id)+'/revisions/'+change.expected_revision)] as const)).then(rows=>{if(alive)setOriginals(Object.fromEntries(rows));}).catch(e=>{if(alive)setError(errText(e));});
   return()=>{alive=false;};
  },[proposal?.id]);
- const hasImpact=state?.impact?.status==='pending';
+ const sourceUploadOnly=state?.impact?.status==='pending'&&!!state.impact.source_ids?.length&&!state.impact.affected?.length;
+ const hasImpact=state?.impact?.status==='pending'&&!sourceUploadOnly;
  const action=state?.next_action;
  const processing=working||!!currentRun&&['queued','running'].includes(currentRun.status);
  const branchHasGate=!!state&&(Object.hasOwn(state,'current_gate')?!!state.current_gate:!currentRun?.interrupt?.artifact_id||state.stages.some(stage=>stage.artifact_id===currentRun.interrupt?.artifact_id));
@@ -79,27 +82,24 @@ export function ArtifactWorkspace({artifact,chatId='',refreshKey,onTarget,onChan
   else if(action.kind==='confirm')void perform('workflow.continue',action.arguments,action.label);
  }
  const hideRunActions=!!proposal||hasImpact||loading||working;
- const showAction=!proposal&&!needsInput&&!processing&&action&&['reconcile','generate'].includes(action.kind);
- return <section className="results-workspace unified-workspace" aria-label="用例工作区">
-  <header className="results-header"><div><p className="eyebrow">TEST DESIGN WORKSPACE</p><h1>测试设计工作区</h1><p className="muted">理解需求，完善场景，持续更新用例。</p></div><span className="version-pill">2.8.0</span></header>
+ const showAction=!proposal&&!needsInput&&!processing&&!sourceUploadOnly&&action&&['reconcile','generate'].includes(action.kind);
+ if(!artifact&&!currentRun&&!proposal)return null;
+ return <section className="results-workspace unified-workspace conversation-artifact" aria-label="用例工作区">
+  <header className="results-header"><div><p className="eyebrow">{currentRun?.status==='waiting'?'当前待处理':'当前成果'}</p><h2>{artifact?phaseNames[activePhase]:'正在整理测试设计'}</h2>{artifact&&<p className="muted">v{artifact.revision} · {artifact.items.length} 条{phaseNames[artifact.type as Phase]??'内容'}</p>}</div><div className="artifact-view-actions">{artifact&&<button aria-expanded={expanded} aria-controls="active-artifact-content" onClick={()=>setExpanded(value=>!value)}>{expanded?<ChevronUp size={15}/>:<ChevronDown size={15}/>} {expanded?'收起成果':'展开成果'}</button>}{artifact&&onFocusChange&&<button onClick={()=>{setExpanded(true);onFocusChange(!focused);}}>{focused?<Minimize2 size={15}/>:<Maximize2 size={15}/>} {focused?'返回对话':'专注查看成果'}</button>}</div></header>
   <nav className="phase-navigator" aria-label="生成流程">{stages.map((stage,index)=><button key={stage.key} aria-current={activePhase===stage.key?'step':undefined} disabled={!stage.artifact_id} onClick={()=>{setActivePhase(stage.key);requestedPhase.current=stage.artifact_id&&stage.artifact_id!==artifact?.id?{key:stage.key,artifactId:stage.artifact_id}:undefined;if(stage.artifact_id&&stage.artifact_id!==artifact?.id)onSelectArtifact?.(stage.artifact_id);}} className={'phase-step '+(activePhase===stage.key?'active ':'')+stage.status}><span className="phase-number">{index+1}</span><span><strong>{stage.label}</strong><small>{statusNames[stage.status]??stage.status}{stage.artifact_id&&stage.key!=='review'?` · ${stage.count} 条`:''}</small></span></button>)}</nav>
   <div className="workspace-scroll">
    <section className={'workspace-next-action '+(hasImpact?'has-impact':'')} aria-label="下一步">
-    <div className="workspace-impact-heading"><div><p className="eyebrow">{proposal?'修改待应用':hasImpact?'变更影响':'当前进度'}</p><strong>{proposal?proposal.summary||'修改预览已准备好。':state?.impact?.summary||(artifact?'当前成果已保存。':'从一份需求开始。')}</strong>{hasImpact&&<p className="muted small-text">{currentRun?.status==='waiting'?'预览本分支全部受影响内容；应用后仍保留当前确认节点。':'预览本分支全部受影响内容，再应用到关联成果。'}</p>}</div>{showAction&&<button className="primary" disabled={blocked} onClick={next}>{working?<Spinner/>:<RefreshCw size={16}/>} {action.label}</button>}</div>
+    <div className="workspace-impact-heading"><div><p className="eyebrow">{proposal?'修改待应用':hasImpact?'变更影响':'当前进度'}</p><strong>{proposal?proposal.summary||'修改预览已准备好。':sourceUploadOnly?'新资料已上传，可以在对话中指定用途与更新对象。':state?.impact?.summary||(artifact?'当前成果已保存。':'正在整理当前需求。')}</strong>{hasImpact&&<p className="muted small-text">{chatOnly?'上游内容已变化，可以在聊天中指定要更新的场景或用例。':currentRun?.status==='waiting'?'预览本分支全部受影响内容；应用后仍保留当前确认节点。':'预览本分支全部受影响内容，再应用到关联成果。'}</p>}</div>{!chatOnly&&showAction&&<button className="primary" disabled={blocked} onClick={next}>{working?<Spinner/>:<RefreshCw size={16}/>} {action.label}</button>}</div>
     {!!state?.impact?.affected?.length&&<details className="impact-details"><summary>查看受影响范围</summary><ul>{state.impact.affected.map((item,index)=><li key={item.artifact_id+':'+index}><strong>{item.count} 条{typeNames[item.type]??'成果'}</strong> · {item.reason}{item.item_ids?.length?` · ${item.item_ids.join('、')}`:''}</li>)}</ul></details>}
-    {proposal&&<div className="workspace-proposal" aria-label="待应用修改"><details open><summary>查看修改明细</summary>{proposal.changes.map((change,index)=><ChangePreview key={change.artifact_id+':'+index} change={change} before={originals[change.artifact_id]}/>)}</details><div className="actions"><button className="primary" disabled={blocked} onClick={()=>void perform('artifact.apply',{proposal_id:proposal.id},'应用更新')}>{working?<Spinner/>:<Check size={16}/>}应用更新</button><button disabled={working} onClick={()=>void perform('artifact.discard',{proposal_id:proposal.id},'取消此次更新')}>取消此次更新</button></div></div>}
+    {proposal&&<div className="workspace-proposal" aria-label="待应用修改"><details open><summary>查看修改明细</summary>{proposal.changes.map((change,index)=><ChangePreview key={change.artifact_id+':'+index} change={change} before={originals[change.artifact_id]}/>)}</details>{chatOnly?<p className="muted small-text">可在聊天中说明是否采用或如何调整。</p>:<div className="actions"><button className="primary" disabled={blocked} onClick={()=>void perform('artifact.apply',{proposal_id:proposal.id},'应用更新')}>{working?<Spinner/>:<Check size={16}/>}应用更新</button><button disabled={working} onClick={()=>void perform('artifact.discard',{proposal_id:proposal.id},'取消此次更新')}>取消此次更新</button></div>}</div>}
     {working&&<p className="inline small-text" role="status"><Spinner/>正在处理本次修改…</p>}
     {notice&&!proposal&&<p className="small-text" role="status">{notice}</p>}
     <ErrorBox message={error}/>{error&&<button onClick={()=>{setError('');setEpoch(value=>value+1);}}>重新读取工作区</button>}
     {confirmationArtifact&&(confirmationArtifact!==artifact?.id||activePhase!==runPhase)&&<div className="workspace-gate-context"><span>{branchHasGate?'当前确认对象：':'另一个分支等待确认：'}{phaseNames[runPhase]}{currentRun?.artifact_revision??currentRun?.interrupt?.artifact_revision?` · v${currentRun?.artifact_revision??currentRun?.interrupt?.artifact_revision}`:''}</span><button onClick={()=>{setActivePhase(runPhase);onSelectArtifact?.(confirmationArtifact);}}>查看待确认成果</button></div>}
     {runVisible&&renderRun?.(hideRunActions)}
-    {!runVisible&&!proposal&&!needsInput&&action?.kind==='confirm'&&<button className="primary" disabled={blocked} onClick={next}>{action.label}</button>}
+    {!chatOnly&&!runVisible&&!proposal&&!needsInput&&action?.kind==='confirm'&&<button className="primary" disabled={blocked} onClick={next}>{action.label}</button>}
    </section>
-   <div className="results-body">{artifact?<ArtifactCard key={artifact.id} id={artifact.id} refreshKey={refreshKey} onTarget={onTarget} onChanged={onChanged} simplified reviewMode={activePhase==='review'}/>:<div className="intake-workspace">
-    <span className="intake-icon"><FileText size={28}/></span><h2>把需求变成测试设计</h2><p>上传需求文档，或在右侧描述业务。<br/>需求理解、场景和用例会保留在这里。</p>
-    <button className="upload-zone" disabled={running} onClick={onUpload}><Upload size={25}/><strong>{sourceCount?`已添加 ${sourceCount} 份资料，继续添加`:'添加需求文档'}</strong><span>DOCX · PDF · Markdown · TXT · Excel</span></button>
-    {!action&&<button className="primary" disabled={running||!sourceCount} onClick={()=>onGenerate('请分析当前需求资料。','review_requirement')}><Sparkles size={16}/>开始理解需求</button>}
-   </div>}</div>
+   {artifact&&<div className="results-body" id="active-artifact-content" hidden={!expanded}><ArtifactCard chatOnly={chatOnly} onSelectionChange={onSelectionChange} onEditingChange={onEditingChange} key={artifact.id+':'+selectionResetKey} id={artifact.id} refreshKey={refreshKey} onTarget={onTarget} onChanged={onChanged} simplified initialDetailsOpen={focused} reviewMode={activePhase==='review'}/></div>}
   </div>
  </section>;
 }

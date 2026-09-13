@@ -272,8 +272,6 @@ class Store:
     def create_run(self, chat_id, request):
         with self.transaction():
             chat = self.get('chat', chat_id)
-            if getattr(self, '_workspace_action_tokens', {}).get(chat_id):
-                raise DomainError('正在预览或应用项目修改，请稍候', 409)
             active = self.db.execute("SELECT id FROM runs WHERE chat_id=? AND status IN ('queued','running','waiting')", (chat_id,)).fetchone()
             if active:
                 raise DomainError('此对话已有运行中的任务，请先继续、取消或等待完成', 409)
@@ -282,7 +280,8 @@ class Store:
                 raise DomainError('Profile 不可跨项目使用')
             sources = request.get('source_ids')
             if sources is None:
-                sources = [s['id'] for s in self.list('source', chat_id=chat_id) if s['_active']]
+                sources = [s['id'] for s in self.list('source', chat_id=chat_id)
+                           if s['_active'] and s.get('status') != 'provisional']
                 from .project_context import shared_sources
                 sources = list(dict.fromkeys(sources + [s['id'] for s in shared_sources(self, chat['project_id'])]))
             if not isinstance(sources, list) or len(set(sources)) != len(sources):
@@ -321,7 +320,7 @@ class Store:
             # an operation on a historical artifact or a fresh generation.
             run['_history_total'] = len(history)
             run['_artifact_source_ids'] = artifact.get('_source_ids', []) if artifact else []
-            if request.get('experience') == 'reliable':
+            if request.get('experience') in ('reliable', 'native'):
                 depth = request.get('depth', 'auto')
                 depth = depth if depth in ('quick', 'standard', 'deep') else 'standard'
                 config = dict(profile['config'])
@@ -331,13 +330,15 @@ class Store:
                     config = profile_config({**config, **request['profile_override']})
                 if request.get('case_types'):
                     config['case_types'] = list(dict.fromkeys(request['case_types']))
-                run.update(experience='reliable', graph_version=7, pause_contract=2, _profile=config,
+                run.update(experience='native', runtime='native', graph_version=8, _profile=config,
                            _memory=[m for m in self.list('memory', project_id=chat['project_id']) if m.get('active', True)],
                            _source_roles={sid: self.get('source', sid)['role'] for sid in sources},
                            progress={'phase': 'queued', 'completed': 0, 'total': 0, 'label': '准备任务'})
-            if request.get('experience') == 'agent':
-                run.update(experience='agent', graph_version=2, _instruction_version=0, _applied_instruction_version=0, _instructions=[],
-                           agent={'depth': request.get('depth') if request.get('depth') in ('quick', 'standard', 'deep') else 'standard', 'rationale': '', 'plan': [], 'insights': [], 'pending_instructions': 0})
+                if request.get('experience') == 'native':
+                    run.update(experience='native', runtime='native', graph_version=8,
+                               _profile_version=profile['version'])
+                    run['_source_roles'] = {sid: chat.get('_source_roles', {}).get(sid, self.get('source', sid)['role']) for sid in sources}
+                    run.pop('_resume', None)
             self.db.execute('INSERT INTO runs VALUES(?,?,?,?,?)', (run_id, chat_id, chat['project_id'], 'queued', dump(run)))
             chat['updated_at'] = now()
             self.put('chat', chat)
@@ -410,11 +411,7 @@ class Store:
 
     def assert_running(self, run_id):
         run = self.run(run_id)
-        # A paused HITP artifact edit intentionally calls the model while the
-        # workflow remains waiting.  Its private token is the lease that keeps
-        # cache writes valid until the edit is saved or cancelled.
-        active_waiting_edit = run['status'] == 'waiting' and bool(run.get('_edit_token'))
-        if run['status'] not in ('queued', 'running') and not active_waiting_edit:
+        if run['status'] not in ('queued', 'running'):
             raise DomainError('任务状态已改变，拒绝过期结果', 409)
 
     def cache_get(self, run_id, key):
@@ -470,11 +467,13 @@ class Store:
             run = self.run(run_id)
             key = 'published:' + ':'.join(artifact_ids) + (':waiting' if waiting else ':final')
             if not self.cache_get(run_id, key):
+                artifact_revisions = {}
                 for artifact_id in artifact_ids:
                     value = self.get('artifact', artifact_id)
+                    artifact_revisions[artifact_id] = value['revision']
                     value['_visible'] = True
                     self.put('artifact', value)
-                metadata = {'run_id': run_id, 'artifact_ids': artifact_ids}
+                metadata = {'run_id': run_id, 'artifact_ids': artifact_ids, 'artifact_revisions': artifact_revisions}
                 if proposal is not None:
                     metadata['proposal'] = proposal
                 self.put('message', {'id': uid('msg_'), 'project_id': run['project_id'], 'chat_id': run['chat_id'], 'role': 'assistant', 'content': content, 'created_at': now(), 'metadata': metadata})

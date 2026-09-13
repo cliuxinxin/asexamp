@@ -9,7 +9,7 @@ import {api,errText} from './api';
 import {ErrorBox} from './ui';
 import type {Artifact,Json,TurnResponse} from './types';
 
-export function ConversationParts({response,refreshKey,onTarget,onOpen,onChanged,compact=false}:{response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;compact?:boolean}){
+export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,onOpen,onChanged,compact=false}:{chatOnly?:boolean;response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;compact?:boolean}){
  return <div className="conversation-parts">{(response.parts??[]).map((part,index)=>{
   const key=response.id+':'+index;
   const value=part as Json;
@@ -18,13 +18,17 @@ export function ConversationParts({response,refreshKey,onTarget,onOpen,onChanged
    case 'estimate':return compact?<details key={key} className="receipt-details"><summary>查看用例数量估算</summary><ChatEstimate estimate={value.data as any}/></details>:<ChatEstimate key={key} estimate={value.data as any}/>;
    case 'artifact':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} revision={value.revision} readOnly refreshKey={refreshKey} onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
    case 'case_details':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} snapshot={{id:value.artifact_id,type:'cases',title:value.title??'用例步骤与预期',revision:value.revision,items:value.items}} readOnly initialDetailsOpen onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
-   case 'diff':return compact?<details key={key} className="receipt-details"><summary>修改预览 · 在工作区应用或放弃</summary><ConversationDiff proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged} readOnly/></details>:<ConversationDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged}/>;
+   case 'diff':return compact?<details key={key} className="receipt-details"><summary>修改预览 · 已记录</summary><ConversationDiff proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged} readOnly/></details>:<ConversationDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged} readOnly={chatOnly}/>;
    case 'coverage':return <WorkspaceCoverage key={key} artifactId="" revision={0} initialData={value.data} initialOpen={!compact}/>;
    case 'source_impact':return compact?<details key={key} className="receipt-details"><summary>资料影响 · {value.data.summary||'查看分析结果'}</summary><SourceImpact data={value.data}/></details>:<SourceImpact key={key} data={value.data}/>;
    case 'files':return <div key={key} className="turn-files" aria-label="导出文件">{value.files.map((file:Json,i:number)=>/^\/(?!\/)|^https?:\/\//.test(file.url)?<a key={i} className="text-accent" href={file.url} download={file.name}>{file.name}</a>:<span key={i}>{file.name}（下载地址不可用）</span>)}</div>;
-   case 'clarification_draft':return <ClarificationDraftEditor key={key} runId={value.draft.run_id} initialDraft={value.draft} refreshKey={refreshKey} onChanged={onChanged} summaryOnly/>;
+   case 'clarification_draft':return chatOnly?<details key={key} className="receipt-details"><summary>已记录的澄清答案</summary><p className="preserve">{value.draft.answer||'请按当前对话提示补充答案。'}</p></details>:<ClarificationDraftEditor key={key} runId={value.draft.run_id} initialDraft={value.draft} refreshKey={refreshKey} onChanged={onChanged} summaryOnly/>;
   }
- })}{response.status==='deferred'&&<p role="status" className="muted small-text">操作已登记，将在安全步骤边界处理。</p>}{(response.pending??[]).length>0&&<div className="turn-pending" aria-label="待确认事项">{response.pending.map((item,index)=><div key={item.id??index}><p>{item.message??item.question??item.title??'请明确本次操作的对象。'}</p>{Array.isArray(item.candidates)&&item.candidates.length>0&&<ol>{item.candidates.map((candidate:Json,candidateIndex:number)=><li key={candidate.id??candidateIndex}>{candidate.title??candidate.name??'未命名成果'} · {candidate.id}{candidate.revision!==undefined?` · v${candidate.revision}`:''}</li>)}</ol>}</div>)}</div>}</div>;
+ })}{response.status==='deferred'&&<p role="status" className="muted small-text">操作已登记，将在安全步骤边界处理。</p>}{(response.pending??[]).length>0&&(chatOnly?<details className="receipt-details" aria-label="历史对话提示"><summary>查看当时的提示</summary><PendingItems items={response.pending}/><p className="muted small-text">此处是历史记录，请以下方当前对话提示为准。</p></details>:<div className="turn-pending" aria-label="待确认事项"><PendingItems items={response.pending}/></div>)}</div>;
+}
+
+function PendingItems({items}:{items:Json[]}){
+ return <>{items.map((item,index)=><div key={item.id??index}><p>{item.message??item.question??item.title??'请明确本次操作的对象。'}</p>{Array.isArray(item.candidates)&&item.candidates.length>0&&<ol>{item.candidates.map((candidate:Json,candidateIndex:number)=><li key={candidate.id??candidateIndex}>{candidate.title??candidate.name??'未命名成果'} · {candidate.id}{candidate.revision!==undefined?` · v${candidate.revision}`:''}</li>)}</ol>}</div>)}</>;
 }
 
 function SourceImpact({data}:{data:Json}){

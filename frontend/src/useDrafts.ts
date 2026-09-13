@@ -1,6 +1,6 @@
 import {useRef,useState} from 'react';
 import type {Artifact} from './types';
-export type EditTarget={artifact:Artifact;ids:string[]};
+export type EditTarget={artifact:Artifact;ids:string[];viewOrder?:string[]};
 type Draft={text:string;version:number;asRequirement?:boolean;target?:EditTarget};
 export function useDrafts(key:string){
  const [drafts,setDrafts]=useState<Record<string,Draft>>({});
@@ -10,6 +10,6 @@ export function useDrafts(key:string){
  function setTarget(target:EditTarget|undefined){update(old=>({...old,[key]:{...old[key],text:old[key]?.text??'',target,version:(old[key]?.version??0)+1}}));}
  function setAsRequirement(asRequirement:boolean){update(old=>({...old,[key]:{...old[key],text:old[key]?.text??'',asRequirement,version:(old[key]?.version??0)+1}}));}
  function move(from:string,to:string){update(old=>{if(!old[from])return old;const next={...old,[to]:old[from]};delete next[from];return next;});}
- function clearSubmitted(sentKey:string,version:number){update(old=>old[sentKey]?.version===version?{...old,[sentKey]:{text:'',version:version+1}}:old);}
+ function clearSubmitted(sentKey:string,version:number,keepTarget=false){update(old=>old[sentKey]?.version===version?{...old,[sentKey]:{text:'',version:version+1,...(keepTarget?{target:old[sentKey].target}:{})}}:old);}
  return {content:drafts[key]?.text??'',target:drafts[key]?.target,asRequirement:drafts[key]?.asRequirement??false,setContent,setTarget,setAsRequirement,move,clearSubmitted,version:ref.current[key]?.version??0};
 }

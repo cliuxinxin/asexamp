@@ -1,4 +1,4 @@
-"""One conservative admission policy for planning and the final wire prompt."""
+"""Token diagnostics and output policy; input admission belongs to the server."""
 import hashlib
 import json
 import math
@@ -7,7 +7,7 @@ from pathlib import Path
 from .environment import runtime_value
 from .schemas import DomainError
 
-DEFAULT_WINDOW = 32768
+DEFAULT_WINDOW = 0
 DEFAULT_OUTPUT = 8192
 MARGIN = 512
 
@@ -29,13 +29,14 @@ def request_messages(task, context):
 def validate_capacity(settings):
     result = dict(settings)
     try:
-        for key, default in (('context_window', DEFAULT_WINDOW), ('output_tokens', DEFAULT_OUTPUT)):
+        # Retain the public field for saved-profile/API compatibility only. Old
+        # values must not reject input or override a provider's context window.
+        result['context_window'] = 0
+        for key, default in (('output_tokens', DEFAULT_OUTPUT),):
             value = result.get(key, default)
             if isinstance(value, bool) or str(value) != str(int(value)):
                 raise ValueError()
             result[key] = int(value)
-        if result['context_window'] == 0:
-            result['context_window'] = DEFAULT_WINDOW
         mode = result.get('output_limit_mode', 'request')
         if mode not in ('request', 'server'):
             raise ValueError()
@@ -46,10 +47,10 @@ def validate_capacity(settings):
             if isinstance(value, bool) or str(value) != str(int(value)):
                 raise ValueError()
             result['server_output_tokens'] = allowance = int(value)
-        if result['output_tokens'] < 1024 or allowance < 1024 or result['context_window'] < 4096 or allowance >= result['context_window'] - 1024:
+        if result['output_tokens'] < 1024 or allowance < 1024:
             raise ValueError()
     except (ValueError, TypeError):
-        raise DomainError('模型容量配置无效：上下文至少 4096 tokens，输出至少 1024，须保留超过 1024 tokens 输入空间；server 模式须声明服务强制输出上限。') from None
+        raise DomainError('模型输出配置无效：输出至少 1024 tokens；server 模式须声明服务强制输出上限。') from None
     return result
 
 
@@ -59,7 +60,6 @@ def capacity_settings(directory, settings=None):
         settings = json.loads(path.read_text('utf-8')) if path.exists() else {}
     values = dict(getattr(settings, 'value', settings))
     for name, key, default in (
-        ('TCG_MODEL_CONTEXT_TOKENS', 'context_window', DEFAULT_WINDOW),
         ('TCG_OUTPUT_TOKENS', 'output_tokens', DEFAULT_OUTPUT),
         ('TCG_OUTPUT_LIMIT_MODE', 'output_limit_mode', 'request'),
         ('TCG_SERVER_OUTPUT_TOKENS', 'server_output_tokens', None),
@@ -78,7 +78,7 @@ def request_budget(directory, task, context, settings=None):
     output = config['server_output_tokens'] if config['output_limit_mode'] == 'server' else config['output_tokens']
     digest_input = {'messages': messages, 'invocation': {key: config.get(key) for key in (
         'provider', 'base_url', 'model', 'context_window', 'output_tokens', 'output_limit_mode', 'server_output_tokens')}}
-    return {'fits': count + output + MARGIN <= config['context_window'] and len(serialized) <= 500000,
+    return {'fits': True, 'context_policy': 'server',
             'window': config['context_window'], 'output_tokens': output, 'input_tokens': count,
             'count_method': 'conservative_estimate', 'margin': MARGIN,
             'output_limit_mode': config['output_limit_mode'],

@@ -16,7 +16,10 @@ from pydantic import BaseModel, Field
 from .diagnostics import endpoint_origin, error_details
 from .documents import MAX_UPLOAD, classify_source, export_artifact, parse_document, parse_text
 from .environment import runtime_value
-from .workflow import WorkflowEngine as Engine
+from .pipeline import PipelineRuntime
+from .native_business import NativeBusiness
+from .native_chat import NativeChatAgent
+from .diagnostics import Diagnostics
 from .model import LangChainGateway, Settings
 from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
 from .storage import DirectoryLock, Store, public, uid, now
@@ -27,8 +30,26 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def run_public(value):
     result = {key: item for key, item in public(value).items() if item is not None}
-    # Expose only the edit state, never the private concurrency token.
-    result['edit_in_progress'] = bool(value.get('_edit_token'))
+    # Retain the React envelope; coordination lives in native runtime sessions.
+    result['edit_in_progress'] = False
+    if value.get('runtime') == 'native':
+        result['pause_contract'] = 2
+        if result.get('status') != 'completed':
+            result['draft_artifact_id'] = value.get('current_artifact_id') or (value.get('interrupt') or {}).get('artifact_id')
+    if result.get('status') == 'failed':
+        result['recovery'] = {'category': 'model', 'title': '当前步骤未完成',
+            'detail': result.get('error', '请查看当前步骤的失败记录。'),
+            'suggestions': ['可以在聊天中说明修改要求，或回复“重试当前步骤”。'],
+            'preserved': ['已上传资料', '已保存的成果版本'], 'retryable': True,
+            **(result.get('recovery') or {})}
+        if result.get('migration', {}).get('status') == 'restart_required':
+            result['recovery']['retryable'] = False
+    gate = result.get('interrupt')
+    if gate and gate.get('type') == 'clarification':
+        questions = gate.get('questions', [])
+        gate['question_suggestions'] = [{**q, 'answer': q.get('suggestion', q.get('answer', ''))}
+            for q in questions if isinstance(q, dict)]
+        gate['questions'] = [q.get('question', '') if isinstance(q, dict) else q for q in questions]
     return result
 
 
@@ -67,12 +88,19 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
             try:
                 settings = Settings(directory)
                 gateway = model_gateway if model_gateway is not None else LangChainGateway(settings)
-                engine = Engine(store, gateway, settings)
+                business = NativeBusiness(store, gateway, settings)
+                engine = PipelineRuntime(store, business)
+                engine.gateway, engine.settings = gateway, settings
+                engine.diagnostics = Diagnostics(store)
+                engine.config = engine._config
+                engine.task_active = lambda rid: rid in engine.tasks and not engine.tasks[rid].done()
+                gateway.diagnostics = engine.diagnostics
+                app.state.business = business
                 app.state.store, app.state.settings, app.state.engine = store, settings, engine
-                from .conversation import ConversationController
-                app.state.conversation = ConversationController(store, engine)
-                engine.on_safe_boundary = app.state.conversation.safe_boundary
+                app.state.conversation = NativeChatAgent(store, gateway, business, engine)
                 await engine.start()
+                from .native_migration import migrate_legacy_runs
+                await migrate_legacy_runs(store, engine)
                 await app.state.conversation.recover()
                 yield
             finally:
@@ -80,11 +108,12 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await app.state.conversation.close()
                 if engine:
                     await engine.stop()
+                    engine.diagnostics.close()
                 if 'gateway' in locals() and hasattr(gateway, 'close'):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='2.8.0', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.1', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -143,7 +172,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '2.8.0', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.1', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -250,10 +279,12 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         return app.state.store.create_chat(project_id, body.title)
 
     @app.get('/api/chats/{chat_id}')
-    def chat_get(chat_id: str):
+    async def chat_get(chat_id: str):
         store = app.state.store
         chat = store.get('chat', chat_id)
-        return {'chat': chat, 'memory': chat.get('memory'), 'messages': [message_public(m) for m in sorted(store.list('message', chat_id=chat_id), key=lambda m: m['created_at'])], 'sources': [public({**s, 'role': chat.get('_source_roles', {}).get(s['id'], s['role'])}) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
+        from .native_views import current_prompt, pipeline_messages
+        messages = store.list('message', chat_id=chat_id) + pipeline_messages(store, chat_id)
+        return {'chat': chat, 'memory': chat.get('memory'), 'conversation_prompt': await current_prompt(store, app.state.engine, chat), 'messages': [message_public(m) for m in sorted(messages, key=lambda m: m['created_at'])], 'sources': [public({**s, 'role': chat.get('_source_roles', {}).get(s['id'], s['role'])}) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
 
     @app.post('/api/chats/{chat_id}/sources')
     async def sources_upload(chat_id: str, file: UploadFile = File(...), role: str = Form('auto')):
@@ -328,22 +359,19 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
             raise DomainError('尚未配置模型。请在设置中填写本地 Ollama 模型名称，或兼容 API 服务。')
         store = app.state.store
         store.get('chat', chat_id)
-        request = body.model_dump()
-        with store.transaction():
-            # Evidence promotion is an explicit user action, never an inference
-            # from a message's length or generation-related vocabulary.
-            if body.as_requirement:
-                text, chunks = parse_text(body.content)
-                source = store.add_source(chat_id, '消息中的需求正文', 'primary', text, chunks)
-                if request['source_ids'] is not None:
-                    request['source_ids'] = [*request['source_ids'], source['id']]
-            message, run = store.create_run(chat_id, request)
-        app.state.engine.schedule(run['id'])
+        request = {**body.model_dump(), 'experience': 'native'}
+        if body.as_requirement:
+            text, chunks = parse_text(body.content)
+            source = store.add_source(chat_id, '消息中的需求正文', 'primary', text, chunks)
+            if request.get('source_ids') is not None:
+                request['source_ids'] = [*request['source_ids'], source['id']]
+        run = await app.state.engine.start_run(chat_id, request)
+        message = next(m for m in reversed(store.list('message', chat_id=chat_id)) if m.get('metadata', {}).get('run_id') == run['id'])
         return {'message': message_public(message), 'run': run_view(run)}
 
     @app.get('/api/runs/{run_id}')
-    def run_get(run_id: str):
-        return run_view(app.state.store.run(run_id))
+    async def run_get(run_id: str):
+        return run_view(await app.state.engine.snapshot(run_id))
 
     @app.get('/api/runs/{run_id}/diagnostics')
     def run_diagnostics(run_id: str, download: bool = False):
@@ -351,7 +379,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '2.8.0', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.1', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -376,7 +404,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     async def run_debug_bundle(run_id: str):
         import io,zipfile
         store=app.state.store;run=store.run(run_id)
-        graph=app.state.engine.workflow if run.get('graph_version')==7 else app.state.engine.graph
+        graph=app.state.engine.graph
         checkpoint=await graph.aget_state(app.state.engine.config(run_id))
         metadata=json.loads(run_diagnostics(run_id).body)
         metadata['events']=app.state.engine.diagnostics.rows(run_id,500)
@@ -399,31 +427,38 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.post('/api/runs/{run_id}/resume')
     async def run_resume(run_id: str, body: ResumeInput):
-        return run_view(app.state.engine.resume(run_id, body.model_dump()))
+        return run_view(await app.state.engine.resume(run_id, 'approved', payload=body.model_dump(), expected_prompt_id=body.interrupt_id))
 
     @app.post('/api/runs/{run_id}/dialogue')
     async def run_dialogue(run_id: str, body: WaitingEditInput):
-        return await app.state.engine.paused_dialogue(run_id, body.content)
+        run = app.state.store.run(run_id)
+        return await app.state.conversation.submit(run['chat_id'], {'client_message_id': uid('dialogue_'), 'content': body.content, 'mode': run['mode']})
 
     @app.post('/api/runs/{run_id}/instructions')
     async def run_instruction(run_id: str, body: WaitingEditInput):
-        return {'run': run_view(app.state.engine.agent.add_instruction(run_id, body.content))}
+        run = app.state.store.run(run_id)
+        return await app.state.conversation.submit(run['chat_id'], {'client_message_id': uid('instruction_'), 'content': body.content, 'mode': run['mode']})
 
     @app.post('/api/runs/{run_id}/retry')
     async def run_retry(run_id: str):
         if not configured():
             raise DomainError('请先配置模型再重试')
-        return run_view(app.state.engine.retry(run_id))
+        return run_view(await app.state.engine.retry(run_id))
 
     @app.post('/api/runs/{run_id}/cancel')
     async def run_cancel(run_id: str):
-        return run_view(app.state.engine.cancel(run_id))
+        return run_view(await app.state.engine.cancel(run_id))
 
     @app.post('/api/runs/{run_id}/edit')
     async def run_edit(run_id: str, body: WaitingEditInput):
         if not body.content.strip():
             raise DomainError('编辑指令不能为空')
-        return run_view(await app.state.engine.edit_waiting(run_id, body.content, body.selected_ids))
+        run = await app.state.engine.snapshot(run_id)
+        artifact = visible_artifact(run.get('current_artifact_id') or run.get('interrupt', {}).get('artifact_id'))
+        async with app.state.engine.edit_session(run['chat_id']):
+            updated = await app.state.business.revise(artifact, body.selected_ids, body.content)
+            await app.state.engine.on_artifact_changed(updated)
+        return run_view(await app.state.engine.snapshot(run_id))
 
     @app.get('/api/runs/{run_id}/model-calls/{call_id}/request')
     def model_request_get(run_id: str, call_id: str, download: bool = False):
@@ -467,19 +502,19 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         return public(visible_artifact(artifact_id))
 
     @app.put('/api/artifacts/{artifact_id}')
-    def artifact_put(artifact_id: str, body: RevisionInput):
-        from .artifact_actions import active_guard
+    async def artifact_put(artifact_id: str, body: RevisionInput):
         store = app.state.store
-        with store.transaction():
-            artifact = visible_artifact(artifact_id)
-            active_guard(store, [artifact])
+        artifact = visible_artifact(artifact_id)
+        async with app.state.engine.edit_session(artifact['chat_id']):
             report = body.report
             if report is not None:
                 report = {**report}
                 report.pop('lineage', None)
                 if artifact.get('report', {}).get('lineage'):
                     report['lineage'] = artifact['report']['lineage']
-            return public(store.revise_artifact(artifact_id, body.expected_revision, body.items, report=report))
+            updated = store.revise_artifact(artifact_id, body.expected_revision, body.items, report=report)
+            await app.state.engine.on_artifact_changed(updated)
+            return public(updated)
 
     @app.get('/api/artifacts/{artifact_id}/revisions')
     def artifact_revisions(artifact_id: str):
@@ -492,14 +527,14 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         return public(app.state.store.revision(artifact_id, revision))
 
     @app.post('/api/artifacts/{artifact_id}/restore')
-    def artifact_restore(artifact_id: str, body: RestoreInput):
-        from .artifact_actions import active_guard
+    async def artifact_restore(artifact_id: str, body: RestoreInput):
         store = app.state.store
-        with store.transaction():
-            artifact = visible_artifact(artifact_id)
-            active_guard(store, [artifact])
+        artifact = visible_artifact(artifact_id)
+        async with app.state.engine.edit_session(artifact['chat_id']):
             historical = store.revision(artifact_id, body.revision)
-            return public(store.revise_artifact(artifact_id, body.expected_revision, historical['items'], reason=f'restore:{body.revision}', report=historical.get('report')))
+            updated = store.revise_artifact(artifact_id, body.expected_revision, historical['items'], reason=f'restore:{body.revision}', report=historical.get('report'))
+            await app.state.engine.on_artifact_changed(updated)
+            return public(updated)
 
     @app.get('/api/artifacts/{artifact_id}/export-options')
     def artifact_export_options(artifact_id: str):
@@ -524,6 +559,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         if body.selected_ids is not None and not set(body.selected_ids)<={r['id'] for r in artifact['items']}:
             raise DomainError('所选用例不属于当前结果')
         profile=artifact.get('_profile',{})
+        chosen = None
         if body.profile_id:
             chosen=store.get('profile',body.profile_id)
             if chosen['project_id']!=artifact['project_id']:raise DomainError('Profile 不属于当前项目')
@@ -535,12 +571,12 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         selected={g['id'] for g in gaps}
         selected.update(r['id'] for r,updated in zip(rows,materialize_fields(rows,profile)) if r!=updated)
         if not selected:return {'unchanged':True}
-        request=MessageInput(content='按所选模板补全缺失字段，保留已有内容；缺少业务依据时说明原因。',intent='modify',
-            experience='reliable',mode='auto',artifact_id=artifact_id,selected_ids=[r['id'] for r in rows if r['id'] in selected],profile_override=profile).model_dump()
-        request['complete_fields_only']=True
-        _,run=store.create_run(artifact['chat_id'],request)
-        app.state.engine.schedule(run['id'])
-        return {'run':run_view(run)}
+        async with app.state.engine.edit_session(artifact['chat_id']):
+            selected_profile = {**chosen, 'config': profile} if chosen else profile
+            updated = await app.state.business.complete_fields(artifact, profile=selected_profile,
+                ids=[r['id'] for r in rows if r['id'] in selected])
+            await app.state.engine.on_artifact_changed(updated)
+        return {'artifact': public(updated), 'unchanged': updated['revision'] == artifact['revision']}
 
     @app.post('/api/artifacts/{artifact_id}/complete-fields')
     async def complete_fields(artifact_id: str, body: CompleteDescriptionsInput):
@@ -569,22 +605,13 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         if not filename.endswith('.xlsx'): filename += '.xlsx'
         return Response(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': "attachment; filename=\"tcg-export.xlsx\"; filename*=UTF-8''" + quote(filename)})
 
-    from .project_context import register_project_routes
-    from .artifact_actions import register_artifact_routes
+    from .native_api import register_routes as register_native_routes
     from .workspace_coverage import register_coverage_routes
-    from .chat_estimate import register_chat_estimate_routes
-    register_project_routes(app)
-    register_artifact_routes(app)
+    register_native_routes(app)
     register_coverage_routes(app)
-    register_chat_estimate_routes(app)
-    from .conversation import register_routes as register_conversation_routes
-    from .conversation_workflow import register_routes as register_draft_routes
-    from .conversation_project import register_routes as register_conversation_project_routes
-    from .conversation_workspace import register_routes as register_workspace_routes
+    from .native_chat import register_routes as register_conversation_routes
     register_conversation_routes(app)
-    register_draft_routes(app)
-    register_conversation_project_routes(app)
-    register_workspace_routes(app)
+
 
     @app.get('/api/chats/{chat_id}/turns/{turn_id}/contexts')
     def turn_contexts(chat_id: str, turn_id: str):

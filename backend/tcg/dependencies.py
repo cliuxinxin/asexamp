@@ -65,6 +65,33 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def _same_superseded_evidence(store, expected, current):
+    """A project replacement changes discovery, not an adopted rule's evidence.
+
+    Only bridge the recorded retirement transition. Content, chunks, role, scope,
+    provenance and all other inputs still require an exact match.
+    """
+    if type(expected.get('version')) is not int or expected['version'] >= current['version']:
+        return False
+    try:
+        before = store.source_snapshot(expected['id'], expected['version'])
+        after = store.source_snapshot(current['id'], current['version'])
+        old, new = before['source'], after['source']
+        if (digest(before) != expected.get('digest') or before['chunks'] != after['chunks']
+                or old.get('status', 'confirmed') != 'confirmed' or not old.get('_project_shared')
+                or old.get('role') != 'clarification' or new.get('status') != 'superseded'
+                or not new.get('superseded_by') or new.get('_active') is not False):
+            return False
+        replacement = store.get('source', new['superseded_by'])
+        if replacement['project_id'] != old['project_id'] or old['id'] not in replacement.get('supersedes', []):
+            return False
+        lifecycle = {'version', 'status', 'superseded_by', '_superseded_by', '_project_shared', '_active'}
+        return ({k: v for k, v in old.items() if k not in lifecycle}
+                == {k: v for k, v in new.items() if k not in lifecycle})
+    except (KeyError, TypeError, DomainError):
+        return False
+
+
 def manifest(store, artifact_ids=(), source_ids=(), profile_ids=(), run_id=None):
     with store.transaction():
         value = {'version': 1, 'artifacts': [], 'sources': [], 'profiles': []}
@@ -139,6 +166,8 @@ def assert_manifest(store, value):
                             comparable['digest'] = expected['digest']
                 if expected == comparable:
                     continue
+                if category == 'source' and _same_superseded_evidence(store, expected, current):
+                    continue
                 reason = 'version_changed' if expected.get(version) != current.get(version) else 'content_changed'
                 change = dependency_change(category, expected, current, reason)
                 if category == 'artifact' and type(expected.get('revision')) is int:
@@ -184,7 +213,8 @@ def _relations(artifact):
         for parent_id in parents:
             if parent_id:
                 result.append({'relation': 'derived_from', 'artifact_id': lineage[prefix + '_artifact_id'],
-                               'revision': versions.get(parent_id, lineage.get(prefix + '_revision')),
+                               'revision': (lineage.get(prefix + '_item_revisions') or {}).get(item['id'],
+                                   versions.get(parent_id, lineage.get(prefix + '_revision'))),
                                'item_id': parent_id, 'dependent_item_id': item['id']})
     return result
 

@@ -79,7 +79,7 @@ def launch() -> None:
             subprocess.run([str(executable), "-m", "pip", "install", "-r", str(requirements)], check=True)
             stamp.write_text(expected + "\n")
 
-    subprocess.run([str(executable), "-c", "import fastapi, uvicorn, langgraph.graph, langgraph.checkpoint.sqlite.aio, langchain, langchain_ollama, langchain_openai, docx, openpyxl, pypdf, cryptography"], check=True)
+    subprocess.run([str(executable), "-c", "import fastapi, uvicorn, langgraph.graph, langgraph.checkpoint.sqlite.aio, langchain, langchain_ollama, langchain_openai, jsonschema, docx, openpyxl, pypdf, cryptography"], check=True)
     if args.check:
         print("Python 依赖和前端文件检查通过。")
         return
