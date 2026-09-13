@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from . import dependencies as deps
 from .case_fields import (MANUAL_FIELDS, column_signature, filled, materialize_fields,
                           protect_non_ai_fields, template_check, template_columns)
+from .clarification import pending_questions, question_key, submitted_answers
 from .native_schemas import ANSWER_SCHEMA, ESTIMATE_SCHEMA, completion_schema, rows_schema
 from .schemas import DomainError, validate_items
 from .server_capacity import ContextCapacityError
@@ -54,7 +55,8 @@ def _report(value):
     report = copy.deepcopy(value.get('report') or {})
     # Linkage and process metadata are exclusively server-owned.
     for key in list(report):
-        if key.startswith('_') or key in ('lineage', 'template_check', 'review_reports'):
+        if key.startswith('_') or key in ('lineage', 'template_check', 'review_reports',
+                                         'source_coverage', 'template_completion', 'clarification_followups'):
             report.pop(key)
     return report
 
@@ -219,20 +221,25 @@ class NativeBusiness:
             part = _report(value)
             report['summary'] += ('\n' if report['summary'] else '') + part.pop('summary', '')
             for key, content in part.items():
-                if isinstance(content, list):
-                    report.setdefault(key, []).extend(content)
-                else:
+                if key not in report:
                     report[key] = content
+                elif isinstance(report[key], list):
+                    report[key].extend(content if isinstance(content, list) else [content])
+                elif report[key] != content:
+                    # Extension fields can legitimately differ in shape by batch.
+                    # Preserve each value; typed core arrays still concatenate.
+                    report[key] = [report[key], *(content if isinstance(content, list) else [content])]
         for key in ('questions', 'assumptions'):
             report[key] = list(dict.fromkeys(report[key]))
         return rows, report
 
     def _suggestions(self, report, evidence):
         valid_refs = {e['id'] for e in evidence if e.get('role') != 'example'}
-        supplied = {s.get('question'): s for s in report.get('question_suggestions', []) if isinstance(s, dict)}
+        supplied = {question_key(s.get('question')): s for s in report.get('question_suggestions', []) if isinstance(s, dict)}
+        report['questions'] = [q['question'] for q in pending_questions(report)]
         result = []
         for question in report.get('questions', []):
-            value = copy.deepcopy(supplied.get(question, {}))
+            value = copy.deepcopy(supplied.get(question_key(question), {}))
             supported = (value.get('confidence') == 'supported' and bool(value.get('refs'))
                          and set(value['refs']) <= valid_refs)
             value.update(question=question,
@@ -606,12 +613,8 @@ class NativeBusiness:
         run, analysis = self._run(run), self._artifact(analysis)
         from .documents import parse_text
         from .project_context import share_clarification
-        if isinstance(answers, str):
-            content = answers
-        elif isinstance(answers, dict):
-            content = '\n\n'.join(str(q) + '\n' + str(a) for q, a in answers.items() if filled(a))
-        else:
-            content = '\n\n'.join(a.get('question', '') + '\n' + a.get('answer', '') for a in answers)
+        questions = pending_questions(analysis.get('report'))
+        content, resolved = submitted_answers(questions, answers)
         if not content.strip():
             raise DomainError('请提供或采用具体澄清答案')
         text, chunks = parse_text(content)
@@ -628,15 +631,27 @@ class NativeBusiness:
             self.store.cache_set(run['id'], key, {'source_id': source['id']})
         proposal = await self.revise(analysis, instruction='依据这些已确认答案更新需求理解，保留稳定编号。已回答的问题从 questions 移除。\n' + content,
                                     source_ids=[source['id']], source_roles={source['id']: 'clarification'}, preview=True)
-        if isinstance(answers, dict):
-            unanswered = [question for question in analysis.get('report', {}).get('questions', [])
-                          if question not in answers or not str(answers[question]).strip()]
-            report = proposal['report']
-            report['questions'] = list(dict.fromkeys(report.get('questions', []) + unanswered))
-            report['question_suggestions'] += [s for s in analysis.get('report', {}).get('question_suggestions', [])
-                                                if s['question'] in unanswered]
-            _, _, evidence = self._evidence(analysis, [source['id']], {source['id']: 'clarification'})
-            self._suggestions(report, evidence)
+        report = proposal['report']
+        unanswered = [q['question'] for q in questions if q['question'] not in resolved]
+        previously_resolved = analysis.get('report', {}).get('_clarification_resolved_questions', [])
+        resolved_questions = list(dict.fromkeys(previously_resolved + list(resolved)))
+        known = {question_key(q['question']) for q in questions} | {question_key(q) for q in resolved_questions}
+        # A model may echo old questions or introduce followups. Neither can reopen
+        # an answered gate or become a confirmed business fact without user input.
+        followups = list(report.get('clarification_followups', []))
+        followups += [q['question'] for q in pending_questions(report) if question_key(q['question']) not in known]
+        followups = [q for q in followups if question_key(q) not in known]
+        if followups:
+            report['clarification_followups'] = list(dict.fromkeys(followups))
+        else:
+            report.pop('clarification_followups', None)
+        report['_clarification_resolved_questions'] = resolved_questions
+        report['questions'] = unanswered
+        # Keep the original proposal for questions the user has not answered yet.
+        report.setdefault('question_suggestions', []).extend(s for s in analysis.get('report', {}).get('question_suggestions', [])
+            if isinstance(s, dict) and question_key(s.get('question')) in {question_key(q) for q in unanswered})
+        _, _, evidence = self._evidence(analysis, [source['id']], {source['id']: 'clarification'})
+        self._suggestions(report, evidence)
         revised = self.apply_revision_preview(proposal)
         with self.store.transaction():
             current = self._run(run)

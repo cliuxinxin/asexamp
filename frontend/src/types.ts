@@ -37,4 +37,4 @@ export type TurnPart=
  |{type:'clarification_draft';draft:ClarificationDraft}
  |{type:'estimate';data:Json};
 export type TurnResponse={id:string;client_message_id:string;status:string;message:string;parts:TurnPart[];pending:Json[];actions:Json[]};
-export type TurnRequest={client_message_id:string;content:string;intent_hint?:string;artifact_id?:string;artifact_revision?:number;selected_ids?:string[];view_order?:string[];profile_id?:string;mode?:string;source_ids?:string[];reply_to?:string;command?:TurnCommand;depth?:Depth;case_types?:string[];profile_override?:Json;as_requirement?:boolean;experience?:string};
+export type TurnRequest={client_message_id:string;content:string;intent_hint?:string;artifact_id?:string;artifact_revision?:number;selected_ids?:string[];view_order?:string[];profile_id?:string;mode?:string;source_ids?:string[];reply_to?:string;reply_kind?:'confirm'|'clarification'|'question';command?:TurnCommand;depth?:Depth;case_types?:string[];profile_override?:Json;as_requirement?:boolean;experience?:string};

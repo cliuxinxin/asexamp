@@ -274,11 +274,11 @@ async def test_parallel_approval_tools_reserve_one_confirmation_before_waiting(s
     p = {**setup.prompt, 'kind': 'clarification', 'questions': [
         {'id': 'Q1', 'question': '锁定多久？', 'suggestion': '5 分钟'}]}
     tools = setup.make(current_prompt=p)
-    first = asyncio.create_task(tools['resume_pipeline_tool'].ainvoke({}))
+    first = asyncio.create_task(tools['answer_clarification_tool'].ainvoke({'adopt_suggestions': True}))
     await entered.wait()
     second = await tools['answer_clarification_tool'].ainvoke({'adopt_suggestions': True})
     assert second['status'] == 'needs_input'
-    assert accepted == ['approved'], 'The registry must guard parallel calls even before runtime checks.'
+    assert accepted == ['clarify'], 'The registry must guard parallel calls even before runtime checks.'
     release.set()
     assert (await first)['status'] == 'succeeded'
 

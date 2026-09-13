@@ -402,7 +402,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     async def resume_once(run_id, action, payload=None):
         run = own_run(run_id)
         kinds = {'clarification'} if action == 'clarify' else {
-            'strategy_review', 'scenario_review', 'case_draft_review', 'case_result_review', 'clarification'}
+            'strategy_review', 'scenario_review', 'case_draft_review', 'case_result_review'}
         async with approval(kinds, run_id=run['id']):
             result = await pipeline.resume(run['id'], action=action,
                 expected_prompt_id=reply_token, payload=payload)
@@ -436,9 +436,18 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         """
         if prompt.get('kind') != 'clarification':
             raise DomainError('当前不是澄清问题，请说明要补充的需求内容')
-        values = dict(answers or {})
+        questions = prompt.get('questions', [])
+        identities = {str(row[key]).strip(): row['id'] for row in questions for key in ('id', 'question') if row.get(key)}
+        values = {}
+        for key, value in (answers or {}).items():
+            question_id = identities.get(key.strip())
+            if not question_id:
+                raise DomainError('答案没有对应当前澄清问题，请使用当前问题编号或完整问题文本')
+            if question_id in values and values[question_id] != value:
+                raise DomainError('同一澄清问题有不同答案，请保留一个明确答案')
+            values[question_id] = value
         if adopt_suggestions:
-            for row in prompt.get('questions', []):
+            for row in questions:
                 suggestion = row.get('suggestion') or row.get('suggested_answer') or row.get('suggested_assumption')
                 if not suggestion and row['id'] not in values:
                     raise DomainError('问题 ' + row['id'] + ' 尚无建议答案，请补充后再提交')
@@ -621,8 +630,15 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                  | {'url': '/api/exports/' + r['id']} for r in records]
         return _result('已导出 Excel。', [{'type': 'files', 'files': files}])
 
-    return [list_context_tool, list_artifacts_tool, list_sources_tool, read_artifact_tool, read_knowledge_tool, estimate_workload_tool,
-            analyze_artifact_tool, modify_artifact_tool, apply_artifact_preview_tool, discard_artifact_preview_tool,
+    reads = [list_context_tool, list_artifacts_tool, list_sources_tool, read_artifact_tool, read_knowledge_tool,
+             estimate_workload_tool, analyze_artifact_tool]
+    # A clicked reply is an explicit user scope, not a model-predicted intent.
+    # Typed conversation retains the full registry and native tool selection.
+    reply_kind = body.get('reply_kind')
+    if reply_kind in ('question', 'clarification', 'confirm'):
+        return reads + {'question': [], 'clarification': [answer_clarification_tool],
+                        'confirm': [resume_pipeline_tool]}[reply_kind]
+    return [*reads, modify_artifact_tool, apply_artifact_preview_tool, discard_artifact_preview_tool,
             update_from_sources_tool, add_knowledge_tool,
             start_pipeline_tool, resume_pipeline_tool, answer_clarification_tool, control_pipeline_tool,
             learn_template_tool, apply_profile_tool, discard_template_tool, save_samples_tool,

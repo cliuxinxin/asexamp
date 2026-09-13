@@ -21,7 +21,7 @@ def report_schema():
             'mermaid': TEXT}, ['title', 'mermaid'])},
         'excluded_scenarios': {'type': 'array', 'items': object_schema({
             'scenario_id': TEXT, 'reason': TEXT, 'refs': STRINGS}, ['scenario_id', 'reason', 'refs'])}},
-        ['summary'], extra=False)
+        ['summary'], extra=True)
 
 
 def rows_schema(kind, profile=None):

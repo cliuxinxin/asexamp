@@ -62,6 +62,9 @@ presented prompt. One user assent approves one object: a question's suggested an
 preview, a template, or one pipeline gate. Never approve the next newly generated gate in this turn.
 If the current prompt is clarification, use the clarification tool to adopt/correct answers; do
 not resume past understanding approval. For template/preview confirmation use its own apply tool.
+For an explicit quick reply, reply_kind narrows the available tools: question is read-only,
+clarification submits answers only, and confirm approves the existing stage only. Never substitute
+another operation or tell the user it happened when that capability is unavailable.
 The user's requested mode, Profile, selected rows and stopping goal are constraints. Source and
 artifact catalogs contain real IDs; read or list to disambiguate rather than inventing IDs.
 Uploads alone do not authorize changes. An explicit supplementation request names the target to
@@ -230,6 +233,7 @@ class TurnInput(BaseModel):
     mode: Literal['auto', 'hitp'] = 'auto'
     source_ids: list[str] | None = None
     reply_to: str | None = None
+    reply_kind: Literal['question', 'clarification', 'confirm'] | None = None
     command: dict | None = None
     depth: str = 'auto'
     case_types: list[str] | None = None

@@ -17,6 +17,8 @@ def pipeline_messages(store, chat_id):
         content = labels.get(event['phase'], '阶段成果已保存') + f"：{len(artifact['items'])} 条 · v{artifact['revision']}。"
         if report.get('summary'):
             content += '\n' + str(report['summary'])[:1200]
+        if report.get('clarification_followups'):
+            content += '\n另有待核实的补充问题，已保留在成果说明中；它们尚未确认为业务规则。'
         messages.append({'id': event['id'], 'role': 'assistant', 'content': content,
             'created_at': event['created_at'], 'metadata': {'run_id': event['run_id'],
                 'stage': event['phase'], 'artifact_ids': [artifact['id']],
@@ -71,7 +73,8 @@ async def current_prompt(store, pipeline, chat):
                 'id': detail.get('id') or 'q_' + hashlib.sha256(question.encode()).hexdigest()[:12],
                 'question': question, 'suggestion': detail.get('suggestion') or detail.get('answer') or
                     '暂按现有明确需求设计，缺失规则保留待确认。'})
-        result['message'] = '请确认这些问题与建议假设。回复同意采用建议，或直接给出正确答案；随后会请你确认更新后的理解。'
+        result['message'] = ('请回答澄清问题，或采用建议答案。提交答案会更新需求理解，不等于确认理解；'
+                             '人工模式下，回答完成后会单独请你确认更新后的理解。')
     return result
 
 
@@ -91,7 +94,7 @@ async def chat_context(store, pipeline, chat, body, prompt):
         'selection': {k: body[k] for k in ('artifact_id', 'artifact_revision', 'selected_ids', 'view_order') if k in body},
         'requested_settings': {k: body[k] for k in ('mode', 'profile_id', 'depth', 'case_types', 'profile_override',
             'as_requirement', 'intent_hint') if k in body},
-        'shortcut': body.get('command')}
+        'shortcut': body.get('command'), 'reply_kind': body.get('reply_kind')}
 
 
 async def workspace_state(store, pipeline, chat_id, artifact_id=None):

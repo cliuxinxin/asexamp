@@ -225,8 +225,11 @@ body{background:var(--canvas);}
 .v29 .conversation-prompt li+li{margin-top:12px;}
 .v29 .conversation-questions strong{font-weight:550;}
 
-/* Current-prompt choices prepare editable replies immediately above the input. */
-.v29 .conversation-suggestions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0 0 10px;max-height:104px;overflow-y:auto;}
+/* Prompt-scoped quick replies sit outside the composer and preserve its draft. */
+.v29 .conversation-suggestions{display:flex;flex-direction:column;gap:7px;margin:0 0 10px;max-height:180px;overflow-y:auto;}
+.v29 .suggestion-group{display:flex;align-items:center;flex-wrap:wrap;gap:6px;}
+.v29 .suggestions-hint{font-size:10px;color:var(--muted,#667085);}
+.v29 .suggestion-group[aria-label="流程确认"] button{color:var(--accent);font-weight:600;}
 .v29 .suggestions-label{font-size:11px;color:var(--muted,#667085);flex:none;}
 .v29 .conversation-suggestions button{font-size:12px;line-height:1.45;padding:5px 9px;border:1px solid #eed5dd;border-radius:8px;background:#fff8fa;color:var(--ink);max-width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere;}
 .v29 .conversation-suggestions button:hover:not(:disabled){border-color:var(--accent);background:#fff1f5;}

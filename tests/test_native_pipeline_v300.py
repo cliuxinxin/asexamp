@@ -80,7 +80,10 @@ async def settled(runtime, run_id):
 
 
 async def agree(runtime, run):
-    await runtime.resume(run['id'], expected_prompt_id=run['interrupt']['prompt_id'])
+    clarification = run['interrupt']['type'] == 'clarification'
+    payload = {'answers': {q['id']: q['suggestion'] for q in run['interrupt']['questions']}} if clarification else None
+    await runtime.resume(run['id'], action='clarify' if clarification else 'approved',
+                         expected_prompt_id=run['interrupt']['prompt_id'], payload=payload)
     return await settled(runtime, run['id'])
 
 

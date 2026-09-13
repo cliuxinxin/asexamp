@@ -343,6 +343,16 @@ class PipelineRuntime:
                 return public(self.store.run(run_id))
             if action not in ('approved', 'approve', 'continue', 'clarified', 'clarify'):
                 raise DomainError('请说明修改意见，或明确同意当前内容')
+            clarification = action in ('clarified', 'clarify')
+            if waiting['type'] == 'clarification':
+                if not clarification:
+                    raise DomainError('请先提交或采用澄清答案；确认需求理解是之后的独立步骤', 409)
+                answers = (payload or {}).get('answers') or (payload or {}).get('answer')
+                if not answers or (isinstance(answers, dict) and any(
+                        not isinstance(value, str) or not value.strip() for value in answers.values())):
+                    raise DomainError('请提供具体澄清答案，或明确采用当前建议')
+            elif clarification:
+                raise DomainError('当前不是澄清问题，请确认当前成果或直接说明修改意见', 409)
             response = {**(payload or {}), 'action': 'approved'}
             self.store.update_run(run_id, status='queued', stage='resuming', interrupt=None, interrupt_id=None)
             self._record('run.resumed', run_id, node=waiting.get('type'))
@@ -500,19 +510,14 @@ class PipelineRuntime:
 
     def _questions(self, artifact):
         report = artifact.get('report') or {}
-        raw = report.get('questions') or report.get('clarification_questions') or report.get('clarifications') or []
+        from .clarification import pending_questions
         recommendations = {value.get('question'): value for value in report.get('question_suggestions', [])
                            if isinstance(value, dict)}
         questions = []
-        for index, value in enumerate(raw if isinstance(raw, list) else []):
-            value = {'question': value} if isinstance(value, str) else value
-            if not isinstance(value, dict) or value.get('answer') or value.get('resolved'):
-                continue
-            question = value.get('question') or value.get('text')
-            if not question:
-                continue
+        for value in pending_questions(report):
+            question = value['question']
             recommendation = recommendations.get(question, {})
-            questions.append({**recommendation, **value, 'id': value.get('id', 'Q' + str(index + 1)), 'question': question,
+            questions.append({**recommendation, **value, 'question': question,
                               'suggestion': value.get('suggestion') or value.get('suggested_answer') or recommendation.get('answer') or value.get('assumption') or
                               '暂按当前需求已描述的范围执行，未说明的条件标记为待确认。'})
         return questions
@@ -525,10 +530,10 @@ class PipelineRuntime:
             return {'phase': 'understood'}
         response = interrupt({'type': 'clarification', 'title': '补充需求说明',
                               'artifact_id': artifact['id'], 'questions': questions,
-                              'message': '请回答这些问题；如果建议假设合适，回复“同意”采用，然后再确认更新后的需求理解。'})
+                              'message': '请回答澄清问题，或采用建议答案。提交答案后更新理解；人工模式下还需单独确认更新后的需求理解。'})
         answers = response.get('answers') or response.get('answer')
         if not answers:
-            answers = {q['id']: q['suggestion'] for q in questions}
+            raise DomainError('请提供具体澄清答案，不能把阶段确认当作答案提交')
         if isinstance(answers, dict):
             questions_by_id = {q['id']: q['question'] for q in questions}
             answers = {questions_by_id.get(key, key): value for key, value in answers.items()}
