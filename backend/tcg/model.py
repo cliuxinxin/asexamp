@@ -6,6 +6,7 @@ results through generate_native; chat agents use chat_model().bind_tools(...).
 import json
 import os
 import re
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -53,10 +54,16 @@ class Settings:
         if self.path.exists():
             self.value.update(json.loads(self.path.read_text('utf-8')))
         self.env_file, layers = model_environment(self.directory)
-        self.environment_managed = any(layers)
+        azure = {key: value for layer in layers for key, value in layer.items() if key.startswith('azure_')}
+        legacy_layers = tuple({key: value for key, value in layer.items() if not key.startswith('azure_')}
+                              for layer in layers)
+        azure_enabled = any(value.strip() for value in azure.values())
+        self.environment_managed = azure_enabled or any(legacy_layers)
         self._environment_key = None
         self._environment_headers = None
-        for layer in layers:
+        if azure_enabled:
+            self._configure_azure(azure, legacy_layers)
+        for layer in (() if azure_enabled else legacy_layers):
             if not layer:
                 continue
             previous_endpoint = (self.value['provider'], self.value['base_url'])
@@ -90,6 +97,54 @@ class Settings:
             validate_headers(self.headers(), candidate.get('auth_mode', 'bearer'))
 
         self.value.update(capacity_settings(self.directory, self.value))
+
+    def _configure_azure(self, azure, legacy_layers):
+        """Select Azure atomically; legacy credentials never cross providers."""
+        required = {'azure_api_key': 'AZURE_OPENAI_API_KEY',
+                    'azure_endpoint': 'AZURE_OPENAI_ENDPOINT',
+                    'azure_api_version': 'AZURE_API_VERSION'}
+        missing = [name for field, name in required.items() if not azure.get(field, '').strip()]
+        if missing:
+            raise DomainError('Azure 连接配置不完整，请补充 ' + '、'.join(missing)
+                              + '；如需使用原连接，请移除全部 AZURE_OPENAI_* 和 AZURE_API_VERSION 配置。')
+        candidate = dict(self.value)
+        for layer in legacy_layers:
+            candidate.update({key: value for key, value in layer.items() if key in ('model', 'timeout_seconds')})
+        deployment = (azure.get('azure_deployment', '').strip() or candidate.get('model', '').strip())
+        if not deployment:
+            raise DomainError('Azure 需要模型部署名称，请设置 AZURE_OPENAI_DEPLOYMENT；未设置时使用 TCG_MODEL_NAME 或已保存的模型名称作为部署名称。')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}', deployment):
+            raise DomainError('AZURE_OPENAI_DEPLOYMENT（或回退模型名称）必须是部署名称，使用字母、数字、点、短横线或下划线，不能是路径或 URL。')
+        version = azure['azure_api_version'].strip()
+        try:
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}(?:-preview)?', version):
+                raise ValueError()
+            date.fromisoformat(version[:10])
+        except ValueError:
+            raise DomainError('AZURE_API_VERSION 必须是有效日期版本，例如 2025-01-01-preview。') from None
+        endpoint = azure['azure_endpoint'].strip().rstrip('/')
+        if '://' not in endpoint:
+            endpoint = 'https://' + endpoint
+        self.validate_address(endpoint)
+        parsed = urlparse(endpoint)
+        if parsed.scheme != 'https' or parsed.path:
+            raise DomainError('AZURE_OPENAI_ENDPOINT 必须是 HTTPS 资源根地址，不能包含 /openai、部署路径或 chat/completions；未写协议时自动添加 https://。')
+        key = azure['azure_api_key'].strip()
+        if len(key) > 2000 or any(ord(char) < 33 or ord(char) > 126 for char in key):
+            raise DomainError('AZURE_OPENAI_API_KEY 必须为有效的单行 ASCII 密钥，且不超过 2000 字符。')
+        try:
+            candidate['timeout_seconds'] = int(candidate['timeout_seconds'])
+        except (TypeError, ValueError):
+            raise DomainError('TCG_MODEL_TIMEOUT_SECONDS 必须为 5–3600 的整数') from None
+        if not 5 <= candidate['timeout_seconds'] <= MAX_MODEL_TIMEOUT_SECONDS:
+            raise DomainError('TCG_MODEL_TIMEOUT_SECONDS 必须为 5–3600 的整数')
+        candidate.pop('_api_key', None)
+        candidate.pop('_headers', None)
+        candidate.update(provider='azure', base_url=endpoint, model=deployment,
+                         api_version=version, auth_mode='bearer')
+        self.value = candidate
+        self._environment_key = key
+        self._environment_headers = {}
 
     def headers(self):
         if self._environment_headers is not None:
@@ -129,6 +184,7 @@ class Settings:
             'timeout_policy': 'configured_per_attempt',
             'context_policy': 'server',
             'auth_mode': self.value.get('auth_mode', 'bearer'),
+            'api_version': self.value.get('api_version'),
             'header_names': sorted(self.headers(), key=str.lower), 'has_headers': bool(self.headers()),
         }
 

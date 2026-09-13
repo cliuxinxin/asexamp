@@ -28,11 +28,35 @@ test('model settings save request output capacity without asking for a context w
  try{
   render(<SettingsDialog projectId="project" profiles={[]} onClose={()=>{}} onSaved={()=>{}}/>);
   assert.equal((await screen.findByLabelText('单次输出预留 Token 数') as HTMLInputElement).value,'8192');
+  assert.equal(screen.queryByRole('option',{name:'Azure OpenAI · 环境配置'}),null);
   assert.equal(screen.queryByLabelText('上下文窗口 Token 数'),null);
   fireEvent.change(screen.getByLabelText('单次输出预留 Token 数'),{target:{value:'7000'}});
   fireEvent.click(screen.getByRole('button',{name:'保存'}));
   await waitFor(()=>assert.equal(saved?.output_tokens,7000));
   assert.equal(saved.context_window,32768);assert.equal(saved.output_limit_mode,'request');assert.equal('server_output_tokens' in saved,true);
+ }finally{cleanup();globalThis.fetch=original;}
+});
+
+test('Azure environment settings expose deployment and API version while testing the managed connection without saving',async()=>{
+ const original=globalThis.fetch;const requests:{url:string;method:string}[]=[];
+ globalThis.fetch=(async(input:any,init:any)=>{
+  requests.push({url:String(input),method:init?.method??'GET'});
+  if(init?.method==='GET')return json({provider:'azure',base_url:'https://example.openai.azure.com',model:'test-deployment',api_version:'2025-01-01-preview',has_api_key:true,timeout_seconds:300,context_window:0,output_tokens:8192,output_limit_mode:'request',server_output_tokens:null,environment_managed:true,auth_mode:'bearer'});
+  return json({ok:true,message:'连接成功'});
+ }) as typeof fetch;
+ try{
+  render(<SettingsDialog projectId="project" profiles={[]} onClose={()=>{}} onSaved={()=>{}}/>);
+  const provider=await screen.findByLabelText('模型服务') as HTMLSelectElement;
+  assert.equal(provider.value,'azure');assert.equal(provider.disabled,true);
+  const deployment=screen.getByLabelText('部署名称') as HTMLInputElement;
+  assert.equal(deployment.value,'test-deployment');assert.equal(deployment.disabled,true);
+  const version=screen.getByLabelText('API 版本') as HTMLInputElement;
+  assert.equal(version.value,'2025-01-01-preview');assert.equal(version.readOnly,true);
+  assert.ok(screen.getByRole('option',{name:'API Key · api-key',hidden:true}));
+  assert.equal(screen.queryByRole('button',{name:'保存'}),null);
+  fireEvent.click(screen.getByRole('button',{name:'测试连接'}));
+  assert.ok(await screen.findByText('连接成功'));
+  assert.deepEqual(requests.filter(request=>request.method!=='GET'),[{url:'/api/settings/test',method:'POST'}]);
  }finally{cleanup();globalThis.fetch=original;}
 });
 

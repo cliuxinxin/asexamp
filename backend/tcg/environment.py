@@ -12,6 +12,10 @@ MODEL_ENV = {
     'TCG_MODEL_NAME': 'model', 'TCG_MODEL_TIMEOUT_SECONDS': 'timeout_seconds',
     'TCG_API_KEY': 'api_key',
     'TCG_MODEL_HEADERS_JSON': 'headers_json', 'TCG_MODEL_AUTH_MODE': 'auth_mode',
+    'AZURE_OPENAI_API_KEY': 'azure_api_key',
+    'AZURE_OPENAI_ENDPOINT': 'azure_endpoint',
+    'AZURE_API_VERSION': 'azure_api_version',
+    'AZURE_OPENAI_DEPLOYMENT': 'azure_deployment',
 }
 
 

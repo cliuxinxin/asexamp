@@ -17,7 +17,7 @@ HINTS = {
     'proxy': ['检查网络代理；当前内置客户端直接连接，不读取系统 PAC 或 HTTP_PROXY / HTTPS_PROXY。'],
     'timeout': ['查看日志中的 timeout_phase 和 timeout_seconds，区分连接超时与等待模型响应超时。'],
     'authentication': ['核对 API Key、自定义认证头和网关要求；日志只记录认证头名称，不记录值。'],
-    'configuration': ['对照日志中的最终 endpoint、模型名称与服务文档，核对路径和工具调用支持。'],
+    'configuration': ['对照日志中的最终 endpoint、模型名称与服务文档；Azure 还需核对部署名称和 API 版本。'],
     'rate_limit': ['检查服务配额、并发限制与上游限流日志，稍后手动重试。'],
     'service_unavailable': ['按 provider_request_id 和 HTTP 状态检查网关、模型服务的上游日志。'],
     'tool_calling': ['检查模型与网关是否支持并转发 tools、tool_choice、tool_calls。'],
@@ -29,7 +29,8 @@ PROVIDER_CODES = frozenset({'upstream_failure', 'server_error', 'internal_error'
     'invalid_api_key', 'authentication_error', 'permission_denied', 'invalid_request_error',
     'model_not_found', 'deployment_not_found', 'insufficient_quota', 'rate_limit_exceeded',
     'rate_limit_error', 'context_length_exceeded', 'max_tokens', 'unsupported_parameter',
-    'not_found', 'bad_request', 'service_unavailable', 'overloaded_error', 'api_error'})
+    'not_found', 'bad_request', 'service_unavailable', 'overloaded_error', 'api_error',
+    'DeploymentNotFound', 'InvalidApiVersionParameter', 'InvalidApiVersion', 'OperationNotSupported'})
 
 
 def _secrets(headers):
@@ -51,7 +52,7 @@ def connection_details(settings, headers, endpoint, injected_client=False):
     # Settings validates URLs without credentials/query. Still redact path secrets.
     for secret in sorted(_secrets(headers), key=len, reverse=True):
         endpoint = endpoint.replace(secret, '[redacted]')
-    return {'endpoint': endpoint, 'endpoint_origin': endpoint_origin(endpoint),
+    details = {'endpoint': endpoint, 'endpoint_origin': endpoint_origin(endpoint),
         'provider': settings.get('provider'), 'model': _token(settings.get('model'), headers),
         'timeout_seconds': settings.get('timeout_seconds'), 'auth_mode': settings.get('auth_mode', 'bearer'),
         'auth_header_names': sorted(headers, key=str.lower),
@@ -60,12 +61,16 @@ def connection_details(settings, headers, endpoint, injected_client=False):
         'proxy_mode': 'injected_client' if injected_client else 'direct',
         'tls_verify': None if injected_client else True,
         'follow_redirects': None if injected_client else False}
+    if settings.get('provider') == 'azure':
+        details.update(api_version=_token(settings.get('api_version'), headers),
+                       deployment=_token(settings.get('model'), headers))
+    return details
 
 
 def response_details(response, headers, body=None):
     result = {'http_status': response.status_code, 'response_bytes': len(response.content),
         'content_type': _token(response.headers.get('content-type', '').split(';')[0], headers)}
-    for name in ('x-request-id', 'request-id', 'x-correlation-id', 'x-ms-request-id'):
+    for name in ('x-request-id', 'request-id', 'x-correlation-id', 'x-ms-request-id', 'apim-request-id'):
         value = _token(response.headers.get(name), headers)
         if value:
             result['provider_request_id'] = value

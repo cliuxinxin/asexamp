@@ -87,11 +87,12 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
  return <Dialog title="模型与设置" onClose={onClose} wide>
   <div className="tabs"><button className={tab==='model'?'active':''} onClick={()=>setTab('model')}>模型连接</button><button className={tab==='profile'?'active':''} onClick={()=>setTab('profile')}>项目偏好</button></div>
   {tab==='model'&&settings?<div className="settings-form">
-   <p className="muted">连接本机 Ollama 或指定的 Chat Completions 网关。配置保存一次，后续对话会继续使用。</p>
+   <p className="muted">连接本机 Ollama、指定的 Chat Completions 网关或环境配置中的 Azure OpenAI。后续对话会继续使用当前连接。</p>
    {managed&&<p role="status" className="environment-notice">配置由 .env 或环境变量管理，修改后请重启服务。{settings.env_file&&<>配置文件：{settings.env_file}</>}</p>}
-   <label>模型服务<select disabled={managed} value={settings.provider} onChange={e=>{const provider=e.target.value as Settings['provider'];changeEndpoint(provider,provider==='ollama'?'http://127.0.0.1:11434':'http://10.206.3.151:8000/api/v1');}}><option value="ollama">Ollama · 本地模型</option><option value="openai">Chat Completions · 私有网关</option></select></label>
+   <label>模型服务<select disabled={managed} value={settings.provider} onChange={e=>{const provider=e.target.value as Settings['provider'];changeEndpoint(provider,provider==='ollama'?'http://127.0.0.1:11434':'http://10.206.3.151:8000/api/v1');}}><option value="ollama">Ollama · 本地模型</option><option value="openai">Chat Completions · 私有网关</option>{settings.provider==='azure'&&<option value="azure">Azure OpenAI · 环境配置</option>}</select></label>
    <label>服务地址<input disabled={managed} value={settings.base_url} onChange={e=>changeEndpoint(settings.provider,e.target.value)} spellCheck={false}/></label>
-   <label>模型名称<input disabled={managed} value={settings.model} onChange={e=>setSettings({...settings,model:e.target.value})} placeholder={settings.provider==='ollama'?'填写 ollama list 中已安装的模型名称':'填写服务支持的模型 ID'} spellCheck={false}/></label>
+   <label>{settings.provider==='azure'?'部署名称':'模型名称'}<input disabled={managed} value={settings.model} onChange={e=>setSettings({...settings,model:e.target.value})} placeholder={settings.provider==='azure'?'填写 Azure 中的部署名称':settings.provider==='ollama'?'填写 ollama list 中已安装的模型名称':'填写服务支持的模型 ID'} spellCheck={false}/></label>
+   {settings.provider==='azure'&&<><label>API 版本<input readOnly value={settings.api_version??''} spellCheck={false}/></label><p className="muted small-text">使用 Azure 的部署名称调用模型；API Key 从环境配置读取，通过 api-key 请求头发送。</p></>}
    <details className="capacity-settings" open><summary>上下文与输出容量</summary>
     <p className="muted small-text">上下文容量由模型服务器判断。仅在服务明确返回超限后尝试拆分当前请求；无法拆分时保留已有成果并提示处理。</p>
     <label>单次输出预留 Token 数<input aria-label="单次输出预留 Token 数" type="number" min={1} disabled={managed} value={settings.output_tokens} onChange={e=>setSettings({...settings,output_tokens:Number(e.target.value)})}/></label>
@@ -101,7 +102,7 @@ export function SettingsDialog({projectId,profiles,activeProfileId,proposal,onCl
    {settings.provider==='openai'&&(settings.auth_mode??'bearer')==='bearer'&&<><label>API Key（本地服务可留空）<input disabled={managed} type="password" autoComplete="new-password" value={key} onChange={e=>setKey(e.target.value)} placeholder={settings.has_api_key?'已保存，留空保留':'可选'}/></label>{settings.has_api_key&&<label className="check-label"><input disabled={managed} type="checkbox" checked={clearKey} onChange={e=>setClearKey(e.target.checked)}/>清除已保存的密钥</label>}</>}
    <details className="header-settings"><summary>自定义请求头</summary>
     <p className="muted small-text">适用于网关密钥、租户标识和自定义鉴权。保存后不回显请求头的值。</p>
-    <label>鉴权方式<select disabled={managed} value={settings.auth_mode??'bearer'} onChange={e=>setSettings({...settings,auth_mode:e.target.value as Settings['auth_mode']})}><option value="bearer">{settings.provider==='openai'?'API Key · X-API-Key':'API Key · Bearer'}</option><option value="headers">仅使用自定义 Header</option></select></label>
+    <label>鉴权方式<select disabled={managed} value={settings.auth_mode??'bearer'} onChange={e=>setSettings({...settings,auth_mode:e.target.value as Settings['auth_mode']})}><option value="bearer">{settings.provider==='azure'?'API Key · api-key':settings.provider==='openai'?'API Key · X-API-Key':'API Key · Bearer'}</option><option value="headers">仅使用自定义 Header</option></select></label>
     {!!settings.header_names?.length&&<p className="saved-headers">已保存：{settings.header_names.join('、')} <span className="muted">（值已隐藏）</span></p>}
     <label>自定义 Header JSON<textarea className="headers-editor" disabled={managed||clearHeaders} spellCheck={false} autoComplete="off" value={headers} onChange={e=>setHeaders(e.target.value)} placeholder={'{"X-API-Key":"your-key","X-Tenant-ID":"your-tenant"}'}/></label>
     <p className="muted small-text">留空保留原配置；填写对象会替换全部 Header。更换服务地址后，请重新填写。</p>

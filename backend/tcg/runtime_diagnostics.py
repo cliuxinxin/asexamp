@@ -41,7 +41,7 @@ def _path_status(value, *, directory=False):
 def _settings_status(settings):
     provider = settings.value.get('provider')
     return {'configured': bool(settings.configured()),
-            'provider': provider if provider in ('openai', 'ollama') else 'unknown'}
+            'provider': provider if provider in ('openai', 'ollama', 'azure') else 'unknown'}
 
 
 def runtime_snapshot(data_dir, settings):

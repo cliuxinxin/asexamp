@@ -13,7 +13,7 @@ import sqlite3
 import time
 from contextlib import suppress
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from jsonschema import Draft202012Validator
@@ -126,14 +126,14 @@ def _error(message, category='protocol'):
     return error
 
 
-def _provider_error(status, body):
-    error = _provider_error_message(status, body)
+def _provider_error(status, body, provider=None):
+    error = _provider_error_message(status, body, provider)
     if isinstance(status, int):
         error.status_code = status
     return error
 
 
-def _provider_error_message(status, body):
+def _provider_error_message(status, body, provider=None):
     capacity_error = context_capacity_error(body, status)
     if capacity_error:
         return capacity_error
@@ -147,6 +147,8 @@ def _provider_error_message(status, body):
     if status in (401, 403):
         return _error('模型认证失败；请检查 API Key 和自定义认证请求头。', 'authentication')
     if status in (400, 404, 422):
+        if provider == 'azure':
+            return _error('Azure 模型配置或请求不被服务接受；请检查资源地址、部署名称、API 版本和工具调用支持。', 'configuration')
         return _error('模型配置或请求不被服务接受；请检查服务地址、模型名称和工具调用支持。', 'configuration')
     if status == 429:
         return _error('模型服务限流或配额不足（HTTP 429）；请检查服务配额后重试。', 'rate_limit')
@@ -156,8 +158,11 @@ def _provider_error_message(status, body):
 
 
 def _headers(settings):
-    headers = settings.headers()
     secret = settings.secret()
+    if settings.value['provider'] == 'azure':
+        # Azure keys and the legacy gateway's credentials must never be mixed.
+        return {'api-key': secret} if secret else {}
+    headers = settings.headers()
     if secret and settings.value.get('auth_mode', 'bearer') == 'bearer':
         # Preserve the existing enterprise gateway authentication convention.
         if settings.value['provider'] == 'openai':
@@ -175,6 +180,15 @@ def _completion_url(base):
         return base + '/chat/completions'
     # Bare enterprise gateway addresses retain the existing endpoint contract.
     return base + '/api/v1/chat/completions'
+
+
+def _endpoint(settings):
+    base = settings['base_url'].rstrip('/')
+    if settings['provider'] == 'azure':
+        deployment = quote(settings['model'], safe='')
+        query = urlencode({'api-version': settings['api_version']})
+        return f'{base}/openai/deployments/{deployment}/chat/completions?{query}'
+    return base + '/api/chat' if settings['provider'] == 'ollama' else _completion_url(base)
 
 
 def _message(data, finish, usage):
@@ -243,8 +257,7 @@ class NativeChatModel(BaseChatModel):
         gateway = self.gateway
         settings = gateway.settings.value
         headers = _headers(gateway.settings)
-        endpoint = (settings['base_url'].rstrip('/') + '/api/chat' if settings['provider'] == 'ollama'
-                    else _completion_url(settings['base_url']))
+        endpoint = _endpoint(settings)
         connection = connection_details(settings, headers, endpoint,
             injected_client=not getattr(gateway, '_owns_http_client', True))
         response_metadata = {}
@@ -266,10 +279,12 @@ class NativeChatModel(BaseChatModel):
         if stop:
             parameters['stop'] = stop
         recorded_parameters = dict(parameters)
+        output_parameter = {'ollama': 'num_predict', 'azure': 'max_completion_tokens'}.get(
+            settings['provider'], 'max_tokens')
         if settings['provider'] == 'ollama':
             recorded_parameters.pop('tool_choice', None)
         if capacity['output_limit_mode'] == 'request':
-            recorded_parameters['num_predict' if settings['provider'] == 'ollama' else 'max_tokens'] = capacity['output_tokens']
+            recorded_parameters[output_parameter] = capacity['output_tokens']
         digest = hashlib.sha256(json.dumps([wire_messages, recorded_parameters], ensure_ascii=False,
                                            sort_keys=True).encode()).hexdigest()
         snapshot = {
@@ -280,6 +295,8 @@ class NativeChatModel(BaseChatModel):
                 'budget': {**capacity, 'context_policy': 'server', 'fits': True},
                 'representation': 'native_tool_calling_messages_and_tools',
             }
+        if settings['provider'] == 'azure':
+            snapshot.update(api_version=settings['api_version'], endpoint=connection['endpoint'])
         trace.request(snapshot)
         if gateway.request_recorder:
             gateway.request_recorder(snapshot)
@@ -328,7 +345,7 @@ class NativeChatModel(BaseChatModel):
                         gateway._http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
                     payload = {'model': settings['model'], 'messages': wire_messages, **parameters}
                     if capacity['output_limit_mode'] == 'request':
-                        payload['max_tokens'] = capacity['output_tokens']
+                        payload[output_parameter] = capacity['output_tokens']
                     raw = await gateway._http_client.post(endpoint, headers=headers,
                                                           json=payload, timeout=settings['timeout_seconds'])
                     response_metadata.update(response_details(raw, headers))
@@ -338,7 +355,7 @@ class NativeChatModel(BaseChatModel):
                         except ValueError:
                             body = raw.text
                         response_metadata.update(response_details(raw, headers, body))
-                        raise _provider_error(raw.status_code, body)
+                        raise _provider_error(raw.status_code, body, settings['provider'])
                     trace.output(raw.text)
                     try:
                         envelope = raw.json()
@@ -372,7 +389,7 @@ class NativeChatModel(BaseChatModel):
             status = getattr(exc, 'status_code', None)
             body = getattr(exc, 'error', None) or getattr(exc, 'body', None) or str(exc)
             if status is not None:
-                error = _provider_error(status, body)
+                error = _provider_error(status, body, settings['provider'])
             else:
                 category, message = transport_category(exc)
                 error = _error(message, category)
