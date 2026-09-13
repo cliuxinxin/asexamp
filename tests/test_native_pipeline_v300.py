@@ -474,6 +474,11 @@ async def test_native_pipeline_failure_emits_node_error_and_run_failed(tmp_path)
         events = [event['data'] for event in store.events(run['id']) if event['kind'] == 'progress']
         assert any(event['event'] == 'node.error' and event['node'] == 'cases' for event in events)
         assert sum(event['event'] == 'run.failed' for event in events) == 1
+        failure = next(m for m in store.list('message', chat_id=chat['id'])
+                       if m.get('metadata', {}).get('pipeline_failure'))
+        assert failure['role'] == 'assistant'
+        assert failure['metadata']['turn_response']['parts'][0]['type'] == 'diagnostic'
+        assert '已有成果' in failure['content']
     finally:
         await runtime.stop()
         diagnostics.close()

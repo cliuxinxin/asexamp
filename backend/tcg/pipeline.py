@@ -16,6 +16,7 @@ from langgraph.types import Command, interrupt
 
 from .schemas import DomainError
 from .storage import public, now
+from .model_diagnostics import failure_part
 
 
 class PipelineState(TypedDict, total=False):
@@ -254,16 +255,27 @@ class PipelineRuntime:
                 # Shutdown leaves the last committed node resumable on restart.
                 raise
             except Exception as exc:
+                diagnostic = failure_part(exc)
                 diagnostics = getattr(self, 'diagnostics', None)
                 if diagnostics:
                     from .diagnostics import error_details
                     self._record('pipeline.failed', run_id, level='ERROR',
-                                 node=self.store.run(run_id).get('stage'), **error_details(exc))
+                                 node=self.store.run(run_id).get('stage'), call_id=diagnostic['call_id'],
+                                 reference_id=diagnostic['reference_id'], category=diagnostic['category'],
+                                 **error_details(exc))
                 if self.store.run(run_id)['status'] != 'cancelled':
                     run = self.store.run(run_id)
-                    self.store.update_run(run_id, status='failed', error=str(exc),
+                    detail = str(exc) if isinstance(exc, DomainError) else '处理遇到异常，请按诊断编号查看服务日志。'
+                    self.store.update_run(run_id, status='failed', error=detail,
                                           failed_node=run.get('stage'), interrupt=None,
                                           interrupt_id=None)
+                    message_id = 'pipeline-error:' + diagnostic['reference_id']
+                    message = '当前步骤未完成：' + detail + ' 已有成果已保留；处理连接问题后，可在对话中回复“重试当前步骤”。'
+                    self.store.put('message', {'id': message_id, 'project_id': run['project_id'],
+                        'chat_id': run['chat_id'], 'role': 'assistant', 'content': message,
+                        'created_at': now(), 'metadata': {'run_id': run_id, 'pipeline_failure': True,
+                            'turn_response': {'id': message_id, 'status': 'failed', 'message': message,
+                                'parts': [diagnostic], 'pending': [], 'actions': []}}})
                     self._record('node.error', run_id, node=run.get('stage'), level='ERROR')
                     self._record('run.failed', run_id, node=run.get('stage'), level='ERROR')
 

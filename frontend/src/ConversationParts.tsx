@@ -15,6 +15,7 @@ export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,o
   const value=part as Json;
   switch(value.type){
    case 'answer':return <section key={key} className="turn-answer"><p className="preserve">{value.text}</p>{!!value.refs?.length&&<p className="muted small-text">依据：{value.refs.join(' · ')}</p>}</section>;
+   case 'diagnostic':return <details key={key} className="receipt-details"><summary>查看排查信息</summary><p>{value.message}</p>{value.hints?.length>0&&<ul>{value.hints.map((hint:string,i:number)=><li key={i}>{hint}</li>)}</ul>}<p className="small-text">问题编号：<code>{value.reference_id}</code></p>{value.call_id&&value.call_id!==value.reference_id&&<p className="small-text">调用编号：<code>{value.call_id}</code></p>}<p className="small-text">日志：<code>{value.log_path}</code></p></details>;
    case 'estimate':return compact?<details key={key} className="receipt-details"><summary>查看用例数量估算</summary><ChatEstimate estimate={value.data as any}/></details>:<ChatEstimate key={key} estimate={value.data as any}/>;
    case 'artifact':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} revision={value.revision} readOnly refreshKey={refreshKey} onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
    case 'case_details':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} snapshot={{id:value.artifact_id,type:'cases',title:value.title??'用例步骤与预期',revision:value.revision,items:value.items}} readOnly initialDetailsOpen onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;

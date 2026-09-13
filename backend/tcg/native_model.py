@@ -29,6 +29,7 @@ from .context_budget import capacity_settings
 from .schemas import DomainError
 from .server_capacity import context_capacity_error
 from .storage import now, uid
+from .model_diagnostics import connection_details, response_details, transport_category, exception_details
 
 
 def _record(diagnostics, event, **fields):
@@ -99,7 +100,7 @@ class NativeCallTrace:
         if self.diagnostics:
             fields = {'elapsed_ms': round((time.monotonic() - self.started) * 1000)}
             if exc is not None:
-                fields.update(error_types=[type(exc).__name__], category=getattr(exc, 'category', 'model'))
+                fields.update(exception_details(exc), category=getattr(exc, 'category', 'model'))
             event = ('model.cancelled' if kind is not None and issubclass(kind, asyncio.CancelledError)
                      else 'model.error' if exc is not None else 'model.complete')
             try:
@@ -126,6 +127,13 @@ def _error(message, category='protocol'):
 
 
 def _provider_error(status, body):
+    error = _provider_error_message(status, body)
+    if isinstance(status, int):
+        error.status_code = status
+    return error
+
+
+def _provider_error_message(status, body):
     capacity_error = context_capacity_error(body, status)
     if capacity_error:
         return capacity_error
@@ -140,6 +148,10 @@ def _provider_error(status, body):
         return _error('模型认证失败；请检查 API Key 和自定义认证请求头。', 'authentication')
     if status in (400, 404, 422):
         return _error('模型配置或请求不被服务接受；请检查服务地址、模型名称和工具调用支持。', 'configuration')
+    if status == 429:
+        return _error('模型服务限流或配额不足（HTTP 429）；请检查服务配额后重试。', 'rate_limit')
+    if isinstance(status, int) and status >= 500:
+        return _error(f'模型服务或上游网关异常（HTTP {status}）；请按诊断编号检查服务日志。', 'service_unavailable')
     return _error('模型请求失败；请检查服务连接后重试。', 'transport')
 
 
@@ -231,6 +243,19 @@ class NativeChatModel(BaseChatModel):
         gateway = self.gateway
         settings = gateway.settings.value
         headers = _headers(gateway.settings)
+        endpoint = (settings['base_url'].rstrip('/') + '/api/chat' if settings['provider'] == 'ollama'
+                    else _completion_url(settings['base_url']))
+        connection = connection_details(settings, headers, endpoint,
+            injected_client=not getattr(gateway, '_owns_http_client', True))
+        response_metadata = {}
+        transport_started = time.monotonic()
+
+        def record_failure(error, cause=None):
+            fields = {**exception_details(cause or error), **connection, **response_metadata,
+                'category': getattr(error, 'category', 'protocol'),
+                'elapsed_ms': round((time.monotonic() - transport_started) * 1000)}
+            error.model_diagnostic = fields
+            _record(gateway.diagnostics, 'model.transport_error', level='ERROR', protocol='tool_calling', **fields)
         capacity = capacity_settings(gateway.settings.directory, settings)
         wire_messages = convert_to_openai_messages(messages)
         parameters = {}
@@ -260,7 +285,7 @@ class NativeChatModel(BaseChatModel):
             gateway.request_recorder(snapshot)
         if gateway.diagnostics:
             _record(gateway.diagnostics, 'model.transport_start', task=kwargs.get('tcg_task', 'chat_agent'),
-                    protocol='tool_calling', prompt_characters=len(json.dumps(wire_messages, ensure_ascii=False)))
+                    protocol='tool_calling', prompt_characters=len(json.dumps(wire_messages, ensure_ascii=False)), **connection)
         try:
             async with asyncio.timeout(settings['timeout_seconds']):
                 if settings['provider'] == 'ollama':
@@ -270,13 +295,20 @@ class NativeChatModel(BaseChatModel):
                         request.headers.update(headers)
                     async def async_auth(request):
                         auth(request)
+                    async def observe_response(response):
+                        await response.aread()
+                        try:
+                            body = response.json() if response.status_code >= 300 else None
+                        except ValueError:
+                            body = None
+                        response_metadata.update(response_details(response, headers, body))
                     model = ChatOllama(
                         model=settings['model'], base_url=settings['base_url'], temperature=0,
                         **({'num_predict': capacity['output_tokens']} if capacity['output_limit_mode'] == 'request' else {}),
                         client_kwargs={'timeout': settings['timeout_seconds'], 'headers': headers,
                                        'follow_redirects': False, 'trust_env': False},
                         sync_client_kwargs={'event_hooks': {'request': [auth]}},
-                        async_client_kwargs={'event_hooks': {'request': [async_auth]}})
+                        async_client_kwargs={'event_hooks': {'request': [async_auth], 'response': [observe_response]}})
                     # Ollama chooses from native tools but does not implement tool_choice.
                     invocation = model.bind_tools(parameters['tools']) if parameters.get('tools') else model
                     try:
@@ -297,13 +329,15 @@ class NativeChatModel(BaseChatModel):
                     payload = {'model': settings['model'], 'messages': wire_messages, **parameters}
                     if capacity['output_limit_mode'] == 'request':
                         payload['max_tokens'] = capacity['output_tokens']
-                    raw = await gateway._http_client.post(_completion_url(settings['base_url']), headers=headers,
+                    raw = await gateway._http_client.post(endpoint, headers=headers,
                                                           json=payload, timeout=settings['timeout_seconds'])
+                    response_metadata.update(response_details(raw, headers))
                     if raw.status_code >= 300:
                         try:
                             body = raw.json()
                         except ValueError:
                             body = raw.text
+                        response_metadata.update(response_details(raw, headers, body))
                         raise _provider_error(raw.status_code, body)
                     trace.output(raw.text)
                     try:
@@ -316,6 +350,7 @@ class NativeChatModel(BaseChatModel):
                 raise _error('模型输出达到长度限制；请提高输出预算或拆分当前工作后重试。', 'output_capacity')
             if gateway.diagnostics:
                 _record(gateway.diagnostics, 'model.transport_response', protocol='tool_calling',
+                                           **response_metadata,
                                            finish_reason=response.response_metadata.get('finish_reason', response.response_metadata.get('done_reason')),
                                            tool_calls=len(response.tool_calls),
                                            response_characters=len(str(response.content)),
@@ -325,22 +360,24 @@ class NativeChatModel(BaseChatModel):
             return ChatResult(generations=[ChatGeneration(message=response)])
         except asyncio.CancelledError:
             raise
-        except TimeoutError:
-            raise _error(f'模型请求超过配置的 {settings["timeout_seconds"]} 秒；请检查服务或调整模型超时后重试。', 'timeout') from None
+        except TimeoutError as exc:
+            error = _error(f'模型请求超过配置的 {settings["timeout_seconds"]} 秒；请检查服务或调整模型超时后重试。', 'timeout')
+            record_failure(error, exc)
+            raise error from exc
         except DomainError as exc:
-            if gateway.diagnostics:
-                _record(gateway.diagnostics, 'model.transport_error', level='ERROR', protocol='tool_calling',
-                                           category=getattr(exc, 'category', 'protocol'), message=str(exc))
+            record_failure(exc)
             raise
         except Exception as exc:
             # Never expose provider exception text: it can contain authentication data.
             status = getattr(exc, 'status_code', None)
             body = getattr(exc, 'error', None) or getattr(exc, 'body', None) or str(exc)
-            error = _provider_error(status, body)
-            if gateway.diagnostics:
-                _record(gateway.diagnostics, 'model.transport_error', level='ERROR', protocol='tool_calling',
-                                           category=error.category, error_type=type(exc).__name__)
-            raise error from None
+            if status is not None:
+                error = _provider_error(status, body)
+            else:
+                category, message = transport_category(exc)
+                error = _error(message, category)
+            record_failure(error, exc)
+            raise error from exc
 
 
 def chat_model(gateway):

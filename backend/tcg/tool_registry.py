@@ -17,6 +17,7 @@ from .documents import export_artifact, parse_text
 from .project_context import merge_template_config, pin_samples, share_clarification
 from .schemas import DomainError, ROLES
 from .storage import now, public, uid
+from .model_diagnostics import failure_part
 
 
 def _result(message, parts=(), status='succeeded', **extra):
@@ -39,7 +40,10 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             try:
                 result = await fn(*args, **kwargs)
             except DomainError as exc:
-                result = _result(exc.message, status='needs_input', error_status=exc.status)
+                if getattr(exc, 'call_id', None):
+                    result = _result(exc.message, [failure_part(exc)], status='failed', error_status=exc.status)
+                else:
+                    result = _result(exc.message, status='needs_input', error_status=exc.status)
             result['tool_name'] = fn.__name__
             if on_result:
                 await _await(on_result(copy.deepcopy(result)))

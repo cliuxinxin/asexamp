@@ -31,6 +31,7 @@ def test_clarification_projection_adoption_and_direct_revision_reanchor(native_j
     assert run['interrupt']['question_suggestions'][0]['answer'] == answer
     assert prompt['questions'][0]['question'] == question
     assert prompt['questions'][0]['suggestion'] == answer
+    assert not prompt['questions'][0].get('answer')
     j.turn('同意采用建议，并保存到项目。', 'answer_clarification_tool',
            {'adopt_suggestions': True}, reply=prompt)
     run, updated, understanding = j.gate('strategy_review')

@@ -21,6 +21,7 @@ from .native_business import NativeBusiness
 from .native_chat import NativeChatAgent
 from .diagnostics import Diagnostics
 from .model import LangChainGateway, Settings
+from .runtime_diagnostics import record_runtime
 from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
 from .storage import DirectoryLock, Store, public, uid, now
 from .access import allowed_host
@@ -92,6 +93,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                 engine = PipelineRuntime(store, business)
                 engine.gateway, engine.settings = gateway, settings
                 engine.diagnostics = Diagnostics(store)
+                record_runtime(engine.diagnostics, directory, settings)
                 engine.config = engine._config
                 engine.task_active = lambda rid: rid in engine.tasks and not engine.tasks[rid].done()
                 gateway.diagnostics = engine.diagnostics
@@ -113,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='3.0.1', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.2', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -172,7 +174,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '3.0.1', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.2', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -379,7 +381,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '3.0.1', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.2', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],

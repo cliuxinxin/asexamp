@@ -3,7 +3,7 @@ import asyncio
 import copy
 import hashlib
 import json
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_tool_call
@@ -14,6 +14,7 @@ from typing import Literal
 from .native_views import chat_context, current_prompt
 from .schemas import DomainError
 from .storage import now, public
+from .model_diagnostics import failure_part, exception_details
 
 
 READ_TOOLS = frozenset({'list_context_tool', 'list_artifacts_tool', 'list_sources_tool',
@@ -89,11 +90,12 @@ class NativeChatAgent:
 
     def _save(self, turn):
         turn['updated_at'] = now()
+        turn.setdefault('_reply_created_at', turn['updated_at'])
         self.store.put('conversation_turn', turn)
         value = self.response(turn)
         self.store.put('message', {'id': 'reply:' + turn['id'], 'project_id': turn['project_id'],
             'chat_id': turn['chat_id'], 'role': 'assistant', 'content': turn['message'],
-            'created_at': turn['created_at'], 'metadata': {'turn_response': value}})
+            'created_at': turn['_reply_created_at'], 'metadata': {'turn_response': value}})
         return value
 
     @staticmethod
@@ -136,7 +138,7 @@ class NativeChatAgent:
                 self.store.put('conversation_turn', turn)
                 self.store.put('message', {'id': 'input:' + key, 'project_id': chat['project_id'],
                     'chat_id': chat_id, 'role': 'user', 'content': body['content'],
-                    'created_at': now(), 'metadata': {'turn_id': key}})
+                    'created_at': now(), 'metadata': {'turn_id': key, 'client_message_id': client_id}})
             body = {**body, '_turn_id': key}
             task = asyncio.current_task()
             self._active.add(task)
@@ -147,6 +149,15 @@ class NativeChatAgent:
                 self._save(turn)
                 raise
             except Exception as exc:
+                diagnostic = failure_part(exc)
+                turn['parts'].append(diagnostic)
+                diagnostics = getattr(self.gateway, 'diagnostics', None)
+                if diagnostics:
+                    with suppress(Exception):
+                        diagnostics.record('chat.turn_failed', level='ERROR', chat_id=chat_id,
+                            project_id=chat['project_id'], turn_id=turn['id'],
+                            call_id=diagnostic['call_id'], reference_id=diagnostic['reference_id'],
+                            category=diagnostic['category'], **exception_details(exc))
                 detail = str(exc)[:500] if isinstance(exc, DomainError) else '处理遇到异常，请查看当前成果后重试尚未完成的操作。'
                 saved = any(a['status'] == 'succeeded' for a in turn['actions'])
                 turn.update(status='failed', message='本次操作未完成：' + detail +

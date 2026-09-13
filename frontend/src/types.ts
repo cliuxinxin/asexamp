@@ -27,6 +27,7 @@ export type ClarificationDraft={id:string;run_id:string;revision:number;question
 export type TurnCommand={name:string;arguments:Json};
 export type TurnPart=
  |{type:'answer';text:string;refs?:string[]}
+ |{type:'diagnostic';reference_id:string;call_id?:string;category:string;message:string;hints:string[];log_path:string}
  |{type:'artifact';artifact_id:string;revision:number}
  |{type:'case_details';artifact_id:string;revision:number;items:Json[];title?:string}
  |{type:'diff';proposal_id:string;changes:Json[]}
