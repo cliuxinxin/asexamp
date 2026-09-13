@@ -101,11 +101,11 @@ test('empty conversations keep compact input and shortcuts append to an editable
  assert.equal(document.querySelector('.sidebar-collapsed'),null);
 });
 
-test('editing shows the server busy prompt without competing confirmation or editor controls',async()=>{
+test('editing uses the composer stage summary without competing confirmation or editor controls',async()=>{
  fixture(false,true);await ready();
  assert.equal(screen.queryByRole('button',{name:'确认场景，继续生成用例'}),null);
  assert.equal(screen.queryByRole('button',{name:'编辑',exact:true}),null);
- assert.equal(screen.getByRole('region',{name:'当前对话提示'}).getAttribute('aria-busy'),'true');
+ assert.ok(screen.queryByRole('region',{name:'当前对话提示'})===null);
  assert.ok(screen.getByRole('region',{name:'当前工作流'}).textContent?.includes('AI 正在处理'));
  assert.equal(screen.getByRole('region',{name:'当前工作流'}).textContent?.includes('等待你的确认'),false);
  assert.equal(document.querySelectorAll('textarea').length,1);

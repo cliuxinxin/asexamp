@@ -1,6 +1,6 @@
 {
   "name": "tcg-case-agent-chat",
-  "version": "3.0.4",
+  "version": "3.0.6",
   "private": true,
   "type": "module",
   "scripts": {

@@ -15,6 +15,7 @@ from langchain_core.tools import tool
 
 from .documents import export_artifact, parse_text
 from .project_context import merge_template_config, pin_samples, share_clarification
+from .profile_changes import apply_profile_change, config_changes, change_summary
 from .schemas import DomainError, ROLES
 from .storage import now, public, uid
 from .model_diagnostics import failure_part
@@ -358,7 +359,11 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         """Start the background test-design pipeline. Honor the user's requested stopping stage.
 
         intent is review_requirement, generate_scenario, generate_case or review_case;
-        stop_after is analysis, scenarios, cases or review. mode is auto or hitp (Human).
+        stop_after defaults to review: ordinary test-case generation INCLUDES AI review.
+        Omit stop_after unless the user explicitly requests an earlier stopping point.
+        cases means DRAFTS ONLY without AI review; do not choose it merely because the user says
+        "generate test cases". Other stops are analysis, scenarios and review.
+        mode is auto or hitp (Human); Human pauses for approvals, it does not skip AI review.
         Set artifact_id explicitly to continue from saved understanding/scenarios or review saved cases.
         Omit artifact_id for fresh generation from requirements, regardless of the currently viewed card.
         A nonempty browser row selection must belong to the explicit starting artifact; never ignore it.
@@ -476,7 +481,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         """Learn scenario/case Excel templates from attachments, preserving the other template family.
 
         kind is scenarios, cases or both. Set apply=true only when the user explicitly requests
-        immediate application; otherwise save a suggestion for a later conversational approval.
+        immediate application; otherwise summarize the changes and save a suggestion. Users can
+        open Profile changes above the composer to review and selectively confirm the saved values.
         """
         if kind not in ('scenarios', 'cases', 'both'):
             raise DomainError('模板类型需为 scenarios、cases 或 both')
@@ -489,11 +495,13 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         learned = await business.gateway.generate_native('learn_template', {
             'profile': current['config'], 'format_references': store.evidence([s['id'] for s in values]),
             'evidence': [], 'template_kinds': requested}, schema,
-            instruction + '。附件仅作格式参考；场景列与用例列独立，人工执行字段不能由 AI 填写。')
+            instruction + '。附件仅作格式参考；场景列与用例列独立，人工执行字段不能由 AI 填写。'
+            'summary 用一至两句话总结更改目的和范围，不逐列罗列表头或配置内容。')
         kinds = learned.get('template_kinds', [])
         if not kinds or not set(kinds) <= set(requested):
             raise DomainError('模板识别结果缺少所请求的模板类型')
         config, notes = merge_template_config(current['config'], learned['config'], kinds)
+        changes = config_changes(current['config'], config)
         suggestion = {'id': uid('tmpl_'), 'project_id': chat['project_id'], 'chat_id': chat['id'],
             'created_at': now(), 'source_ids': source_ids, 'template_kinds': kinds,
             'config': learned['config'], 'summary': learned['summary'], 'profile_id': current['id'],
@@ -502,6 +510,11 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             if profile(current['id'])['version'] != current['version']:
                 raise DomainError('Profile 在学习期间已改变，请重新学习', 409)
             store.put('template', suggestion)
+            if not changes:
+                selected = store.get('chat', chat['id'])
+                store.put('chat', {**selected, '_native_template_prompt': None})
+                return _result(learned['summary'] + '\n' + change_summary(changes),
+                               profile=public(current), notes=notes)
             if apply:
                 updated = store.update_profile(current['id'], current['name'], config, current['version'])
                 store.put('template', {**suggestion, '_applied': True})
@@ -510,52 +523,35 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                 return _result('已学习并应用模板。', [{'type': 'answer', 'text': learned['summary']}],
                                profile=public(updated), notes=notes)
             pending = {'id': 'template:' + suggestion['id'] + ':' + str(current['version']),
-                'kind': 'profile', 'title': '确认模板建议', 'type': 'profile',
+                'kind': 'profile', 'title': '查看并确认 Profile 更改', 'type': 'profile',
                 'template_ids': [suggestion['id']], 'profile_id': current['id'],
                 'expected_version': current['version'],
-                'message': learned['summary'] + '\n回复“同意”应用模板，或说明修改意见。'}
-            columns = []
-            for family in kinds:
-                key = 'scenario_excel_columns' if family == 'scenarios' else 'excel_columns'
-                label = '场景列' if family == 'scenarios' else '用例列'
-                columns.append(label + '（按导出顺序）：' + ' → '.join(c.get('header', c.get('field', '')) for c in config.get(key, [])))
-            pending['message'] = learned['summary'] + '\n' + '\n'.join(columns) + '\n回复“同意”应用模板，或说明修改意见。'
+                'summary': learned['summary'], 'change_summary': change_summary(changes),
+                'message': learned['summary'] + '\n' + change_summary(changes) +
+                    '\n可从输入框上方“查看 Profile 更改”逐项查看并确认，也可以继续说明修改意见。'}
             selected = store.get('chat', chat['id'])
             store.put('chat', {**selected, '_native_template_prompt': pending})
         return _result(pending['message'], status='needs_confirmation', pending=[pending], notes=notes,
-                       proposal=public(suggestion))
+                       proposal={key: suggestion[key] for key in ('id', 'summary', 'template_kinds')})
 
     @tool
     @emit
     async def apply_profile_tool(template_ids: list[str] | None = None,
-                                   profile_id: str | None = None) -> dict:
-        """Apply the presented template suggestion after user agreement; use its original Profile version."""
+                                   profile_id: str | None = None,
+                                   selected_keys: list[str] | None = None) -> dict:
+        """Apply the presented template suggestion after explicit user agreement.
+
+        Use the original Profile version. Omit selected_keys to apply all proposed changes, or
+        include only saved top-level config keys the user explicitly approved. Never invent values.
+        """
         ids = template_ids or prompt.get('template_ids')
         if not ids:
             raise DomainError('请先学习模板并查看模板建议')
         async with approval({'profile'}, template_ids=ids,
                             profile_id=profile_id or prompt.get('profile_id')):
-            with store.transaction():
-                current = profile(profile_id or prompt.get('profile_id'))
-                config = current['config']
-                templates = [store.get('template', tid) for tid in ids]
-                for suggestion in templates:
-                    if suggestion['chat_id'] != chat['id'] or suggestion['project_id'] != chat['project_id']:
-                        raise DomainError('模板建议不属于当前对话', 404)
-                    if suggestion.get('_applied'):
-                        raise DomainError('此模板已经应用，请查看当前 Profile', 409)
-                    if suggestion['profile_id'] != current['id'] or suggestion['base_profile_version'] != current['version']:
-                        raise DomainError('Profile 已改变，请重新学习或确认新的模板建议', 409)
-                    config, _ = merge_template_config(config, suggestion['config'], suggestion['template_kinds'])
-                pending = store.get('chat', chat['id']).get('_native_template_prompt')
-                if not pending or pending['id'] != reply_token:
-                    raise DomainError('模板提示已改变，请查看当前建议后再确认', 409)
-                updated = store.update_profile(current['id'], current['name'], config, current['version'])
-                for suggestion in templates:
-                    store.put('template', {**suggestion, '_applied': True})
-                selected = store.get('chat', chat['id'])
-                store.put('chat', {**selected, 'profile_id': updated['id'], '_native_template_prompt': None})
-        return _result('已应用模板，后续新任务使用此 Profile。', profile=public(updated))
+            applied = apply_profile_change(store, chat['id'], reply_token,
+                                           prompt['expected_version'], selected_keys)
+        return _result(applied['message'], profile=applied['profile'])
 
     @tool
     @emit

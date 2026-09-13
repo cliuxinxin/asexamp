@@ -32,7 +32,7 @@ test('scenario card exposes deterministic Excel export without case completion U
  globalThis.fetch=(async(url:any)=>{
   const path=String(url);let value:any;
   if(path==='/api/artifacts/s1')value=result;
-  else if(path.endsWith('/export-options'))value={kind:'scenarios',snapshot:{scenario_sheet_name:'Test Scenarios'},profiles:[]};
+  else if(path.includes('/export-options?revision='))value={kind:'scenarios',snapshot:{scenario_sheet_name:'Test Scenarios'},profiles:[]};
   else throw new Error(path);
   return new Response(JSON.stringify(value),{status:200,headers:{'Content-Type':'application/json'}});
  }) as typeof fetch;

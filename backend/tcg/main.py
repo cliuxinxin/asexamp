@@ -115,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='3.0.4', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.6', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -174,7 +174,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '3.0.4', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.6', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -288,6 +288,11 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         messages = store.list('message', chat_id=chat_id) + pipeline_messages(store, chat_id)
         return {'chat': chat, 'memory': chat.get('memory'), 'conversation_prompt': await current_prompt(store, app.state.engine, chat), 'messages': [message_public(m) for m in sorted(messages, key=lambda m: m['created_at'])], 'sources': [public({**s, 'role': chat.get('_source_roles', {}).get(s['id'], s['role'])}) for s in store.list('source', chat_id=chat_id) if s['_active']], 'runs': [run_view(r) for r in store.runs(chat_id=chat_id)]}
 
+    @app.get('/api/chats/{chat_id}/artifacts')
+    def chat_artifacts(chat_id: str):
+        from .artifact_catalog import process_artifacts
+        return process_artifacts(app.state.store, chat_id)
+
     @app.post('/api/chats/{chat_id}/sources')
     async def sources_upload(chat_id: str, file: UploadFile = File(...), role: str = Form('auto')):
         store = app.state.store
@@ -381,7 +386,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '3.0.4', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.6', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -538,18 +543,24 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
             await app.state.engine.on_artifact_changed(updated)
             return public(updated)
 
-    @app.get('/api/artifacts/{artifact_id}/export-options')
-    def artifact_export_options(artifact_id: str):
+    def export_snapshot(artifact_id: str, revision: int | None = None):
         artifact = visible_artifact(artifact_id)
+        if revision is not None:
+            artifact = app.state.store.revision(artifact_id, revision)
+        return artifact
+
+    @app.get('/api/artifacts/{artifact_id}/export-options')
+    def artifact_export_options(artifact_id: str, revision: int | None = None):
+        artifact = export_snapshot(artifact_id, revision)
         from .case_fields import template_check
         profiles=app.state.store.list('profile',project_id=artifact['project_id'])
         if artifact['type']=='scenarios':
             from .schemas import DEFAULT_PROFILE
             defaults={key:value for key,value in DEFAULT_PROFILE.items() if key.startswith('scenario_')}
-            return {'kind':'scenarios','snapshot':{**defaults,**artifact.get('_profile',{})},
+            return {'kind':'scenarios','revision':artifact['revision'],'snapshot':{**defaults,**artifact.get('_profile',{})},
                     'profiles':[{**p,'config':{**defaults,**p['config']},'field_check':None} for p in profiles]}
         if artifact['type']!='cases':raise DomainError('仅测试场景或测试用例支持 Excel 导出')
-        return {'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
+        return {'revision':artifact['revision'],'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
                 'profiles':[{**p,'field_check':template_check(p['config'],artifact['items'])} for p in profiles]}
 
     async def schedule_field_completion(artifact_id,body,description_compat=False):
@@ -589,8 +600,8 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         return await schedule_field_completion(artifact_id,body,description_compat=True)
 
     @app.get('/api/artifacts/{artifact_id}/export')
-    def artifact_export(artifact_id: str, layout: str | None = None, ids: str | None = None, profile_id: str | None = None):
-        artifact = visible_artifact(artifact_id)
+    def artifact_export(artifact_id: str, layout: str | None = None, ids: str | None = None, profile_id: str | None = None, revision: int | None = None):
+        artifact = export_snapshot(artifact_id, revision)
         if profile_id:
             profile = app.state.store.get('profile',profile_id)
             if profile['project_id'] != artifact['project_id']:

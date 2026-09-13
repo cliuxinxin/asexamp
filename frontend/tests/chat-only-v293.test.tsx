@@ -40,12 +40,13 @@ function fixture(options:{onTurn?:(number:number,state:any)=>Promise<void>|void;
 async function ready(){render(<App/>);return screen.findByRole('button',{name:/查看当前成果/});}
 function send(text:string){fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:text}});fireEvent.click(screen.getByRole('button',{name:'发送消息'}));}
 
-test('one active prompt and one composer replace scattered workflow controls',async()=>{
- fixture();await ready();const prompt=screen.getByRole('region',{name:'当前对话提示'});
- assert.equal(screen.getAllByRole('region',{name:'当前对话提示'}).length,1);assert.equal(document.querySelectorAll('textarea').length,1);
- assert.ok(within(prompt).getByText('请确认测试场景'));
+test('one stage summary and one composer replace scattered workflow controls',async()=>{
+ fixture();await ready();const stage=screen.getByRole('region',{name:'当前工作流'});
+ assert.equal(screen.getAllByRole('region',{name:'当前工作流'}).length,1);assert.equal(document.querySelectorAll('textarea').length,1);
+ assert.ok(screen.queryByRole('region',{name:'当前对话提示'})===null);
+ assert.ok(within(stage).getByText('请确认测试场景'));
  for(const label of ['确认场景，继续生成用例','停止','补充资料','编辑','导出 Excel','让 AI 修改此结果'])assert.equal(screen.queryByRole('button',{name:label,exact:true}),null,label);
- assert.equal(within(prompt).queryByRole('button'),null);assert.equal((screen.getByLabelText('历史对话提示') as HTMLDetailsElement).open,false);
+ assert.equal((screen.getByLabelText('历史对话提示') as HTMLDetailsElement).open,false);
  assert.equal(screen.getByLabelText('聊天输入').getAttribute('rows'),'2');
  const composer=screen.getByLabelText('聊天输入').closest('.composer-wrap')!;for(const label of ['运行模式','附件用途','运行 Profile'])assert.ok(composer.contains(screen.getByLabelText(label)));
 });
@@ -59,7 +60,7 @@ test('chat assent carries the shown prompt identity while retaining selected row
 test('new server prompt replaces the old one and binds the next turn',async()=>{
  const next={...scenePrompt,id:'prompt:cases-1',title:'请确认用例草稿',message:'用例已生成。回复同意后进行评审。'};
  const {calls}=fixture({onTurn:(_n,state)=>{state.conversation_prompt=next;}});await ready();send('同意');await screen.findByText(next.title);
- assert.equal(screen.queryByText(scenePrompt.title),null);assert.equal(screen.getAllByRole('region',{name:'当前对话提示'}).length,1);send('先解释这个用例，不进入评审');
+ assert.equal(screen.queryByText(scenePrompt.title),null);assert.equal(screen.getAllByRole('region',{name:'当前工作流'}).length,1);send('先解释这个用例，不进入评审');
  await waitFor(()=>assert.equal(calls.filter(c=>c.path==='/chats/chat/turns').length,2));const turns=calls.filter(c=>c.path==='/chats/chat/turns');assert.equal(turns[0].body.reply_to,scenePrompt.id);assert.equal(turns[1].body.reply_to,next.id);
 });
 

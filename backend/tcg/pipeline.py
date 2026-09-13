@@ -206,7 +206,7 @@ class PipelineRuntime:
         _, run = self.store.create_run(chat_id, request)
         stop_after = request.get('stop_after')
         if not stop_after:
-            stop_after = {'review_requirement': 'analysis', 'generate_scenario': 'scenarios'}.get(request['intent'])
+            stop_after = {'review_requirement': 'analysis', 'generate_scenario': 'scenarios'}.get(request['intent'], 'review')
         with self.store.transaction():
             inherited = [self.store.get('artifact', aid) for aid in dict.fromkeys(entry['refs'].values())] if entry else []
             inherited_sources = [sid for value in inherited for sid in value.get('_source_ids', [])]

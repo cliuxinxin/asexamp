@@ -8,11 +8,11 @@ def object_schema(properties, required=(), *, extra=False):
             'additionalProperties': extra}
 
 
-def report_schema():
+def report_schema(kind=None):
     suggestion = object_schema({'question': TEXT, 'answer': TEXT, 'basis': TEXT,
         'refs': STRINGS, 'confidence': {'type': 'string', 'enum': ['supported', 'assumption']}},
         ['question', 'answer', 'basis', 'refs', 'confidence'])
-    return object_schema({'summary': TEXT, 'questions': STRINGS,
+    schema = object_schema({'summary': TEXT, 'questions': STRINGS,
         'question_suggestions': {'type': 'array', 'items': suggestion},
         'assumptions': STRINGS, 'in_scope': STRINGS, 'out_of_scope': STRINGS,
         'issues': {'type': 'array', 'items': object_schema({'title': TEXT, 'detail': TEXT,
@@ -22,6 +22,12 @@ def report_schema():
         'excluded_scenarios': {'type': 'array', 'items': object_schema({
             'scenario_id': TEXT, 'reason': TEXT, 'refs': STRINGS}, ['scenario_id', 'reason', 'refs'])}},
         ['summary'], extra=True)
+    if kind == 'analysis':
+        schema['properties']['diagrams']['description'] = (
+            'Three complementary current requirement views: 业务流程图 (flowchart TD), '
+            '领域思维导图 (mindmap), 状态转换图 (stateDiagram-v2). '
+            'Each view uses grounded business facts; mark unspecified transitions rather than invent them.')
+    return schema
 
 
 def rows_schema(kind, profile=None):
@@ -45,7 +51,7 @@ def rows_schema(kind, profile=None):
         if field and field not in props and not field.startswith('_') and field != 'expected':
             props[field] = {'description': column.get('definition', column.get('header', field))}
     return object_schema({'items': {'type': 'array', 'items': object_schema(props, required, extra=True)},
-                          'report': report_schema()}, ['items', 'report'])
+                          'report': report_schema(kind)}, ['items', 'report'])
 
 
 ESTIMATE_SCHEMA = object_schema({'summary': TEXT,

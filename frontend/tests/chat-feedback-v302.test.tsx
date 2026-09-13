@@ -109,7 +109,7 @@ test('prompt changes retire previous suggestions and busy prompts cannot fill a 
  const {state}=fixture({prompt:clarification,onTurn:(body,state)=>{state.conversation_prompt={...clarification,id:'gate:next',kind:'busy',busy:true,title:'正在处理当前步骤'};return json({id:'turn',client_message_id:body.client_message_id,status:'succeeded',message:'继续处理',parts:[],pending:[],actions:[]});}});
  state.messages=[{id:'old',role:'assistant',content:'旧的提示',metadata:{turn_response:{id:'old-turn',status:'succeeded',parts:[],pending:[{questions:[{id:'old',question:'历史问题',suggestion:'旧建议'}]}],actions:[]}}}];
  await ready();await screen.findByRole('group',{name:'快捷回复'});assert.equal(screen.queryByRole('button',{name:/采用.*旧建议/}),null);
- submit('请先解释当前问题');await within(screen.getByRole('region',{name:'当前对话提示'})).findByText('正在处理当前步骤');assert.equal(Boolean(screen.queryByRole('group',{name:'快捷回复'})),false);
+ submit('请先解释当前问题');await waitFor(()=>assert.ok(screen.getByRole('region',{name:'当前工作流'}).textContent?.includes('AI 正在处理')));assert.ok(screen.queryByRole('region',{name:'当前对话提示'})===null);assert.equal(Boolean(screen.queryByRole('group',{name:'快捷回复'})),false);
 });
 
 test('confirmed answers have no active recommendation text',()=>{

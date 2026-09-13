@@ -10,8 +10,9 @@ const reviewReplies:Record<string,{label:string;text:string;subject:string}>={
 };
 
 // Quick replies are ordinary chat turns, scoped to the current server prompt.
-export function ConversationSuggestions({prompt,disabled=false,onChoose}:{prompt?:ConversationPrompt|null;disabled?:boolean;onChoose:(text:string,kind?:ReplyKind)=>void}){
+export function ConversationSuggestions({prompt,disabled=false,onChoose,onViewProfileChange}:{prompt?:ConversationPrompt|null;disabled?:boolean;onChoose:(text:string,kind?:ReplyKind)=>void;onViewProfileChange?:()=>void}){
  if(!prompt||prompt.busy||prompt.kind==='busy')return null;
+ if(prompt.kind==='profile')return onViewProfileChange?<div className="conversation-suggestions" role="group" aria-label="快捷回复" aria-busy={disabled||undefined}><span className="suggestions-hint">点击查看更改，勾选后再确认应用 · 输入框草稿会保留</span><div className="suggestion-group"><span className="suggestions-label">模板建议</span><button type="button" disabled={disabled} onClick={()=>{if(!disabled)onViewProfileChange();}}>查看 Profile 更改</button></div></div>:null;
  const unanswered=(prompt.questions??[]).filter(question=>!question.answer?.trim());
  const answerPrefix='仅提交以下澄清答案并更新需求理解，不确认需求理解。';
  const questions:Reply[]=prompt.kind==='clarification'?unanswered.filter(question=>question.suggestion?.trim()).map(question=>({

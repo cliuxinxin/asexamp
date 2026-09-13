@@ -8,6 +8,7 @@ import re
 from contextlib import nullcontext
 
 from . import dependencies as deps
+from .analysis_diagrams import ANALYSIS_DIAGRAM_INSTRUCTION, complete_analysis_diagrams
 from .case_fields import (MANUAL_FIELDS, column_signature, filled, materialize_fields,
                           protect_non_ai_fields, template_check, template_columns)
 from .clarification import pending_questions, question_key, submitted_answers
@@ -289,10 +290,10 @@ class NativeBusiness:
         build = lambda group: self._context(run, group, previous_items=old['items'] if old else [])
         results = await self._groups('understand_requirements', business, build, rows_schema('analysis'),
             'Extract complete business requirements. Ignore document approval metadata. '
-            'Each item has id/title/description/refs, never case steps. Include a concise business diagram, '
-            'and only consequential clarification questions. Every question should have a concrete suggested '
+            'Each item has id/title/description/refs, never case steps. Include only consequential '
+            'clarification questions. Every question should have a concrete suggested '
             'answer marked supported with evidence or explicitly an unconfirmed assumption. '
-            'Preserve IDs for unchanged requirements from previous_items.', run)
+            'Preserve IDs for unchanged requirements from previous_items. ' + ANALYSIS_DIAGRAM_INSTRUCTION, run)
         rows, report = self._merge_results(results)
         # Parallel evidence partitions must not share accidentally reused local IDs.
         seen = set()
@@ -304,6 +305,7 @@ class NativeBusiness:
             raise DomainError('没有找到可生成测试的业务需求；请补充功能规则')
         self._validate('analysis', rows, evidence)
         self._suggestions(report, evidence)
+        complete_analysis_diagrams(report, rows, previous=old, whole_response=len(results) == 1)
         report['_native_input_digest'] = digest
         report['source_coverage'] = {'processed_evidence_ids': [e['id'] for e in business],
             'processed_chunks': len(business), 'total_chunks': len(business)}
@@ -424,7 +426,9 @@ class NativeBusiness:
                 selected_scope=selected_ids is not None,
                 scenarios=[r for a in parents if a['type'] == 'scenarios' for r in a['items'] if r['id'] in scenario_ids])
         results = await self._groups('review_cases', selected, build, rows_schema('cases', run['_profile']),
-            'Review supplied cases once. Return the complete reviewed rows for this batch plus report issues. '
+            'Review supplied cases once. Return the complete reviewed rows for this batch plus report.summary '
+            'and report.issues (an empty array when no issues are found). Explain review findings, corrections '
+            'and remaining questions clearly, with affected case_ids and provided evidence refs when relevant. '
             'Retain stable IDs and unchanged fields. Add missing cases only when grounded. A case may be removed '
             'only when report.excluded_scenarios supplies its scenario ID, explicit exclusion reason and evidence. '
             'If selected_scope is true, modify only supplied case IDs and do not add new cases.', run)
@@ -553,6 +557,7 @@ class NativeBusiness:
         sources, roles, evidence = self._evidence(artifact, source_ids, source_roles)
         parents = self._parents(artifact)
         guard = self._manifest(sources, parents + [artifact])
+        diagram_response_is_whole = False
         if new_values is not None:
             if not isinstance(new_values, dict) or set(new_values) & {'id', 'report', '_source_ids'} or any(k.startswith('_') for k in new_values):
                 raise DomainError('只能修改业务字段，不能改变稳定编号或内部记录')
@@ -571,7 +576,9 @@ class NativeBusiness:
                 rows_schema(artifact['type'], artifact.get('_profile')),
                 'Apply the user instruction to supplied items. Return all supplied IDs unchanged, including '
                 'unchanged rows, and preserve unrelated fields. Only add business rows when explicitly requested. '
-                'Update requirement understanding from new evidence when requested. Never confirm a workflow stage.')
+                'Update requirement understanding from new evidence when requested. Never confirm a workflow stage. '
+                + (ANALYSIS_DIAGRAM_INSTRUCTION if artifact['type'] == 'analysis' else ''))
+            diagram_response_is_whole = len(results) == 1 and len(selected) == len(artifact['items'])
             revised, new_report = self._merge_results(results)
             supplied_report_fields = {key for result in results for key in result.get('report', {})}
             for key in ('questions', 'question_suggestions', 'assumptions'):
@@ -590,6 +597,9 @@ class NativeBusiness:
         rows = [changes.pop(r['id'], copy.deepcopy(r)) for r in artifact['items']] + list(changes.values())
         self._validate(artifact['type'], rows, evidence, parents, artifact.get('_profile'))
         self._suggestions(report, evidence)
+        if artifact['type'] == 'analysis':
+            complete_analysis_diagrams(report, rows, previous=artifact,
+                whole_response=diagram_response_is_whole or rows == artifact['items'])
         if artifact['type'] == 'cases':
             report['template_check'] = template_check(artifact.get('_profile', {}), rows)
         report.pop('_native_input_digest', None)

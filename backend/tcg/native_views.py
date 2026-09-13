@@ -6,6 +6,44 @@ import json
 from .schemas import DomainError
 
 
+def review_opinions(artifact):
+    """Read the latest review belonging to this exact artifact revision."""
+    report = artifact.get('report') or {}
+    reports = report.get('review_reports')
+    review = next((value for value in reversed(reports) if isinstance(value, dict)), {}) if isinstance(reports, list) else report
+    issues = []
+    for value in review.get('issues', []) if isinstance(review.get('issues'), list) else []:
+        if isinstance(value, str):
+            issues.append({'title': value})
+        elif isinstance(value, dict):
+            item = {'title': str(value.get('title') or '评审意见')}
+            if isinstance(value.get('detail'), str):
+                item['detail'] = value['detail']
+            for key in ('case_ids', 'refs'):
+                if isinstance(value.get(key), list):
+                    item[key] = [entry for entry in value[key] if isinstance(entry, str)]
+            issues.append(item)
+    for question in review.get('questions', []) if isinstance(review.get('questions'), list) else []:
+        if isinstance(question, str) and question.strip():
+            issues.append({'title': '待确认问题', 'detail': question})
+    exclusions = review.get('excluded_scenarios')
+    for exclusion in exclusions if isinstance(exclusions, list) else []:
+        if isinstance(exclusion, dict):
+            issues.append({'title': '范围排除：' + str(exclusion.get('scenario_id') or '未指定场景'),
+                'detail': str(exclusion.get('reason') or '未提供理由'),
+                'refs': [ref for ref in exclusion.get('refs', []) if isinstance(ref, str)]
+                        if isinstance(exclusion.get('refs'), list) else []})
+    result = {'summary': str(review.get('summary') or ''), 'issues': issues}
+    if isinstance(review.get('scope'), dict):
+        result['scope'] = copy.deepcopy(review['scope'])
+    notes = review.get('notes')
+    if isinstance(notes, str):
+        notes = [notes]
+    if isinstance(notes, list):
+        result['notes'] = [value for value in notes if isinstance(value, str)]
+    return result
+
+
 def pipeline_messages(store, chat_id):
     """Project saved stage events into the existing UI message envelope."""
     labels = {'understood': '需求理解已保存', 'scenarios_generated': '测试场景已保存',
@@ -15,8 +53,9 @@ def pipeline_messages(store, chat_id):
         artifact = store.revision(event['artifact_id'], event['revision'])
         report = artifact.get('report') or {}
         content = labels.get(event['phase'], '阶段成果已保存') + f"：{len(artifact['items'])} 条 · v{artifact['revision']}。"
-        if report.get('summary'):
-            content += '\n' + str(report['summary'])[:1200]
+        summary = review_opinions(artifact)['summary'] if event['phase'] == 'reviewed' else report.get('summary')
+        if summary:
+            content += '\n' + str(summary)[:1200]
         if report.get('clarification_followups'):
             content += '\n另有待核实的补充问题，已保留在成果说明中；它们尚未确认为业务规则。'
         messages.append({'id': event['id'], 'role': 'assistant', 'content': content,
@@ -63,6 +102,9 @@ async def current_prompt(store, pipeline, chat):
         'run_id': run['id'], 'title': gate.get('title', '确认当前内容'),
         'message': gate.get('message', '回复同意继续，或直接说明修改意见。'),
         'artifact_id': gate.get('artifact_id'), 'artifact_revision': gate.get('artifact_revision')}
+    if gate['type'] == 'case_result_review' and gate.get('artifact_id'):
+        artifact = store.revision(gate['artifact_id'], gate['artifact_revision'])
+        result['review'] = review_opinions(artifact)
     if gate['type'] == 'clarification':
         suggestions = {q.get('question'): q for q in gate.get('question_suggestions', [])}
         result['questions'] = []

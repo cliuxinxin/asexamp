@@ -1,12 +1,12 @@
 import {FileText} from 'lucide-react';
 import type {ConversationPrompt,Run} from './types';
 
-const stages:Record<string,string>={intake:'理解任务',understand:'理解需求',analysis:'分析需求',requirement_review:'确认需求',strategy_review:'确认需求理解',scenario_generation:'生成场景',scenarios:'生成场景',scenario_review:'确认场景',case_generation:'生成用例',cases:'生成用例',case_draft_review:'确认用例',case_result_review:'确认用例结果',case_review:'评审用例',review:'评审用例',clarification:'补充信息',completed:'已完成'};
+const stages:Record<string,string>={intake:'理解任务',understand:'理解需求',analysis:'分析需求',requirement_review:'确认需求',strategy_review:'确认需求理解',scenario_generation:'生成场景',scenarios:'生成场景',scenario_review:'确认场景',case_generation:'生成用例',cases:'生成用例',case_draft_review:'确认用例',case_result_review:'确认评审结果',case_review:'评审用例',review:'评审用例',clarification:'补充信息',completed:'已完成'};
 
 export function WorkflowSummary({run,prompt,hasResult,onOpen}:{run?:Run;prompt?:ConversationPrompt|null;hasResult:boolean;onOpen:()=>void}){
  if(!run&&!prompt&&!hasResult)return null;
  const status=run?.status??(prompt?'waiting':'completed');
- const label=stages[run?.stage??'']??prompt?.title??(hasResult?'已完成':'当前任务');
+ const label=stages[prompt?.kind??'']??(prompt?.kind==='workflow_gate'?prompt.title:undefined)??stages[run?.stage??'']??prompt?.title??(hasResult?'已完成':'当前任务');
  const active=status==='queued'||status==='running'||prompt?.busy||prompt?.kind==='busy';
  const detail=active
    ?'AI 正在处理，请稍候。你仍可在对话中补充说明。'

@@ -3,7 +3,7 @@ import base64
 from urllib.parse import quote
 
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .native_views import workspace_state
 from .project_context import shared_context, unshare_clarification, pin_samples
@@ -12,6 +12,23 @@ from .storage import public, uid
 
 
 def register_routes(app):
+    @app.get('/api/chats/{chat_id}/profile-change')
+    def profile_change(chat_id: str, prompt_id: str):
+        from .profile_changes import preview_profile_change
+        return preview_profile_change(app.state.store, chat_id, prompt_id)
+
+    class ProfileChangeApproval(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        prompt_id: str = Field(min_length=1, max_length=300)
+        expected_version: int = Field(ge=1)
+        selected_keys: list[str] = Field(min_length=1, max_length=100)
+
+    @app.post('/api/chats/{chat_id}/profile-change/apply')
+    def apply_profile_change(chat_id: str, body: ProfileChangeApproval):
+        from .profile_changes import apply_profile_change as apply_change
+        return apply_change(app.state.store, chat_id, body.prompt_id, body.expected_version,
+                            body.selected_keys, write_messages=True)
+
     @app.get('/api/chats/{chat_id}/workspace-state')
     async def workspace(chat_id: str, artifact_id: str | None = None):
         return await workspace_state(app.state.store, app.state.engine, chat_id, artifact_id)
