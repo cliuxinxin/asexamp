@@ -15,6 +15,7 @@ from openpyxl import load_workbook
 
 from tcg.main import create_app
 from tcg.native_business import NativeBusiness
+from workspace_helpers import save_workspace
 from test_native_business_v300 import NativeModel
 
 
@@ -143,8 +144,7 @@ def test_modify_selected_confirm_exports_exact_new_version_and_duplicate_does_no
         chat, cases = asyncio.run(seed(app.state.store, gateway))
         initial, part, _ = begin(client, app, gateway, chat, cases)
         prompt = initial['pending'][0]
-        result, body = post(client, chat, 'accept', '同意', reply_kind='confirm', reply_to=prompt['id'],
-            command={'name': 'artifact.apply', 'arguments': {'proposal_id': prompt['proposal_id']}})
+        result, body = save_workspace(client, prompt)
         files = wait_files(client, chat, result)
         assert len(files) == 1
         record = app.state.store.list('frozen_export', chat_id=chat['id'])
@@ -156,15 +156,15 @@ def test_modify_selected_confirm_exports_exact_new_version_and_duplicate_does_no
         current = app.state.store.get('artifact', cases['id'])
         assert current['items'][1] == cases['items'][1]
         assert len(gateway.planner_inputs) == 1
-        again = client.post('/api/chats/' + chat['id'] + '/turns', json=body).json()
-        assert again['id'] == result['id']
+        again = client.post('/api/artifacts/' + cases['id'] + '/workspace-grid/save', json=body)
+        assert again.status_code == 200, again.text
         assert len(app.state.store.list('frozen_export', chat_id=chat['id'])) == 1
         assert app.state.store.get('artifact', cases['id'])['revision'] == current['revision']
         state = client.get('/api/chats/' + chat['id'] + '/plans/' + part['plan_id']).json()
         assert state['status'] in ('completed', 'succeeded'), state
 
 
-def test_question_does_not_advance_and_inline_reject_cancels_export(tmp_path):
+def test_question_does_not_advance_and_workspace_reject_cancels_export(tmp_path):
     gateway = QueueGateway()
     app = create_app(tmp_path, gateway)
     with TestClient(app) as client:
@@ -177,9 +177,7 @@ def test_question_does_not_advance_and_inline_reject_cancels_export(tmp_path):
         assert answer['status'] == 'succeeded', answer
         assert not app.state.store.list('frozen_export', chat_id=chat['id'])
         assert client.get('/api/chats/' + chat['id']).json()['conversation_prompt']['id'] == prompt['id']
-        rejected, _ = post(client, chat, 'reject', '拒绝这份修改', reply_kind='confirm', reply_to=prompt['id'],
-            command={'name': 'artifact.discard', 'arguments': {'proposal_id': prompt['proposal_id']}})
-        assert rejected['status'] == 'succeeded', rejected
+        rejected, _ = save_workspace(client, prompt, reject=True)
         assert app.state.store.get('artifact', cases['id'])['revision'] == cases['revision']
         assert not app.state.store.list('frozen_export', chat_id=chat['id'])
         state = client.get('/api/chats/' + chat['id'] + '/plans/' + part['plan_id']).json()
@@ -194,12 +192,21 @@ def test_waiting_plan_restores_after_server_restart_then_exports_without_replann
         chat, cases = asyncio.run(seed(app.state.store, gateway))
         initial, part, _ = begin(client, app, gateway, chat, cases)
         prompt = initial['pending'][0]
+        # Simulate the old persisted kind/fields; the active prompt and plan keep their IDs.
+        from tcg.storage import dump
+        proposal = app.state.store.get('artifact_proposal', prompt['proposal_id'])
+        for new, old in (('artifact_revision', 'base_revision'), ('_dependencies', 'dependencies'),
+                         ('_source_ids', 'source_ids'), ('_source_roles', 'source_roles')):
+            proposal[old] = proposal.pop(new)
+        proposal.pop('proposal_type')
+        proposal.pop('status')
+        app.state.store.db.execute('UPDATE objects SET kind=?,payload=? WHERE id=?',
+            ('native_revision_proposal', dump(proposal), proposal['id']))
     restarted = create_app(tmp_path, gateway)
     with TestClient(restarted) as client:
         state = client.get('/api/chats/' + chat['id'] + '/plans/' + part['plan_id']).json()
         assert state['waiting_prompt_id'] == prompt['id']
-        result, _ = post(client, chat, 'accept-after-restart', '同意', reply_kind='confirm', reply_to=prompt['id'],
-            command={'name': 'artifact.apply', 'arguments': {'proposal_id': prompt['proposal_id']}})
+        result, _ = save_workspace(client, prompt, request_id='after-restart')
         assert len(wait_files(client, chat, result)) == 1
         assert len(gateway.planner_inputs) == 1
         assert len(restarted.state.store.list('frozen_export', chat_id=chat['id'])) == 1

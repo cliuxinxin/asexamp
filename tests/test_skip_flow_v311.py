@@ -134,7 +134,7 @@ async def test_normal_flow_and_explicit_review_rejection_preserve_cases(direct_s
         done = await settled(runtime, run['id'])
         assert done['status'] == 'completed'
         assert store.get('artifact', before['id']) == before
-        assert store.get('review_proposal', proposal_id)['status'] == 'rejected'
+        assert store.get('artifact_proposal', proposal_id)['status'] == 'rejected'
         assert [t for t, _ in model.calls] == ['understand_requirements', 'generate_scenarios', 'generate_cases', 'review_cases']
     finally:
         await runtime.stop()
@@ -193,16 +193,16 @@ def test_http_conversation_skip_and_draft_request_stays_in_native_tools(native_j
         before_analysis = j.app.state.store.get('artifact', analysis['id'])
         rows = copy.deepcopy(cases['items'])
         rows[0]['title'] = '人工编辑直接需求用例'
-        manual = j.client.put('/api/artifacts/' + cases['id'], json={
-            'expected_revision': cases['revision'], 'items': rows})
+        manual = j.client.post('/api/artifacts/' + cases['id'] + '/workspace-grid/save', json={
+            'expected_revision': cases['revision'], 'items': rows, 'client_request_id': 'manual-case-edit'})
         assert manual.status_code == 200, manual.text
-        edited = manual.json()
+        edited = manual.json()['artifact']
         assert edited['items'][0]['requirement_ids'] == ['REQ-1']
         assert edited['report']['lineage'] == cases['report']['lineage']
         proposal = j.turn('把当前用例标题改为 AI 编辑直接需求用例', 'modify_artifact_tool', {
             'artifact_id': cases['id'], 'item_id': cases['items'][0]['id'],
             'new_values': {'title': 'AI 编辑直接需求用例'}}, status='needs_confirmation')
-        j.turn('接受这项修改', 'apply_artifact_preview_tool', reply=proposal['pending'][0])
+        j.turn('接受这项修改', 'workspace_save', reply=proposal['pending'][0])
         changed = j.artifact(cases['id'])
         assert changed['items'][0]['title'] == 'AI 编辑直接需求用例'
         assert changed['items'][0]['requirement_ids'] == ['REQ-1']
@@ -261,7 +261,7 @@ def test_http_review_rejection_completes_without_applying_proposal(native_journe
     j.turn('拒绝这份评审建议，保留当前用例', 'resume_pipeline_tool', {'action': 'rejected'}, reply=prompt)
     j.completed()
     assert j.artifact(cases['id'])['revision'] == cases['revision']
-    assert j.app.state.store.get('review_proposal', prompt['proposal_id'])['status'] == 'rejected'
+    assert j.app.state.store.get('artifact_proposal', prompt['proposal_id'])['status'] == 'rejected'
 
 
 @pytest.mark.asyncio

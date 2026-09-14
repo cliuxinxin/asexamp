@@ -4,7 +4,6 @@ import copy
 import pytest
 
 from tcg import dependencies as deps
-from tcg.dialogue_lineage import preview_changes
 from tcg.operations import _save, native_writes
 from tcg.schemas import DomainError
 from tcg.tool_registry import build_tools
@@ -98,8 +97,8 @@ async def test_orphan_import_keeps_existing_rows_and_adds_independent_case(setup
     adding_model(service, model)
     # Imported empty associations remain legal; new independent cases create no phantom parents.
     proposal = await service.revise(artifact, instruction='新增用例', dialogue_content='直接增加并发登录用例', add=True)
-    diffs = preview_changes(proposal, artifact)
-    assert [d['expected_revision'] for d in diffs] == [1]
+    assert proposal['artifact_revision'] == 1
+    assert proposal['changes'][0]['op'] == 'add'
     updated = service.apply_revision_preview(proposal)
     parents = [store.get('artifact', c['artifact_id']) for c in proposal['dialogue']['parent_changes']]
     assert parents == []
@@ -148,19 +147,19 @@ async def test_tool_uses_exact_body_and_apply_preserves_separate_pipeline_confir
     result = await tools['modify_artifact_tool'].ainvoke({'artifact_id': cases['id'],
         'instruction': '模型转换的简短指令', 'add': True})
     assert result['status'] == 'needs_confirmation'
-    proposal = store.get('native_revision_proposal', result['pending'][0]['proposal_id'])
+    proposal = store.get('artifact_proposal', result['pending'][0]['proposal_id'])
     assert proposal['dialogue']['source']['content'] == text
     assert proposal['dialogue']['parent_changes'] == []
     assert not pipeline.calls
     pending = result['pending'][0]
     apply_tools = {t.name: t for t in build_tools(store, service, pipeline, chat,
         {'content': '同意', 'reply_to': pending['id']}, pending)}
-    accepted = await apply_tools['apply_artifact_preview_tool'].ainvoke({})
-    assert accepted['status'] == 'succeeded'
-    assert pipeline.calls == [('changed', cases['id'])]
-    assert store.get('chat', chat['id'])['_native_artifact_prompt'] is None
-    repeated = await apply_tools['apply_artifact_preview_tool'].ainvoke({})
-    assert repeated['status'] == 'needs_input'
+    assert 'apply_artifact_preview_tool' not in apply_tools
+    assert 'discard_artifact_preview_tool' not in apply_tools
+    assert not pipeline.calls
+    assert store.get('artifact_proposal', proposal['id'])['status'] == 'pending'
+    assert store.get('chat', chat['id'])['_native_artifact_prompt'] == pending
+
 
 
 @pytest.mark.asyncio

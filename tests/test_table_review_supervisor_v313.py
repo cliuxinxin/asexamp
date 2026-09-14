@@ -96,7 +96,7 @@ def test_table_resolution_uses_real_gate_and_exports_exact_resolved_cells_once(t
     app = create_app(tmp_path, gateway)
     with TestClient(app) as client:
         chat, profile, run, prompt, plan = begin_review_plan(client, app, gateway)
-        base = '/api/artifacts/' + prompt['artifact_id'] + '/table-review'
+        base = '/api/artifacts/' + prompt['artifact_id'] + '/workspace-grid'
         response = client.get(base, params={'run_id': run['id'], 'proposal_id': prompt['proposal_id']})
         assert response.status_code == 200, response.text
         view = response.json()

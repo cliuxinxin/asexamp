@@ -65,16 +65,17 @@ class Business:
             if ids is None or row['id'] in ids:
                 row.update(kwargs.get('new_values') or {'title': kwargs['instruction']})
         if kwargs.get('preview'):
-            return {'artifact_id': artifact['id'], 'base_revision': artifact['revision'],
-                'items': result['items'], 'report': result.get('report', {}),
-                'source_ids': [], 'source_roles': {}, 'dependencies': {}}
+            from tcg.review_proposals import revision_proposal
+            from tcg.dependencies import manifest
+            return revision_proposal(artifact, result['items'], result.get('report', {}),
+                manifest(self.store, artifact_ids=[artifact['id']]), [], {})
         result['revision'] += 1
         return result
 
     def apply_revision_preview(self, proposal):
         self.calls.append(('apply', proposal['artifact_id']))
         return {**self.store.get('artifact', proposal['artifact_id']),
-            'revision': proposal['base_revision'] + 1, 'items': proposal['items']}
+            'revision': proposal['artifact_revision'] + 1, 'items': proposal['items']}
 
     async def estimate(self, artifact, ids=None):
         self.calls.append(('estimate', artifact['id'], ids))
@@ -231,20 +232,21 @@ async def test_profile_samples_strip_business_references_and_manual_results(setu
 
 
 @pytest.mark.asyncio
-async def test_explicit_preview_does_not_write_or_move_gate_until_new_turn_agrees(setup):
+async def test_preview_stays_pending_and_model_has_no_apply_or_discard_tool(setup):
     tools = setup.make()
     preview = await tools['modify_artifact_tool'].ainvoke({'artifact_id': 'scenarios', 'item_id': 'S1',
         'new_values': {'title': '预览标题'}, 'preview': True})
     assert preview['status'] == 'needs_confirmation'
     assert setup.store.get('artifact', 'scenarios')['items'][0]['title'] == '登录成功'
     assert not setup.pipeline.calls
-    denied = await tools['apply_artifact_preview_tool'].ainvoke({'proposal_id': preview['pending'][0]['proposal_id']})
-    assert denied['status'] == 'needs_input'
+    assert 'apply_artifact_preview_tool' not in tools
+    assert 'discard_artifact_preview_tool' not in tools
     p = setup.store.get('chat', setup.chat['id'])['_native_artifact_prompt']
-    accepted = await setup.make({'reply_to': p['id']}, p)['apply_artifact_preview_tool'].ainvoke({})
-    assert accepted['status'] == 'succeeded'
-    assert setup.pipeline.calls == [('changed', 'scenarios')]
-    assert not setup.store.get('chat', setup.chat['id']).get('_native_artifact_prompt')
+    assert 'apply_artifact_preview_tool' not in setup.make({'reply_to': p['id'], 'reply_kind': 'confirm'}, p)
+    proposal = setup.store.get('artifact_proposal', p['proposal_id'])
+    assert proposal['proposal_type'] == 'revision' and proposal['status'] == 'pending'
+    assert not setup.pipeline.calls
+
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,8 @@ from test_native_journey_v300 import native_journey
 
 
 def confirm(j, prompt, tool, *, status='succeeded'):
+    if prompt.get('proposal_id'):
+        return j.workspace(prompt)
     j.sequence += 1
     j.gateway.next_call = (tool, {})
     response = j.client.post('/api/chats/' + j.chat['id'] + '/turns', json={
@@ -37,7 +39,7 @@ def test_preview_independent_scenario_review_then_case_columns_and_profile_expor
     assert j.artifact(scenarios['id'])['revision'] == 1
     workspace = j.client.get('/api/chats/' + j.chat['id'] + '/workspace-state').json()
     assert workspace['pending_proposal']['artifact_id'] == scenarios['id']
-    confirm(j, preview['pending'][0], 'apply_artifact_preview_tool')
+    confirm(j, preview['pending'][0], 'workspace_save')
     revised = j.artifact(scenarios['id'])
     assert revised['items'][0]['requirement_ids'] == []
     assert j.app.state.store.get('artifact', analysis['id']) == analysis_before
@@ -57,7 +59,7 @@ def test_preview_independent_scenario_review_then_case_columns_and_profile_expor
     preview = j.turn('给用例加执行人列，然后导出 Excel', 'modify_case_columns_tool', {
         'artifact_id': draft['id'], 'upsert_columns': [{'field': 'tester', 'header': '执行人',
         'value_source': 'manual'}], 'export_after_approval': True}, status='needs_confirmation')
-    result = confirm(j, preview['pending'][0], 'apply_artifact_preview_tool', status='needs_confirmation')
+    result = confirm(j, preview['pending'][0], 'workspace_save', status='needs_confirmation')
     assert j.artifact(draft['id'])['revision'] == 3
     assert j.app.state.store.get('profile', profile['id']) == profile
     prompt = result['pending'][0]

@@ -52,19 +52,15 @@ def test_conditional_assent_is_not_an_approval(control_setup):
     assert c.client.get('/api/chats/' + c.chat['id']).json()['conversation_prompt']['id'] == c.prompt['id']
 
 
-def test_natural_rejection_cancels_inherited_export(control_setup):
+@pytest.mark.parametrize('reply', ['拒绝', '同意'])
+def test_chat_assent_or_rejection_only_guides_to_workspace_and_keeps_export_waiting(control_setup, reply):
     c = control_setup
-    c.gateway.plans.append(current_control_plan('拒绝当前展示的修改预览，并取消原计划剩余操作'))
-    c.gateway.calls.insert(0, ('discard_artifact_preview_tool', {}))
-    result, _ = post(c.client, c.chat, 'natural-rejection', '我看过了，这份修改不合适，放弃这份预览。')
-    assert result['status'] == 'succeeded', result
+    result, _ = post(c.client, c.chat, 'natural-reply', reply)
+    assert result['status'] == 'needs_confirmation', result
+    assert '工作区' in result['message']
     assert_original_untouched(c)
-    part = next(p for p in result['parts'] if p['type'] == 'execution_plan')
-    state = c.client.get('/api/chats/' + c.chat['id'] + '/plans/' + part['plan_id']).json()
-    assert state['status'] == 'cancelled', state
-    assert state['steps'][-1]['status'] == 'cancelled'
-    previous = c.client.get('/api/chats/' + c.chat['id'] + '/plans/' + c.initial_plan_id).json()
-    assert previous['status'] == 'cancelled'
+    state = c.client.get('/api/chats/' + c.chat['id'] + '/plans/' + c.initial_plan_id).json()
+    assert state['status'] == 'waiting_confirmation'
     assert 'export_artifact_tool' not in c.gateway.executed
 
 

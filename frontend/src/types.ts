@@ -44,6 +44,7 @@ export type TurnPart=
  |{type:'diagnostic';reference_id:string;call_id?:string;category:string;message:string;hints:string[];log_path:string}
  |{type:'artifact';artifact_id:string;revision:number}
  |{type:'case_details';artifact_id:string;revision:number;items:Json[];title?:string}
+ |{type:'artifact_proposal';artifact_id:string;proposal_id:string;artifact_revision:number}
  |{type:'diff';proposal_id:string;changes:Json[]}
  |{type:'coverage';data:Json}
  |{type:'source_impact';data:Json}

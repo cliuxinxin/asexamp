@@ -54,8 +54,7 @@ class NativeJourneyChatModel(BaseChatModel):
                 'modify_profile_tool': 'profile_edit', 'learn_template_tool': 'template_learn',
                 'revise_review_tool': 'review_edit', 'save_samples_tool': 'samples',
                 'complete_template_fields_tool': 'template_fill', 'export_artifact_tool': 'export',
-                'apply_artifact_preview_tool': 'current_control', 'apply_profile_tool': 'current_control',
-                'discard_artifact_preview_tool': 'current_control', 'discard_template_tool': 'current_control'}
+                'apply_profile_tool': 'current_control', 'discard_template_tool': 'current_control'}
             steps = [{'capability': capabilities[name],
                 'instruction': '按用户本次原话处理当前请求，不扩大范围。'}]
             if name == 'modify_case_columns_tool' and arguments.get('export_after_approval'):
@@ -168,6 +167,8 @@ class NativeJourney:
         return response.json()
 
     def turn(self, content, tool_name, arguments=None, *, reply=None, mode='hitp', status='succeeded'):
+        if reply and reply.get('proposal_id') and tool_name in ('workspace_save', 'resume_pipeline_tool') and status != 'needs_input':
+            return self.workspace(reply, reject=(arguments or {}).get('action') == 'rejected')
         self.sequence += 1
         self.gateway.next_call = (tool_name, arguments or {})
         body = {'client_message_id': 'native-journey-' + str(self.sequence),
@@ -192,6 +193,12 @@ class NativeJourney:
             self.gateway.direct_controls.append(self.gateway.next_call)
             self.gateway.next_call = None
         return turn
+
+    def workspace(self, prompt, *, reject=False):
+        from workspace_helpers import save_workspace
+        self.sequence += 1
+        result, _ = save_workspace(self.client, prompt, request_id='journey-workspace-' + str(self.sequence), reject=reject)
+        return result
 
     def gate(self, kind):
         deadline = time.monotonic() + 8
@@ -288,7 +295,7 @@ def test_native_chat_tools_drive_each_human_gate_and_resume_reads_current_artifa
             'new_values': {'title': '验证注册用户凭证登录'}}, reply=scenario_prompt, status='needs_confirmation')
     preview = j.snapshot()['conversation_prompt']
     assert preview['kind'] == 'artifact_proposal'
-    j.turn('同意保存场景修改', 'apply_artifact_preview_tool', reply=preview)
+    j.turn('同意保存场景修改', 'workspace_save', reply=preview)
     run, modified, changed_prompt = j.gate('scenario_review')
     assert modified['id'] == scenarios['id'] and modified['revision'] == scenarios['revision'] + 1
     assert modified['items'][0]['title'] == '验证注册用户凭证登录'
@@ -367,7 +374,8 @@ def test_completed_pipeline_supplement_preview_and_shared_clarification_close_th
 
     j.turn('新文件是补充需求，先修改需求理解，后续每一步仍然等我确认。',
            'update_from_sources_tool', {'artifact_id': old_analysis['id'],
-            'source_ids': [source['id']], 'instruction': '采用补充需求修改登录成功后的会话处理。'})
+            'source_ids': [source['id']], 'instruction': '采用补充需求修改登录成功后的会话处理。'}, status='needs_confirmation')
+    j.workspace(j.snapshot()['conversation_prompt'])
     run, analysis, analysis_prompt = j.gate('strategy_review')
     assert run['id'] == rid and analysis['id'] == old_analysis['id']
     assert analysis['revision'] == old_analysis['revision'] + 1
@@ -408,14 +416,15 @@ def test_completed_pipeline_supplement_preview_and_shared_clarification_close_th
     proposal = j.snapshot()['conversation_prompt']
     assert proposal['kind'] == 'artifact_proposal'
     assert j.artifact(scenarios['id']) == scenarios
-    j.turn('同意这个修改', 'apply_artifact_preview_tool', reply=proposal)
+    j.turn('同意这个修改', 'workspace_save', reply=proposal)
     run, modified, modified_prompt = j.gate('scenario_review')
     assert modified['revision'] == scenarios['revision'] + 1
     assert modified['items'][0]['title'] == '登录成功并注销其他会话'
     assert j.artifact(old_cases['id']) == old_cases
-    repeated = j.turn('同意这个修改', 'apply_artifact_preview_tool',
-        {'proposal_id': proposal['proposal_id']}, reply=proposal, status='needs_input')
-    assert repeated['actions'][0]['result']['error_status'] == 409
+    stale = j.client.post('/api/artifacts/' + modified['id'] + '/workspace-grid/save', json={
+        'expected_revision': proposal['artifact_revision'], 'proposal_id': proposal['proposal_id'],
+        'prompt_id': proposal['id'], 'items': modified['items'], 'client_request_id': 'stale-second-save'})
+    assert stale.status_code == 409
     assert j.artifact(modified['id']) == modified
     assert j.gate('scenario_review')[2]['id'] == modified_prompt['id']
 

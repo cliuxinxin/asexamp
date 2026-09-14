@@ -546,7 +546,7 @@ class NativeBusiness:
         guard = self._manifest(sources, parents + [cases])
         previous_proposal = None
         if feedback and run.get('review_proposal_id'):
-            candidate = self.store.get('review_proposal', run['review_proposal_id'])
+            candidate = self.store.get('artifact_proposal', run['review_proposal_id'])
             if candidate['artifact_id'] == cases['id'] and candidate['artifact_revision'] == cases['revision']:
                 previous_proposal = candidate
         feedback_scope = run.get('_review_feedback_scope') or {}
@@ -679,7 +679,7 @@ class NativeBusiness:
                 from .table_review import _receipt
                 _receipt(self.store, self.store.get('chat', run['chat_id']), resolution['prompt_id'], result)
             from .storage import now
-            self.store.put('review_proposal', {**proposal, 'status': 'applied',
+            self.store.put('artifact_proposal', {**proposal, 'status': 'applied',
                            'applied_revision': result['revision'], 'applied_at': now()})
             return result
 
@@ -733,7 +733,7 @@ class NativeBusiness:
             raise DomainError('模板补全遗漏了选中的用例；原内容已保留')
         return materialize_fields(rows, profile)
 
-    async def complete_fields(self, artifact, profile=None, ids=None):
+    async def complete_fields(self, artifact, profile=None, ids=None, preview=False):
         """Fill missing template fields without changing the artifact's frozen Profile."""
         artifact = self._artifact(artifact)
         if artifact['type'] != 'cases':
@@ -750,12 +750,15 @@ class NativeBusiness:
         completed = await self._complete_rows(artifact, selected, config, evidence, retry_unresolved=True)
         changed = {row['id']: row for row in completed}
         rows = [changed.get(row['id'], copy.deepcopy(row)) for row in artifact['items']]
-        if rows == artifact['items']:
+        if rows == artifact['items'] and not preview:
             return artifact
         self._validate('cases', rows, evidence, self._parents(artifact), artifact_profile(artifact))
         report = copy.deepcopy(artifact.get('report', {}))
         report['template_check'] = template_check(artifact_profile(artifact), rows)
         report['template_completion'] = template_check(config, rows)
+        if preview:
+            from .review_proposals import revision_proposal
+            return revision_proposal(artifact, rows, report, guard, sources, roles)
         with _writes():
             return self.store.revise_artifact(artifact['id'], artifact['revision'], rows,
                 reason='native_field_completion', report=report, dependencies=guard, provenance=guard)
@@ -783,9 +786,8 @@ class NativeBusiness:
             if artifact['type'] == 'analysis':
                 complete_analysis_diagrams(report, rows, previous=artifact)
             report.pop('_native_input_digest', None)
-            return {'artifact_id': artifact['id'], 'base_revision': artifact['revision'], 'items': rows,
-                    'report': report, 'source_ids': sources, 'source_roles': roles,
-                    'dependencies': self._manifest(sources, parents + [artifact])}
+            from .review_proposals import revision_proposal
+            return revision_proposal(artifact, rows, report, self._manifest(sources, parents + [artifact]), sources, roles)
         selected = self._selection(artifact, ids)
         selected_ids = {r['id'] for r in selected}
         relation_field = 'requirement_ids' if artifact['type'] == 'scenarios' else 'scenario_id'
@@ -928,9 +930,8 @@ class NativeBusiness:
                 report['_legacy_unlinked_cases'] = copy.deepcopy(dialogue['legacy_unlinked_cases'])
         from .conversation_facts import report_provenance
         report = report_provenance(self.store, artifact['chat_id'], report, rows, guard.get('sources', []))
-        proposal = {'artifact_id': artifact['id'], 'base_revision': artifact['revision'],
-            'items': rows, 'report': report, 'source_ids': sources, 'source_roles': roles,
-            'dependencies': guard}
+        from .review_proposals import revision_proposal
+        proposal = revision_proposal(artifact, rows, report, guard, sources, roles)
         if dialogue:
             proposal['dialogue'] = dialogue
         if preview or dialogue:
@@ -942,12 +943,12 @@ class NativeBusiness:
             from .dialogue_lineage import commit_dialogue
             return commit_dialogue(self, proposal)
         artifact = self._artifact(proposal['artifact_id'])
-        sources, roles, evidence = self._evidence(artifact, proposal['source_ids'], proposal['source_roles'])
+        sources, roles, evidence = self._evidence(artifact, proposal['_source_ids'], proposal['_source_roles'])
         self._validate(artifact['type'], proposal['items'], evidence, self._parents(artifact), artifact_profile(artifact))
         with _writes():
-            return self.store.revise_artifact(artifact['id'], proposal['base_revision'], proposal['items'],
+            return self.store.revise_artifact(artifact['id'], proposal['artifact_revision'], proposal['items'],
                 reason='native_tool_edit', report=proposal['report'], source_ids=sources, source_roles=roles,
-                dependencies=proposal['dependencies'], provenance=proposal['dependencies'])
+                dependencies=proposal['_dependencies'], provenance=proposal['_dependencies'])
 
     async def clarify(self, run, analysis, answers):
         run, analysis = self._run(run), self._artifact(analysis)

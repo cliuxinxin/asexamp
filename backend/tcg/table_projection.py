@@ -1,9 +1,9 @@
-"""Pure case-table projection shared by review workspaces and Excel export."""
+"""Pure table projections shared by artifact workspaces and Excel export."""
 import json
 import re
 
 from .case_fields import field_value, template_columns
-from .schemas import DomainError
+from .schemas import DEFAULT_PROFILE, DomainError, scenario_template_columns
 
 
 DEFAULT_CASE_COLUMNS = [
@@ -13,6 +13,11 @@ DEFAULT_CASE_COLUMNS = [
                           ('steps', 'Steps'), ('expected', 'Expected Result')]
 ]
 FORBIDDEN_CASE_FIELDS = {'refs', 'source_ids', 'source_hash', 'evidence', 'report', 'profile', 'run_id'}
+DEFAULT_ANALYSIS_COLUMNS = [
+    {'field': 'id', 'header': 'Requirement ID'},
+    {'field': 'title', 'header': 'Title'},
+    {'field': 'description', 'header': 'Description'},
+]
 
 
 def cell_safe(value):
@@ -74,3 +79,62 @@ def case_table_projection(artifact, layout='case', selected=None):
                 cells.append(cell_safe(value))
             rows.append({'item_id': item['id'], 'step_index': step_index, 'cells': cells})
     return {'columns': columns, 'rows': rows, 'layout': layout}
+
+
+def _selected_items(artifact, selected):
+    items = artifact['items']
+    if selected is None:
+        return items
+    wanted = set(selected)
+    if not wanted or not wanted.issubset({item['id'] for item in items}):
+        raise DomainError('导出所选条目 ID 无效')
+    return [item for item in items if item['id'] in wanted]
+
+
+def _flat_projection(artifact, columns, selected=None):
+    rows = []
+    for item in _selected_items(artifact, selected):
+        cells = []
+        for column in columns:
+            value = item.get(column['field'], '')
+            if isinstance(value, list):
+                value = '\n'.join(json.dumps(part, ensure_ascii=False)
+                                  if isinstance(part, (dict, list)) else str(part) for part in value)
+            elif isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False)
+            cells.append(cell_safe(value))
+        rows.append({'item_id': item['id'], 'step_index': None, 'cells': cells})
+    return {'columns': columns, 'rows': rows, 'layout': 'case'}
+
+
+def scenario_table_projection(artifact, layout='case', selected=None):
+    """Project scenario rows with the same columns and cells as scenario export."""
+    if artifact['type'] != 'scenarios':
+        raise DomainError('仅 Scenario Artifact 支持场景表格')
+    if layout != 'case':
+        raise DomainError('Scenario layout 必须为 case')
+    configured = artifact.get('_profile', {}).get(
+        'scenario_excel_columns', DEFAULT_PROFILE['scenario_excel_columns'])
+    columns = [{**column, 'header': cell_safe(column['header'])}
+               for column in scenario_template_columns(configured)]
+    return _flat_projection(artifact, columns, selected)
+
+
+def analysis_table_projection(artifact, layout='case', selected=None):
+    """Project requirement-analysis rows using their stable editable fields."""
+    if artifact['type'] != 'analysis':
+        raise DomainError('仅 Analysis Artifact 支持需求表格')
+    if layout != 'case':
+        raise DomainError('Analysis layout 必须为 case')
+    return _flat_projection(artifact, [dict(column) for column in DEFAULT_ANALYSIS_COLUMNS], selected)
+
+
+def artifact_table_projection(artifact, layout='case', selected=None):
+    """Dispatch a native artifact to its canonical workspace projection."""
+    if artifact.get('type') == 'cases':
+        return case_table_projection(artifact, layout, selected)
+    if artifact.get('type') == 'scenarios':
+        return scenario_table_projection(artifact, layout, selected)
+    if artifact.get('type') == 'analysis':
+        return analysis_table_projection(artifact, layout, selected)
+    raise DomainError('该成果类型不支持表格工作区', 404)

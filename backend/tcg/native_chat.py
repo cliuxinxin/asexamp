@@ -179,6 +179,13 @@ class NativeChatAgent:
             return self._save(turn)
         if direct:
             name, args, rejected = direct
+            if name == 'workspace_guidance':
+                turn.update(status='needs_confirmation', message='请打开成果工作区逐项查看修改建议，然后保存你的选择。',
+                    pending=[prompt])
+                turn['parts'].append({'type': 'artifact_proposal', 'artifact_id': prompt.get('artifact_id'),
+                    'proposal_id': prompt.get('proposal_id') or prompt.get('review_proposal_id'),
+                    'artifact_revision': prompt.get('artifact_revision')})
+                return self._save(turn)
             await self._execute_direct(chat, body, prompt, turn, name, args)
             if turn['status'] in ('succeeded', 'needs_confirmation'):
                 return await self.supervisor.after_control(chat['id'], prompt, turn, rejected=rejected)

@@ -6,7 +6,6 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from tcg.native_migration import migrate_legacy_runs
 from tcg.pipeline import PipelineRuntime
 from tcg.schemas import DomainError
 from test_native_pipeline_v300 import Business, agree, setup
@@ -56,79 +55,82 @@ async def legacy_waiting(store, chat, business, gate, mode='hitp'):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(('gate', 'mode'), [
-    ('strategy_review', 'hitp'), ('scenario_review', 'hitp'),
-    ('case_draft_review', 'hitp'), ('case_result_review', 'hitp'),
-    ('scenario_review', 'auto'), ('clarification', 'hitp'),
-])
-async def test_legacy_gate_migrates_to_real_interrupt_without_generating_or_changing_artifacts(tmp_path, gate, mode):
-    store, chat, business, runtime = setup(tmp_path, questions=(gate == 'clarification'))
-    original = await legacy_waiting(store, chat, business, gate, mode)
-    artifact_snapshots = copy.deepcopy(store.list('artifact', chat_id=chat['id']))
-    original_calls = copy.deepcopy(business.calls)
-    await runtime.start()
-    outcomes = await migrate_legacy_runs(store, runtime)
-    assert len(outcomes) == 1
-    migrated = await runtime.snapshot(original['id'])
-    assert migrated['id'] == original['id'] and migrated['mode'] == mode
-    assert migrated['status'] == 'waiting' and migrated['interrupt']['type'] == gate
-    assert migrated['interrupt']['artifact_id'] == original['interrupt']['artifact_id']
-    assert migrated['interrupt']['artifact_revision'] == original['interrupt']['artifact_revision']
-    assert migrated['interrupt']['id'] != 'old-id'
-    stored = store.run(original['id'])
-    assert stored['graph_version'] == 9 and stored['runtime'] == 'native'
-    assert stored['_profile'] == original['_profile']
-    assert stored['_source_ids'] == original['_source_ids']
-    assert stored['artifact_ids'] == original['artifact_ids']
-    assert all(key not in stored for key in ('_edit_token', '_interrupt_id', '_control_hold', '_boundary_requested', 'boundary_again'))
-    checkpoint = await runtime.graph.aget_state(runtime._config(original['id']))
-    assert checkpoint.tasks[0].interrupts[0].id == migrated['interrupt']['id']
-    assert business.calls == original_calls
-    assert store.list('artifact', chat_id=chat['id']) == artifact_snapshots
-    assert await migrate_legacy_runs(store, runtime) == []
-    assert await runtime.snapshot(original['id']) == migrated
-    if gate == 'scenario_review' and mode == 'hitp':
-        continued = await agree(runtime, migrated)
-        assert continued['interrupt']['type'] == 'case_result_review'
-        assert [call[0] for call in business.calls[-2:]] == ['cases', 'review']
-        assert len(business.calls) == len(original_calls) + 2
-    await runtime.stop()
-    store.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('status', ['queued', 'running'])
-async def test_unfinished_legacy_generation_is_preserved_and_never_replayed(tmp_path, status):
+@pytest.mark.parametrize('status', ['queued', 'running', 'waiting'])
+@pytest.mark.parametrize('version', [6, 7])
+async def test_active_legacy_runs_require_restart_without_replaying_or_modifying_artifacts(tmp_path, status, version):
     store, chat, business, runtime = setup(tmp_path)
-    old = await legacy_waiting(store, chat, business, 'scenario_review')
-    store.update_run(old['id'], status=status, stage='cases', interrupt=None)
-    calls = copy.deepcopy(business.calls)
+    original = await legacy_waiting(store, chat, business, 'scenario_review')
+    store.update_run(original['id'], status=status, graph_version=version)
     artifacts = copy.deepcopy(store.list('artifact', chat_id=chat['id']))
+    calls = copy.deepcopy(business.calls)
     await runtime.start()
-    result = (await migrate_legacy_runs(store, runtime))[0]
-    assert result['status'] == 'failed' and result['stage'] == 'migration_required'
+    result = await runtime.snapshot(original['id'])
+    assert result['status'] == 'failed' and result['stage'] == 'restart_required'
     assert '已有资料和成果版本已保留' in result['error']
     assert '重新开始' in result['error']
     assert business.calls == calls and runtime.tasks == {}
     assert store.list('artifact', chat_id=chat['id']) == artifacts
-    assert await migrate_legacy_runs(store, runtime) == []
+    assert store.run(original['id'])['artifact_ids'] == original['artifact_ids']
     with pytest.raises(DomainError, match='需要重新开始'):
-        await runtime.retry(old['id'])
+        await runtime.retry(original['id'])
     await runtime.stop()
     store.close()
 
 
 @pytest.mark.asyncio
-async def test_unknown_legacy_confirmation_fails_visibly_without_guessing(tmp_path):
+async def test_completed_legacy_history_is_not_rewritten(tmp_path):
     store, chat, business, runtime = setup(tmp_path)
     old = await legacy_waiting(store, chat, business, 'scenario_review')
-    store.update_run(old['id'], interrupt={'type': 'workflow_paused', 'node': 'boundary_cases'})
-    calls = copy.deepcopy(business.calls)
+    old = store.update_run(old['id'], status='completed')
     await runtime.start()
-    result = (await migrate_legacy_runs(store, runtime))[0]
-    assert result['status'] == 'failed'
-    assert '没有可可靠恢复' in result['error']
-    assert business.calls == calls
-    assert store.run(old['id'])['artifact_ids'] == old['artifact_ids']
+    assert store.run(old['id']) == old
+    assert runtime.tasks == {}
     await runtime.stop()
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_editing_legacy_native_artifact_does_not_reanchor_or_read_checkpoint(tmp_path, monkeypatch):
+    from test_native_pipeline_v300 import settled
+    store, chat, business, runtime = setup(tmp_path)
+    await runtime.start()
+    run = await settled(runtime, (await runtime.start_run(chat['id'], {'mode': 'hitp'}))['id'])
+    run = await agree(runtime, run)
+    run = await agree(runtime, run)
+    cases = store.get('artifact', run['interrupt']['artifact_id'])
+    checkpoint = await runtime.graph.aget_state(runtime._config(run['id']))
+    await runtime.stop()
+    store.update_run(run['id'], graph_version=7, runtime='native')
+    runtime = PipelineRuntime(store, business)
+    await runtime.start()
+    try:
+        stopped = store.run(run['id'])
+        assert stopped['status'] == 'failed' and stopped['stage'] == 'restart_required'
+        calls = copy.deepcopy(business.calls)
+        reads = []
+        original_read = runtime.graph.aget_state
+
+        async def record_read(config, **kwargs):
+            reads.append(config)
+            return await original_read(config, **kwargs)
+
+        monkeypatch.setattr(runtime.graph, 'aget_state', record_read)
+        rows = copy.deepcopy(cases['items'])
+        rows[0]['title'] = '人工更新保留的历史用例'
+        # Workspace and restore both finish with this real artifact commit/reanchor boundary.
+        changed = store.revise_artifact(cases['id'], cases['revision'], rows)
+        async with runtime.edit_session(chat['id']):
+            updates = await runtime.on_artifact_changed(changed)
+        assert updates == []
+        assert reads == []
+        assert runtime.tasks == {} and business.calls == calls
+        assert store.run(run['id']) == stopped
+        assert store.get('artifact', cases['id']) == changed
+        assert store.revision(cases['id'], cases['revision'])['items'] == cases['items']
+        persisted = await original_read(runtime._config(run['id']))
+        assert persisted.values == checkpoint.values and persisted.next == checkpoint.next
+        with pytest.raises(DomainError, match='需要重新开始'):
+            await runtime.retry(run['id'])
+    finally:
+        await runtime.stop()
+        store.close()

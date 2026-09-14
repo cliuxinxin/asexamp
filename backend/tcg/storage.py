@@ -101,8 +101,41 @@ class Store:
         ''')
         if 'kind' not in {row['name'] for row in self.db.execute('PRAGMA table_info(events)')}:
             self.db.execute("ALTER TABLE events ADD COLUMN kind TEXT NOT NULL DEFAULT 'update'")
+        self._normalize_artifact_proposals()
         if not self.list('project'):
             self.create_project('默认项目')
+
+    def _normalize_artifact_proposals(self):
+        """Convert old proposal objects in place once; IDs and prompt bindings stay valid."""
+        from .review_proposals import item_changes
+        with self.transaction():
+            rows = self.db.execute("SELECT id,kind,payload FROM objects WHERE kind IN ('review_proposal','native_revision_proposal')").fetchall()
+            for row in rows:
+                value = json.loads(row['payload'])
+                value['proposal_type'] = 'review' if row['kind'] == 'review_proposal' else 'revision'
+                for old, new, default in (('base_revision', 'artifact_revision', None),
+                        ('dependencies', '_dependencies', {}), ('source_ids', '_source_ids', []),
+                        ('source_roles', '_source_roles', {})):
+                    value.setdefault(new, value.get(old, default))
+                    value.pop(old, None)
+                value.setdefault('status', 'applied' if value.get('_applied') else 'rejected'
+                    if value.get('_rejected') or value.get('_discarded') else 'pending')
+                if value.get('_applied_revision'):
+                    value.setdefault('applied_revision', value['_applied_revision'])
+                value.setdefault('run_id', None)
+                value.setdefault('report', {})
+                baseline = self.db.execute('SELECT payload FROM revisions WHERE artifact_id=? AND revision=?',
+                    (value['artifact_id'], value['artifact_revision'])).fetchone()
+                if baseline:
+                    value['changes'] = item_changes(json.loads(baseline[0])['items'], value['items'])
+                elif value['proposal_type'] == 'review':
+                    value.setdefault('changes', [])
+                else:
+                    # No historical baseline means confirmation must require a fresh proposal.
+                    value['changes'] = []
+                    value['status'] = 'superseded'
+                self.db.execute('UPDATE objects SET kind=?,payload=? WHERE id=?',
+                    ('artifact_proposal', dump(value), row['id']))
 
     @contextmanager
     def transaction(self):

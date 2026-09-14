@@ -51,7 +51,7 @@ def pipeline_messages(store, chat_id):
     messages = []
     for event in store.list('pipeline_result', chat_id=chat_id):
         if event['phase'] == 'review_proposed':
-            proposal = store.get('review_proposal', event['proposal_id'])
+            proposal = store.get('artifact_proposal', event['proposal_id'])
             review = review_opinions(proposal)
             needs_confirmation = event.get('requires_confirmation', store.run(event['run_id'])['mode'] != 'auto')
             content = ('评审建议已生成，等待你确认后再修改用例。' if needs_confirmation
@@ -82,7 +82,8 @@ async def current_prompt(store, pipeline, chat):
     if proposal:
         try:
             artifact = store.get('artifact', proposal['artifact_id'])
-            if artifact['revision'] == proposal['artifact_revision']:
+            saved = store.get('artifact_proposal', proposal['proposal_id'])
+            if artifact['revision'] == proposal['artifact_revision'] and saved.get('status') == 'pending':
                 return copy.deepcopy(proposal)
         except (DomainError, KeyError):
             pass
@@ -123,7 +124,8 @@ async def current_prompt(store, pipeline, chat):
             proposal = read_review_proposal(store, run['id'], gate['proposal_id'])
             result.update(proposal_id=proposal['id'], review_proposal_id=proposal['id'],
                 review=review_opinions(proposal), changes=proposal['changes'],
-                proposal_stale=proposal['stale'], artifact_revision=proposal['artifact_revision'])
+                proposal_stale=proposal['stale'], artifact_revision=proposal['artifact_revision'],
+                message='评审建议已准备好，请打开成果工作区查看并保存你的选择。')
         else:
             artifact = store.revision(gate['artifact_id'], gate['artifact_revision'])
             result['review'] = review_opinions(artifact)

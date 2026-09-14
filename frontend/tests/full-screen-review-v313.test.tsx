@@ -7,7 +7,7 @@ Object.defineProperty(globalThis,'navigator',{value:dom.window.navigator,configu
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
 const React=await import('react');
 const {render,fireEvent,screen,waitFor,cleanup,act,within}=await import('@testing-library/react');
-const {FullScreenReviewer}=await import('../src/FullScreenReviewer');
+const {ArtifactWorkspace}=await import('../src/ArtifactWorkspace');
 const {reviewChanges,applyDecisions,cellChanges,globalIssues}=await import('../src/table-review-model');
 const originalFetch=globalThis.fetch;
 afterEach(async()=>{await act(async()=>{});cleanup();globalThis.fetch=originalFetch;});
@@ -20,11 +20,11 @@ function project(items:any[],layout='case',cols=columns){return {columns:cols,ro
  return indexes.map((index:number|null)=>({item_id:item.id,step_index:index,cells:cols.map(column=>column.field==='steps'||column.field==='expected'?(index===null?steps:[steps[index]]).map((step:any,i:number)=>`${index===null?i+1:index+1}. ${step[column.field==='steps'?'action':'expected']}`).join('\n'):String(item[column.field]??''))}));
  })};}
 function fixture(options:any={}){
- const writes:any[]=[];let view:any={artifact_id:'cases',title:'登录用例',artifact_revision:1,profile_id:'p',profile_revision:2,layout:'case',columns,original_items:structuredClone(original),proposed_items:structuredClone(proposed),issues:[{title:'操作要可执行',case_ids:['TC1'],field:'steps'},{title:'整体考虑边界'}],run_id:'run',proposal_id:'proposal1',prompt_id:'gate1',read_only:false,...options};
+ const writes:any[]=[];let view:any={artifact_id:'cases',artifact_type:'cases',mode:'ai_proposal',title:'登录用例',artifact_revision:1,profile_id:'p',profile_revision:2,layout:'case',columns,original_items:structuredClone(original),proposed_items:structuredClone(proposed),issues:[{title:'操作要可执行',case_ids:['TC1'],field:'steps'},{title:'整体考虑边界'}],run_id:'run',proposal_id:'proposal1',prompt_id:'gate1',read_only:false,...options};
  function response(){return {...view,original_rows:project(view.original_items,view.layout,view.columns).rows,proposed_rows:project(view.proposed_items,view.layout,view.columns).rows};}
  globalThis.fetch=(async(input:any,init:any={})=>{
   const url=new URL(String(input),'http://localhost');
-  if(url.pathname.endsWith('/table-review'))return json(response());
+  if(url.pathname.endsWith('/workspace-grid'))return json(response());
   const body=init.body?JSON.parse(init.body):{};
   if(url.pathname.endsWith('/project'))return json(project(body.items,body.layout,view.columns));
   if(url.pathname.endsWith('/save')){writes.push(body);if(options.failSave&&writes.length===1)return json({detail:'连接暂时中断'},503);return json({artifact:{id:'cases',revision:2},message:'审阅已保存'});}
@@ -32,8 +32,8 @@ function fixture(options:any={}){
  }) as typeof fetch;
  return {writes,setView:(patch:any)=>{view={...view,...patch};}};
 }
-function View(props:any={}){return <FullScreenReviewer request={{artifactId:'cases',runId:'run',proposalId:'proposal1'}} chatId="chat" messages={[]} onClose={()=>{}} onSaved={()=>{}} onSend={async()=>{}} {...props}/>;}
-async function loaded(){await screen.findByRole('table',{name:'测试用例评审表格'});await waitFor(()=>assert.ok(!screen.queryByText('正在加载表格与评审建议…')));}
+function View(props:any={}){return <ArtifactWorkspace request={{artifactId:'cases',runId:'run',proposalId:'proposal1'}} chatId="chat" messages={[]} onClose={()=>{}} onSaved={()=>{}} onSend={async()=>{}} {...props}/>;}
+async function loaded(){await screen.findByRole('table',{name:'测试用例工作表'});await waitFor(()=>assert.ok(!screen.queryByText('正在加载表格与评审建议…')));}
 async function projected(){await waitFor(()=>assert.ok(!(screen.getByRole('button',{name:'导出 Excel'}) as HTMLButtonElement).disabled));}
 function cell(name:string){return screen.getByRole('button',{name});}
 
@@ -46,7 +46,7 @@ test('mixed accept, reject and inline manual edits preserve choices when accepti
  const input=screen.getByRole('textbox',{name:'编辑 准备条件'});assert.ok(input.closest('td'));assert.equal(screen.getAllByRole('dialog').length,1);
  fireEvent.change(input,{target:{value:'已认证并初始化测试数据'}});fireEvent.click(screen.getByRole('button',{name:'保存单元格'}));
  fireEvent.click(screen.getByRole('button',{name:'全部接受'}));await projected();
- fireEvent.click(screen.getByRole('button',{name:'保存并完成评审'}));await waitFor(()=>assert.equal(writes.length,1));
+ fireEvent.click(screen.getByRole('button',{name:'保存并完成确认'}));await waitFor(()=>assert.equal(writes.length,1));
  assert.equal(writes[0].items[0].title,'登录');assert.equal(writes[0].items[0].preconditions,'已认证并初始化测试数据');
  assert.deepEqual(writes[0].items[0].steps,proposed[0].steps);assert.deepEqual(writes[0].items[0].refs,['src#P1']);assert.equal(writes[0].prompt_id,'gate1');
 });
@@ -67,7 +67,7 @@ test('paired step editor never serializes numbered text back into an array and r
  fireEvent.change(screen.getByRole('textbox',{name:'第 1 步预期结果'}),{target:{value:''}});fireEvent.click(screen.getByRole('button',{name:'保存单元格'}));
  await screen.findByRole('alert');assert.ok(screen.getByRole('textbox',{name:'第 1 步操作'}));
  fireEvent.change(screen.getByRole('textbox',{name:'第 1 步预期结果'}),{target:{value:'对应结果'}});fireEvent.click(screen.getByRole('button',{name:'保存单元格'}));
- fireEvent.click(screen.getByRole('button',{name:'全部接受'}));await projected();fireEvent.click(screen.getByRole('button',{name:'保存并完成评审'}));await waitFor(()=>assert.equal(writes.length,1));
+ fireEvent.click(screen.getByRole('button',{name:'全部接受'}));await projected();fireEvent.click(screen.getByRole('button',{name:'保存并完成确认'}));await waitFor(()=>assert.equal(writes.length,1));
  assert.equal(writes[0].items[0].steps[0].action,'第一行\n1. 这里是操作文本');assert.equal(writes[0].items[0].steps[0].expected,'对应结果');assert.equal(writes[0].items[0].steps.length,2);
 });
 
@@ -76,20 +76,20 @@ test('new proposal while a cell textarea is open preserves the unsaved editor an
  fireEvent.doubleClick(cell('TC1 准备条件'));fireEvent.change(screen.getByRole('textbox',{name:'编辑 准备条件'}),{target:{value:'尚未保存的人工文字'}});
  state.setView({proposal_id:'proposal2',prompt_id:'gate2',proposed_items:[{...proposed[0],title:'另一份建议'}]});view.rerender(<View refreshKey="2"/>);
  await screen.findByText('有新的成果或评审建议。本地审阅内容已保留，请核对后重新载入。');
- assert.equal((screen.getByRole('textbox',{name:'编辑 准备条件'}) as HTMLTextAreaElement).value,'尚未保存的人工文字');assert.ok((screen.getByRole('button',{name:'保存并完成评审'}) as HTMLButtonElement).disabled);
+ assert.equal((screen.getByRole('textbox',{name:'编辑 准备条件'}) as HTMLTextAreaElement).value,'尚未保存的人工文字');assert.ok((screen.getByRole('button',{name:'保存并完成确认'}) as HTMLButtonElement).disabled);
  fireEvent.click(screen.getByRole('button',{name:'放弃本地审阅并载入最新版本'}));await waitFor(()=>assert.ok(!screen.queryByRole('textbox',{name:'编辑 准备条件'})));
 });
 
 test('retry after an uncertain save reuses the same client request identifier',async()=>{
  const {writes}=fixture({failSave:true});render(<View/>);await loaded();fireEvent.click(screen.getByRole('button',{name:'全部接受'}));await projected();
- fireEvent.click(screen.getByRole('button',{name:'保存并完成评审'}));await screen.findByRole('alert');
- fireEvent.click(screen.getByRole('button',{name:'保存并完成评审'}));await waitFor(()=>assert.equal(writes.length,2));assert.equal(writes[0].client_request_id,writes[1].client_request_id);
+ fireEvent.click(screen.getByRole('button',{name:'保存并完成确认'}));await screen.findByRole('alert');
+ fireEvent.click(screen.getByRole('button',{name:'保存并完成确认'}));await waitFor(()=>assert.equal(writes.length,2));assert.equal(writes[0].client_request_id,writes[1].client_request_id);
 });
 
 test('AI added rows edited by a human remain preserved when accepting unresolved changes',async()=>{
  const added={...original[0],id:'TC2',title:'新用例'};const {writes}=fixture({proposed_items:[...proposed,added]});render(<View/>);await loaded();
  fireEvent.doubleClick(cell('TC2 名称'));fireEvent.change(screen.getByRole('textbox',{name:'编辑 名称'}),{target:{value:'人工修正新增标题'}});fireEvent.click(screen.getByRole('button',{name:'保存单元格'}));
- fireEvent.click(screen.getByRole('button',{name:'全部接受'}));await projected();fireEvent.click(screen.getByRole('button',{name:'保存并完成评审'}));await waitFor(()=>assert.equal(writes.length,1));
+ fireEvent.click(screen.getByRole('button',{name:'全部接受'}));await projected();fireEvent.click(screen.getByRole('button',{name:'保存并完成确认'}));await waitFor(()=>assert.equal(writes.length,1));
  assert.equal(writes[0].items.find((item:any)=>item.id==='TC2').title,'人工修正新增标题');
 });
 

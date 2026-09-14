@@ -1,5 +1,5 @@
 import {ArtifactCard} from './ArtifactCard';
-import {InlineChangeCard} from './InlineChangeCard';
+import {ArtifactProposalCard} from './ArtifactProposalCard';
 import {ChatEstimate} from './ChatEstimate';
 import {WorkspaceCoverage} from './WorkspaceCoverage';
 import {ClarificationDraftEditor} from './ClarificationDraftEditor';
@@ -22,7 +22,8 @@ export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,o
    case 'estimate':return compact?<details key={key} className="receipt-details"><summary>查看用例数量估算</summary><ChatEstimate estimate={value.data as any}/></details>:<ChatEstimate key={key} estimate={value.data as any}/>;
    case 'artifact':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} revision={value.revision} readOnly refreshKey={refreshKey} onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
    case 'case_details':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} snapshot={{id:value.artifact_id,type:'cases',title:value.title??'用例步骤与预期',revision:value.revision,items:value.items,view_item_ids:value.items.map((item:Json)=>String(item.id))}} readOnly initialDetailsOpen onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
-   case 'diff':{const active=!!currentPrompt&&[currentPrompt.proposal_id,currentPrompt.review_proposal_id].includes(value.proposal_id);return <InlineChangeCard key={key} proposalId={value.proposal_id} changes={value.changes} prompt={active?currentPrompt:undefined} readOnly={!active} disabled={disabled} onChanged={onChanged} onTurnResolved={onTurnResolved} onRevise={onRevise} onBusyChange={onBusyChange}/>;}
+   case 'artifact_proposal':{const active=!!currentPrompt&&[currentPrompt.proposal_id,currentPrompt.review_proposal_id].includes(value.proposal_id);return <ArtifactProposalCard key={key} artifactId={value.artifact_id} artifactRevision={value.artifact_revision} proposalId={value.proposal_id} prompt={active?currentPrompt:undefined} readOnly={!active} disabled={disabled}/>;}
+   case 'diff':return <ArtifactProposalCard key={key} proposalId={value.proposal_id} changes={value.changes} readOnly disabled={disabled}/>;
    case 'coverage':return <WorkspaceCoverage key={key} artifactId="" revision={0} initialData={value.data} initialOpen={!compact}/>;
    case 'source_impact':return compact?<details key={key} className="receipt-details"><summary>资料影响 · {value.data.summary||'查看分析结果'}</summary><SourceImpact data={value.data}/></details>:<SourceImpact key={key} data={value.data}/>;
    case 'files':return <div key={key} className="turn-files" aria-label="导出文件">{value.files.map((file:Json,i:number)=>/^\/(?!\/)|^https?:\/\//.test(file.url)?<a key={i} className="text-accent" href={file.url} download={file.name}>{file.name}</a>:<span key={i}>{file.name}（下载地址不可用）</span>)}</div>;

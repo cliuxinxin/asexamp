@@ -67,7 +67,7 @@ async def test_human_review_proposes_before_writing_and_approval_applies_after_r
         assert done['status'] == 'completed'
         revised = store.get('artifact', cases['id'])
         assert revised['revision'] == 2 and revised['items'][0]['title'].endswith('（评审）')
-        assert store.get('review_proposal', proposal_id)['status'] == 'applied'
+        assert store.get('artifact_proposal', proposal_id)['status'] == 'applied'
         assert len([task for task, _ in model.calls if task == 'review_cases']) == 1
         repeated = business.apply_review_proposal(store.run(run['id']), proposal_id)
         assert repeated['revision'] == 2
@@ -84,7 +84,7 @@ async def test_auto_uses_same_proposal_path_and_applies(setup):
         run = await runtime.start_run(chat['id'], {'mode': 'auto', 'content': '生成用例'})
         run = await settled(runtime, run['id'])
         assert run['status'] == 'completed'
-        proposals = store.list('review_proposal', chat_id=chat['id'])
+        proposals = store.list('artifact_proposal', chat_id=chat['id'])
         assert len(proposals) == 1 and proposals[0]['status'] == 'applied'
         cases = store.get('artifact', proposals[0]['artifact_id'])
         assert cases['revision'] == 2
@@ -110,7 +110,7 @@ async def test_review_feedback_creates_new_proposal_without_changing_cases(setup
         context = [context for task, context in model.calls if task == 'review_cases'][-1]
         assert context['review_feedback'] == '请保留原标题，只提出必要意见。'
         assert context['previous_review']['items'][0]['title'].endswith('（评审）')
-        assert store.get('review_proposal', first)['status'] == 'superseded'
+        assert store.get('artifact_proposal', first)['status'] == 'superseded'
     finally:
         await runtime.stop()
 
@@ -267,7 +267,7 @@ async def test_review_respects_case_column_contract_and_does_not_restore_deleted
             await runtime.on_artifact_changed(changed)
         run = await settled(runtime, run['id'])
         assert run['interrupt']['type'] == 'case_result_review'
-        proposal = store.get('review_proposal', run['interrupt']['proposal_id'])
+        proposal = store.get('artifact_proposal', run['interrupt']['proposal_id'])
         assert all('legacy_default' not in row for row in proposal['items'])
         assert (await agree(runtime, run))['status'] == 'completed'
         assert 'legacy_default' not in store.get('artifact', cases['id'])['items'][0]

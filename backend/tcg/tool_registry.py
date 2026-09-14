@@ -56,25 +56,6 @@ def _control_receipt(action, before, after):
         'stage_label': label, 'status': status, 'message': message}
 
 
-def _model_receipt(result):
-    """The UI owns full comparisons; the chat model needs only their changes."""
-    value = copy.deepcopy(result)
-    for part in value.get('parts', []):
-        if part.get('type') != 'diff':
-            continue
-        changes = []
-        for change in part.get('changes', []):
-            before = {r['id']: r for r in change.get('before_items', [])}
-            after = {r['id']: r for r in change.get('items', [])}
-            changes.append({key: change[key] for key in ('artifact_id', 'title', 'expected_revision') if key in change} | {
-                'added': [{'id': key, 'title': row.get('title', '')} for key, row in after.items() if key not in before],
-                'updated': [{'id': key, 'title': row.get('title', '')} for key, row in after.items()
-                            if key in before and row != before[key]],
-                'deleted': [key for key in before if key not in after], 'total_items': len(after)})
-        part['changes'] = changes
-    return value
-
-
 def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=None):
     """Build tools for one turn with an immutable user target and prompt binding."""
     chat, body, prompt = copy.deepcopy(chat), copy.deepcopy(body), copy.deepcopy(prompt or {})
@@ -94,7 +75,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             result['tool_name'] = fn.__name__
             if on_result:
                 await _await(on_result(copy.deepcopy(result)))
-                return _model_receipt(result)
+                return copy.deepcopy(result)
             return result
         return invoke
 
@@ -332,6 +313,10 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         return _result('已根据保存内容回答。', [{'type': 'answer', 'text': answer['answer'],
                        'refs': answer.get('refs', []), 'artifact_id': value['id'], 'revision': value['revision']}])
 
+    def stage_artifact_proposal(value, updated, message='修改建议已准备好，请打开成果工作区逐项查看并保存。'):
+        from .review_proposals import stage_revision_proposal
+        return stage_revision_proposal(store, value, updated, message)
+
     @tool
     @emit
     async def modify_artifact_tool(artifact_id: str | None = None, item_id: str | None = None,
@@ -340,10 +325,10 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                                     add: bool = False, parent_id: str | None = None,
                                     use_dialogue_evidence: bool = False, independent: bool = False,
                                     delete: bool = False, item_ids: list[str] | None = None) -> dict:
-        """Modify the requested artifact rows and save a new version, preserving other rows and manual data.
+        """Prepare requested row changes for review and saving in the artifact workspace.
 
         Use new_values for explicit field changes, or instruction for a natural-language revision.
-        Changes default to a saved preview for user inspection above the composer. This tool never approves
+        Changes always remain a proposal until the user saves in the artifact workspace. This tool never approves
         or resumes the pipeline after changing the result.
         For requested additions set add=true and parent_id to the user's specified requirement ID
         (adding scenarios) or scenario ID (adding cases). Existing rows remain unchanged. If no parent
@@ -356,8 +341,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         """
         if not instruction and new_content is None and new_values is None and not delete and not independent:
             raise DomainError('请说明需要修改的内容')
-        if body.get('_supervised'):
-            preview = True
+        preview = True
         if new_content is not None:
             instruction = instruction + '\n用户要求的新内容：' + new_content
         async with edit_session():
@@ -390,88 +374,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             updated = await business.revise(value, ids=ids, instruction=instruction,
                                             new_values=new_values, preview=preview, **({'independent': True} if independent else {}),
                                             **({'delete': True} if delete else {}), **dialogue_kwargs)
-            if preview:
-                proposal = {**updated, 'id': uid('revprop_'), 'chat_id': chat['id'],
-                    'project_id': chat['project_id'], 'created_at': now()}
-                pending = {'id': 'revision:' + proposal['id'] + ':' + str(value['revision']),
-                    'kind': 'artifact_proposal', 'type': 'artifact_proposal',
-                    'artifact_id': value['id'], 'artifact_revision': value['revision'],
-                    'proposal_id': proposal['id'], 'title': '确认修改预览',
-                    'message': '修改预览已准备好，回复“同意”保存，或说明需要调整的地方。'}
-                with store.transaction():
-                    store.put('native_revision_proposal', proposal)
-                    current = store.get('chat', chat['id'])
-                    store.put('chat', {**current, '_native_artifact_prompt': pending})
-                from .dialogue_lineage import preview_changes
-                message = pending['message']
-                if proposal.get('dialogue'):
-                    message = '已准备修改预览，依据为本条用户对话。'
-                    message += '回复“同意”后统一保存，随后仍需确认主流程。'
-                return _result(message, [{'type': 'diff', 'artifact_id': value['id'],
-                    'proposal_id': proposal['id'], 'changes': preview_changes(proposal, value)}],
-                    status='needs_confirmation', pending=[pending])
-            await _await(pipeline.on_artifact_changed(updated))
-        return artifact_result(updated, '修改已保存；请查看新版本，满意后再回复继续。')
-
-    @tool
-    @emit
-    async def apply_artifact_preview_tool(proposal_id: str | None = None) -> dict:
-        """Save the current native revision preview after user agreement; keep the pipeline waiting."""
-        pid = proposal_id or prompt.get('proposal_id')
-        if not pid:
-            raise DomainError('当前没有待采用的修改预览')
-        async with approval({'artifact_proposal'}, proposal_id=pid):
-            async with edit_session():
-                current = store.get('chat', chat['id'])
-                pending = current.get('_native_artifact_prompt')
-                if not pending or pending.get('id') != reply_token or pending.get('proposal_id') != pid:
-                    raise DomainError('修改预览提示已改变，请查看当前预览后再确认', 409)
-                proposal = store.get('native_revision_proposal', pid)
-                if proposal['chat_id'] != chat['id'] or proposal['project_id'] != chat['project_id']:
-                    raise DomainError('修改预览不属于当前对话', 404)
-                if proposal.get('_applied'):
-                    raise DomainError('此修改已保存，不需要再次采用', 409)
-                if proposal.get('column_change'):
-                    current_profile = store.get('profile', proposal['column_change']['profile_id'])
-                    if current_profile['version'] != proposal['column_change']['profile_version']:
-                        raise DomainError('Profile 已改变，请重新查看用例列修改预览', 409)
-                with store.transaction():
-                    updated = await _await(business.apply_revision_preview(proposal))
-                    store.put('native_revision_proposal', {**proposal, '_applied': True,
-                        '_applied_artifact_id': updated['id'], '_applied_revision': updated['revision']})
-                    latest = store.get('chat', chat['id'])
-                    store.put('chat', {**latest, '_native_artifact_prompt': None})
-                    followup = None
-                    if proposal.get('column_change'):
-                        from .case_columns import stage_column_profile
-                        followup = stage_column_profile(store, updated, proposal['column_change'])
-                    receipt = {'id': 'approval:' + reply_token, 'chat_id': chat['id'],
-                        'project_id': chat['project_id'], 'status': 'succeeded',
-                        'parts': [{'type': 'artifact', 'artifact_id': updated['id'], 'revision': updated['revision']}],
-                        **({'pending': copy.deepcopy(followup['pending'])} if followup and followup.get('pending') else {})}
-                    store.put('native_approval_receipt', receipt)
-                await _await(pipeline.on_artifact_changed(updated))
-        if followup:
-            parts = [{'type': 'artifact', 'artifact_id': updated['id'], 'revision': updated['revision']}]
-            parts.extend(followup.pop('parts', []))
-            return _result(followup.pop('message'), parts, **followup)
-        return artifact_result(updated, '已保存预览中的修改；请查看新的主流程确认提示。')
-
-    @tool
-    @emit
-    async def discard_artifact_preview_tool() -> dict:
-        """Dismiss the currently presented revision preview without modifying the artifact."""
-        with store.transaction():
-            current = store.get('chat', chat['id'])
-            pending = current.get('_native_artifact_prompt')
-            if not pending or pending.get('id') != reply_token:
-                raise DomainError('修改预览提示已改变，请查看当前提示', 409)
-            proposal = store.get('native_revision_proposal', pending['proposal_id'])
-            store.put('native_revision_proposal', {**proposal, '_rejected': True})
-            store.put('chat', {**current, '_native_artifact_prompt': None})
-            store.put('native_approval_receipt', {'id': 'approval:' + reply_token,
-                'chat_id': chat['id'], 'project_id': chat['project_id'], 'status': 'cancelled', 'parts': []})
-        return _result('已取消修改预览，成果保持原版本。')
+            return stage_artifact_proposal(value, updated)
 
     @tool
     @emit
@@ -489,9 +392,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             values = sources(source_ids)
             value = target(artifact_id)
             updated = await business.revise(value, ids=selection(value, item_ids), instruction=instruction,
-                source_ids=[s['id'] for s in values], source_roles={s['id']: role for s in values})
-            await _await(pipeline.on_artifact_changed(updated))
-        return artifact_result(updated, '已采用补充资料更新当前成果；请确认新版本后继续关联步骤。')
+                source_ids=[s['id'] for s in values], source_roles={s['id']: role for s in values}, preview=True)
+            return stage_artifact_proposal(value, updated, '已根据补充资料准备修改建议，请打开成果工作区查看并保存。')
 
     @tool
     @emit
@@ -593,8 +495,12 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         same turn merely to approve the new version. Questions and estimates do not need this tool.
         At understanding approval, explicit "skip scenarios, generate cases directly" uses action=skip_to_cases.
         draft_only=true is only for an explicit request to stop at drafts without AI review.
-        action=rejected rejects current review suggestions without changing the saved cases.
+        Artifact proposal decisions must be saved in the workspace; this tool cannot approve them.
         """
+        if prompt.get('proposal_id') or prompt.get('review_proposal_id'):
+            return _result('请打开成果工作区查看并保存评审选择。', status='needs_confirmation',
+                parts=[{'type': 'artifact_proposal', 'artifact_id': prompt.get('artifact_id'),
+                    'proposal_id': prompt.get('proposal_id') or prompt.get('review_proposal_id')}], pending=[prompt])
         if action == 'rejected' and prompt.get('kind') != 'case_result_review':
             return _result('当前结果尚未确认，请直接说明需要修改的内容。', status='needs_input')
         if action not in ('approved', 'skip_to_cases', 'rejected'):
@@ -726,23 +632,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             updated = await prepare_case_columns(business, value, current,
                 upserts=upsert_columns or [], removals=remove_columns or [], hidden=hide_columns or [],
                 order=column_order, instruction=instruction, export_after_approval=export_after_approval)
-            proposal = {**updated, 'id': uid('revprop_'), 'chat_id': chat['id'],
-                'project_id': chat['project_id'], 'created_at': now()}
-            pending = {'id': 'revision:' + proposal['id'] + ':' + str(value['revision']),
-                'kind': 'artifact_proposal', 'type': 'artifact_proposal',
-                'artifact_id': value['id'], 'artifact_revision': value['revision'],
-                'proposal_id': proposal['id'], 'title': '查看用例列修改',
-                'message': '用例列修改预览已准备好，可从输入框上方查看。确认后再核对同步到 Profile 的列更改。'}
-            if export_after_approval:
-                pending['message'] += '确认完成后会自动导出 Excel。'
-            with store.transaction():
-                store.put('native_revision_proposal', proposal)
-                selected = store.get('chat', chat['id'])
-                store.put('chat', {**selected, '_native_artifact_prompt': pending})
-            from .dialogue_lineage import preview_changes
-            return _result(pending['message'], [{'type': 'diff', 'artifact_id': value['id'],
-                'proposal_id': proposal['id'], 'changes': preview_changes(proposal, value)}],
-                status='needs_confirmation', pending=[pending])
+            return stage_artifact_proposal(value, updated,
+                '用例列修改建议已准备好，请打开成果工作区查看并保存，再核对同步到 Profile 的列更改。')
 
     @tool
     @emit
@@ -897,9 +788,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         async with edit_session():
             value, current = target(artifact_id, 'cases'), profile(profile_id)
             updated = await business.complete_fields(value, profile=current,
-                                                       ids=selection(value, item_ids))
-            await _await(pipeline.on_artifact_changed(updated))
-        return artifact_result(updated, '已检查并补全模板缺项；没有业务依据的字段已保留具体原因。')
+                                                       ids=selection(value, item_ids), preview=True)
+            return stage_artifact_proposal(value, updated, '已准备模板缺项补全建议，请打开成果工作区查看并保存。')
 
     @tool
     @emit
@@ -950,13 +840,13 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         pending_chat = store.get('chat', chat['id'])
         revision_prompt = pending_chat.get('_native_artifact_prompt')
         if revision_prompt and revision_prompt.get('artifact_id') in ids:
-            proposal = store.get('native_revision_proposal', revision_prompt['proposal_id'])
+            proposal = store.get('artifact_proposal', revision_prompt['proposal_id'])
             if len(snapshots) == 1 and not item_ids and proposal.get('column_change'):
                 if chosen and chosen['id'] != proposal['column_change']['profile_id']:
                     raise DomainError('待确认的用例列已绑定另一份 Profile，请先确认该修改', 409)
                 proposal['column_change']['export_after_approval'] = True
                 with store.transaction():
-                    store.put('native_revision_proposal', proposal)
+                    store.put('artifact_proposal', proposal)
             message = ('已记住导出请求。确认用例修改和 Profile 列更改后，会导出修改后的版本。'
                 if len(snapshots) == 1 and not item_ids and proposal.get('column_change') else
                 '当前成果修改尚未确认，请先查看并确认修改，再导出新版本。')
@@ -1033,11 +923,11 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     # Typed conversation retains the full registry and native tool selection.
     reply_kind = body.get('reply_kind')
     if reply_kind in ('question', 'clarification', 'confirm'):
-        confirm_tools = ([apply_artifact_preview_tool, discard_artifact_preview_tool] if prompt.get('kind') == 'artifact_proposal' else
+        confirm_tools = ([] if prompt.get('kind') == 'artifact_proposal' or prompt.get('proposal_id') else
             [apply_profile_tool, discard_template_tool] if prompt.get('kind') == 'profile' else [resume_pipeline_tool])
         return reads + {'question': [], 'clarification': [answer_clarification_tool],
                         'confirm': confirm_tools}[reply_kind]
-    return [*reads, modify_artifact_tool, apply_artifact_preview_tool, discard_artifact_preview_tool,
+    return [*reads, modify_artifact_tool,
             update_from_sources_tool, add_knowledge_tool,
             start_pipeline_tool, resume_pipeline_tool, answer_clarification_tool, control_pipeline_tool,
             learn_template_tool, modify_profile_tool, modify_case_columns_tool, revise_review_tool,

@@ -5,18 +5,33 @@ export type ReviewColumn = Json & {field:string;header:string;canonical_field?:s
 export type ReviewRow = {item_id:string;step_index:number|null;cells:string[]};
 export type ReviewChange = {key:string;itemId:string;field:string;stepIndex?:number;operation:'add'|'delete'|'update'};
 export type ReviewDecision = 'accept'|'reject'|'manual';
-export type TableReviewData = {
+export type WorkspaceMode='read_only'|'manual'|'ai_proposal';
+export type ArtifactWorkspaceData = {
  artifact_id:string;title:string;artifact_revision:number;profile_id?:string;profile_revision?:number;
- layout:'case'|'step';columns:ReviewColumn[];original_items:Json[];proposed_items:Json[];
+ artifact_type:'analysis'|'scenarios'|'cases'|string;mode:WorkspaceMode;layout:string;columns:ReviewColumn[];original_items:Json[];proposed_items:Json[];
  original_rows:ReviewRow[];proposed_rows:ReviewRow[];issues:unknown[];read_only:boolean;
  run_id?:string;proposal_id?:string;prompt_id?:string;stale?:boolean;message?:string;
+ report?:Json;original_report?:Json;proposed_report?:Json;column_changes?:ColumnChanges;
 };
+export type ColumnChanges={added:{field:string;header:string}[];removed:string[]};
+export const EMPTY_COLUMN_CHANGES:ColumnChanges={added:[],removed:[]};
 export const cloneItems=(items:Json[]):Json[]=>structuredClone(items);
 export const rowKey=(row:ReviewRow)=>JSON.stringify([row.item_id,row.step_index]);
 export const changeKey=(itemId:string,field:string,stepIndex?:number)=>JSON.stringify([itemId,field,stepIndex??null]);
 export function canonicalField(column:ReviewColumn):string {
  return column.canonical_field??({case_description:'description',test_description:'description',case_desc:'description',test_case_description:'description'} as Record<string,string>)[column.field]??column.field;
 }
+const CORE_FIELDS=new Set(['id','title','description','type','priority','preconditions','steps','expected','expected_result','scenario_id','requirement_ids','refs','branch_ids']);
+export function newWorkspaceItem(kind:string,items:Json[],columns:ReviewColumn[]):Json{
+ const prefix=kind==='cases'?'TC-NEW-':kind==='scenarios'?'SC-NEW-':'REQ-NEW-';let index=1;
+ while(items.some(item=>String(item.id)===prefix+index))index++;
+ const sample=items[0]??{};const item:Json={id:prefix+index,title:'新条目',description:'',type:'Business',priority:'P2',refs:[]};
+ if(kind==='cases')Object.assign(item,{scenario_id:'',preconditions:'',steps:[{action:'待填写操作',expected:'待填写预期'}]});
+ if(kind==='scenarios')item.requirement_ids=[];
+ for(const column of columns){const field=canonicalField(column);if(field==='id'||Object.hasOwn(item,field)||field.startsWith('_'))continue;const value=sample[field];item[field]=Array.isArray(value)?[]:value&&typeof value==='object'?{}:typeof value==='number'?0:typeof value==='boolean'?false:'';}
+ return item;
+}
+export function isCustomColumn(column:ReviewColumn):boolean{return !CORE_FIELDS.has(canonicalField(column))&&!column.field.startsWith('_');}
 export function reviewChanges(original:Json[],proposed:Json[]):ReviewChange[]{
  const before=new Map(original.map(item=>[String(item.id),item])),after=new Map(proposed.map(item=>[String(item.id),item]));
  const result:ReviewChange[]=[];
@@ -50,7 +65,9 @@ export function applyDecisions(draft:Json[],original:Json[],proposed:Json[],chan
   if(change.field.startsWith('steps.')&&change.stepIndex!==undefined){const part=change.field.slice(6);item.steps[change.stepIndex][part]=structuredClone(next.steps[change.stepIndex][part]);}
   else if(Object.hasOwn(next,change.field))item[change.field]=structuredClone(next[change.field]);else delete item[change.field];
  }
- const order=[...new Set([...proposed.map(item=>String(item.id)),...original.map(item=>String(item.id))])];
+ // Canonical proposal/original order keeps AI additions and rejected deletions stable;
+ // draft-only IDs preserve manual rows created while resolving other proposal cells.
+ const order=[...new Set([...proposed.map(item=>String(item.id)),...original.map(item=>String(item.id)),...draft.map(item=>String(item.id))])];
  return order.flatMap(id=>rows.has(id)?[rows.get(id)!]:[]);
 }
 function issueIds(issue:Json):string[]{

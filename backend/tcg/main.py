@@ -22,7 +22,7 @@ from .native_chat import NativeChatAgent
 from .diagnostics import Diagnostics
 from .model import LangChainGateway, Settings
 from .runtime_diagnostics import record_runtime
-from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, RevisionInput, ROLES, SettingsInput, TextInput
+from .schemas import ChatInput, DomainError, MessageInput, NameInput, ProfileInput, RestoreInput, ResumeInput, ROLES, SettingsInput, TextInput
 from .storage import DirectoryLock, Store, public, uid, now
 from .access import allowed_host
 
@@ -101,8 +101,6 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                 app.state.store, app.state.settings, app.state.engine = store, settings, engine
                 app.state.conversation = NativeChatAgent(store, gateway, business, engine)
                 await engine.start()
-                from .native_migration import migrate_legacy_runs
-                await migrate_legacy_runs(store, engine)
                 await app.state.conversation.recover()
                 yield
             finally:
@@ -115,7 +113,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='3.0.13', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.14', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -174,7 +172,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '3.0.13', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.14', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -386,7 +384,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '3.0.13', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.14', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -434,6 +432,9 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.post('/api/runs/{run_id}/resume')
     async def run_resume(run_id: str, body: ResumeInput):
+        run = await app.state.engine.snapshot(run_id)
+        if (run.get('interrupt') or {}).get('proposal_id'):
+            raise DomainError('请打开成果工作区查看并保存评审选择。', 409)
         return run_view(await app.state.engine.resume(run_id, 'approved', payload=body.model_dump(), expected_prompt_id=body.interrupt_id))
 
     @app.post('/api/runs/{run_id}/dialogue')
@@ -463,9 +464,9 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = await app.state.engine.snapshot(run_id)
         artifact = visible_artifact(run.get('current_artifact_id') or run.get('interrupt', {}).get('artifact_id'))
         async with app.state.engine.edit_session(run['chat_id']):
-            updated = await app.state.business.revise(artifact, body.selected_ids, body.content)
-            await app.state.engine.on_artifact_changed(updated)
-        return run_view(await app.state.engine.snapshot(run_id))
+            proposal = await app.state.business.revise(artifact, body.selected_ids, body.content, preview=True)
+            from .review_proposals import stage_revision_proposal
+            return stage_revision_proposal(app.state.store, artifact, proposal)
 
     @app.get('/api/runs/{run_id}/model-calls/{call_id}/request')
     def model_request_get(run_id: str, call_id: str, download: bool = False):
@@ -508,17 +509,6 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     def artifact_get(artifact_id: str):
         from .conversation_facts import artifact_projection
         return public(artifact_projection(app.state.store, visible_artifact(artifact_id)))
-
-    @app.put('/api/artifacts/{artifact_id}')
-    async def artifact_put(artifact_id: str, body: RevisionInput):
-        store = app.state.store
-        artifact = visible_artifact(artifact_id)
-        async with app.state.engine.edit_session(artifact['chat_id']):
-            from .manual_edits import save_table_edit
-            updated = save_table_edit(store, app.state.business, artifact_id, body.expected_revision,
-                body.items, report=body.report, column_changes=body.column_changes, profile_id=body.profile_id)
-            await app.state.engine.on_artifact_changed(updated)
-            return public(updated)
 
     @app.get('/api/artifacts/{artifact_id}/revisions')
     def artifact_revisions(artifact_id: str):
@@ -593,10 +583,10 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         if not selected:return {'unchanged':True}
         async with app.state.engine.edit_session(artifact['chat_id']):
             selected_profile = {**chosen, 'config': profile} if chosen else profile
-            updated = await app.state.business.complete_fields(artifact, profile=selected_profile,
-                ids=[r['id'] for r in rows if r['id'] in selected])
-            await app.state.engine.on_artifact_changed(updated)
-        return {'artifact': public(updated), 'unchanged': updated['revision'] == artifact['revision']}
+            proposal = await app.state.business.complete_fields(artifact, profile=selected_profile,
+                ids=[r['id'] for r in rows if r['id'] in selected], preview=True)
+            from .review_proposals import stage_revision_proposal
+            return {**stage_revision_proposal(app.state.store, artifact, proposal), 'unchanged': False}
 
     @app.post('/api/artifacts/{artifact_id}/complete-fields')
     async def complete_fields(artifact_id: str, body: CompleteDescriptionsInput):

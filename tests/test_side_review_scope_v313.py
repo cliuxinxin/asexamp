@@ -62,7 +62,7 @@ async def test_selected_feedback_preserves_unselected_pending_rows_and_issues(co
         run = await pending_review(runtime, chat)
         prompt = await current_prompt(store, runtime, store.get('chat', chat['id']))
         original = store.get('artifact', prompt['artifact_id'])
-        proposal = store.get('review_proposal', prompt['proposal_id'])
+        proposal = store.get('artifact_proposal', prompt['proposal_id'])
         first, second = proposal['items']
         assert second['title'] != original['items'][1]['title']
         old_request = copy.deepcopy(store.run(run['id'])['_request'])
@@ -74,9 +74,9 @@ async def test_selected_feedback_preserves_unselected_pending_rows_and_issues(co
         assert result['status'] == 'succeeded', result
         updated = await settled(runtime, run['id'])
         assert updated['interrupt']['type'] == 'case_result_review', updated
-        current = store.get('review_proposal', updated['interrupt']['proposal_id'])
+        current = store.get('artifact_proposal', updated['interrupt']['proposal_id'])
         assert current['id'] != proposal['id']
-        assert store.get('review_proposal', proposal['id'])['status'] == 'superseded'
+        assert store.get('artifact_proposal', proposal['id'])['status'] == 'superseded'
         by_id = {row['id']: row for row in current['items']}
         assert by_id[first['id']]['preconditions'] == '已登录'
         assert by_id[second['id']] == second

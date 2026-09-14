@@ -14,13 +14,14 @@
 | `native_business.py`、`native_schemas.py` | 需求理解、场景、用例、评审及业务结果校验。 |
 | `generation_repair.py`、`generation_candidates.py` | 共用三次内容修复预算；失败草稿与正式成果隔离，保留各轮结果供查看。 |
 | `native_model.py`、`model.py`、`model_diagnostics.py` | 模型适配、Tool Calling、服务器响应及诊断记录。 |
-| `storage.py`、`operations.py`、`native_migration.py` | SQLite 数据、不可变成果版本、并发版本检查、旧数据兼容。 |
+| `storage.py`、`operations.py` | SQLite 数据、不可变成果版本、并发版本检查与旧提案转换。 |
 | `native_views.py`、`artifact_read.py` | 当前阶段与成果的读取投影；不建立另一套流程状态机。 |
 | `documents.py`、`project_context.py`、`project_facts.py` | 文件解析、项目知识、本会话采用范围及来源。 |
 | `profile_edits.py`、`profile_changes.py`、`field_drift.py` | 模板差异建议、确认应用、用例字段与导出列同步。 |
-| `review_proposals.py`、`artifact_previews.py` | 绑定成果版本的评审/修改建议，确认前不修改正式用例；对话消息内展示并接受/拒绝。 |
-| `case_columns.py`、`manual_edits.py` | 用例列计划、手动修改证据、Profile 确认与延迟导出。 |
-| `InlineChangeCard.tsx`、`TableItemEditor.tsx` | 字段差异预览、可编辑场景/用例表格、步骤和预期配对。 |
+| `review_proposals.py`、`artifact_previews.py` | 统一 artifact_proposal 与行字段 Diff；绑定成果版本，确认前不修改正式成果。 |
+| `table_projection.py`、`table_review.py` | 通用行列投影、workspace-grid 接口、人工修改与 AI 建议共用的保存和校验。 |
+| `case_columns.py` | 用例列计划、Profile 确认与延迟导出。 |
+| `ArtifactWorkspace.tsx`、`table-review-model.ts` | 需求/场景/用例的全屏查看、人工编辑、AI Diff 决策、步骤与预期配对及选中行助手。 |
 | `ArtifactCard.tsx`、`AnalysisReport.tsx`、`ConversationParts.tsx` | 成果表格、业务图、来源与对话内附件。 |
 | `ProfileChangeDialog.tsx`、`MemoryDialog.tsx` | Profile 更改确认、项目知识查看与本会话开关。 |
 | `traceability.py`、`TraceabilityPanel.tsx` | 全项目/当前会话追溯树，按真实版本比较缺口和待同步；仅读取已存成果。 |
@@ -30,7 +31,7 @@
 
 主流程读取资料并生成需求理解、场景、用例和评审；人工确认由原生图中断处理。聊天通过工具查询或修改数据库，继续时生成节点读取最新成果。图状态保存标识和成果指针，文档正文及版本内容保存在 SQLite 中。
 
-普通请求先通过原生 `submit_execution_plan` 工具提交有序能力步骤。Supervisor 为每一步选择工具子集，调用现有 Chat Agent 执行；修改预览、Profile 建议和后台生成分别返回真实等待状态。当前的简短同意/拒绝直接处理，其他明确确认表达可由规划入口绑定当前已有确认对象；计划不能批准自身未来生成的预览。后台 Pipeline 保持独立，监督者只观察其完成，不代替用户通过门禁。
+普通请求先通过原生 `submit_execution_plan` 工具提交有序能力步骤。Supervisor 为每一步选择工具子集，调用现有 Chat Agent 执行；修改预览、Profile 建议和后台生成分别返回真实等待状态。业务数据修改通过工作区确认；阶段与 Profile 确认继续使用各自入口。计划不能批准自身未来生成的预览。后台 Pipeline 保持独立，监督者只观察其完成，不代替用户通过门禁。
 
 SQLite 的 `execution_plan` 记录步骤、原始请求位置、目标及版本、选择范围、等待对象与简短工具回执，不存文档副本。修改确认后更新绑定，再执行导出。导出失败重试不会重复已完成修改；服务中断且无法确定写入结果时暂停核对，不盲目重放。`GET /api/chats/{chat_id}/plans/{plan_id}` 提供前端状态投影，不返回内部提示词、资料或完整回执。
 

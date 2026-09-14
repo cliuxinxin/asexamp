@@ -1,5 +1,3 @@
-import './artifact-change.css';
-import './inline-change.css';
 import './traceability.css';
 import './execution-plan.css';
 import {createRoot} from 'react-dom/client';
@@ -15,4 +13,4 @@ createRoot(document.getElementById('root')!).render(<App/>);
 
 import './generation-candidate.css';
 
-import './table-review.css';
+import './workspace.css';

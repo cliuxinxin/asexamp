@@ -43,14 +43,28 @@ def setup(tmp_path):
         @asynccontextmanager
         async def edit_session(self, chat_id):
             yield
+        _mutation_session = edit_session
+        async def ensure_editable(self, chat_id):
+            pass
         async def on_artifact_changed(self, artifact):
             pass
     business = NativeBusiness(store, Gateway())
+    pipeline = Pipeline()
     def tools(prompt=None):
-        return {t.name: t for t in build_tools(store, business, Pipeline(), chat,
+        return {t.name: t for t in build_tools(store, business, pipeline, chat,
             {'content': '给用例新增测试数据和执行人，删除废弃列，然后导出', 'reply_to': (prompt or {}).get('id')}, prompt)}
-    yield SimpleNamespace(store=store, chat=chat, profile=profile, artifact=artifact, tools=tools, business=business)
+    yield SimpleNamespace(store=store, chat=chat, profile=profile, artifact=artifact, tools=tools, business=business, pipeline=pipeline)
     store.close()
+
+
+async def apply_cases(c, prompt):
+    from tcg.table_review import TableSave, save_review
+    proposal = c.store.get('artifact_proposal', prompt['proposal_id'])
+    result = await save_review(c.store, c.business, c.pipeline, 'cases', TableSave(
+        expected_revision=proposal['artifact_revision'], proposal_id=proposal['id'], prompt_id=prompt['id'],
+        items=proposal['items'], client_request_id=proposal['id']))
+    pending = c.store.get('chat', c.chat['id']).get('_native_template_prompt')
+    return {**result, 'status': 'needs_confirmation' if pending else 'succeeded', 'pending': [pending] if pending else []}
 
 
 async def propose_and_apply_cases(c, **kwargs):
@@ -59,7 +73,7 @@ async def propose_and_apply_cases(c, **kwargs):
     assert result['status'] == 'needs_confirmation', result
     assert c.store.get('artifact', 'cases')['revision'] == 1
     assert c.store.get('profile', c.profile['id'])['version'] == 1
-    applied = await c.tools(result['pending'][0])['apply_artifact_preview_tool'].ainvoke({})
+    applied = await apply_cases(c, result['pending'][0])
     assert applied['status'] == 'needs_confirmation', applied
     assert c.store.get('artifact', 'cases')['revision'] == 2
     assert c.store.get('profile', c.profile['id'])['version'] == 1
@@ -128,7 +142,7 @@ async def test_export_called_after_preview_waits_and_remembers_request(setup):
     queued = await c.tools(first['pending'][0])['export_artifact_tool'].ainvoke({'artifact_ids': ['cases']})
     assert queued['status'] == 'needs_confirmation'
     assert not c.store.list('frozen_export')
-    adopted = await c.tools(first['pending'][0])['apply_artifact_preview_tool'].ainvoke({})
+    adopted = await apply_cases(c, first['pending'][0])
     p = adopted['pending'][0]
     result = await c.tools(p)['apply_profile_tool'].ainvoke({})
     assert result['parts'][0]['type'] == 'files'
@@ -157,7 +171,7 @@ async def test_core_export_column_can_be_hidden_without_deleting_steps(setup):
     result = await c.tools()['modify_case_columns_tool'].ainvoke({'artifact_id': 'cases',
         'hide_columns': ['steps'], 'export_after_approval': True})
     assert result['status'] == 'needs_confirmation', result
-    applied = await c.tools(result['pending'][0])['apply_artifact_preview_tool'].ainvoke({})
+    applied = await apply_cases(c, result['pending'][0])
     current = c.store.get('artifact', 'cases')
     assert current['items'][0]['steps'] == c.artifact['items'][0]['steps']
     p = applied['pending'][0]

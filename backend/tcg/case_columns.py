@@ -92,6 +92,8 @@ async def prepare_case_columns(business, artifact, current, *, upserts=(), remov
         for field in removals:
             row.pop(field, None)
             row.get('_template_field_notes', {}).pop(field, None)
+    from .review_proposals import item_changes
+    proposal['changes'] = item_changes(artifact['items'], rows)
     proposal['items'] = rows
     proposal['report'] = copy.deepcopy(artifact.get('report', {}))
     proposal['report']['template_check'] = template_check(plan['config'], rows)

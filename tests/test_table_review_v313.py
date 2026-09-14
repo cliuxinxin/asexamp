@@ -125,12 +125,13 @@ async def test_artifact_preview_saves_human_resolution_and_approval_receipt(setu
         artifact = store.get('artifact', run['current_artifact_id'])
         proposed = await business.revise(artifact, new_values={'preconditions': 'AI 建议：已登录'}, preview=True)
         proposal = {**proposed, 'id': uid('revprop_'), 'chat_id': chat['id'], 'project_id': chat['project_id']}
-        store.put('native_revision_proposal', proposal)
+        store.put('artifact_proposal', proposal)
         prompt = {'id': 'revision:' + proposal['id'], 'kind': 'artifact_proposal', 'artifact_id': artifact['id'],
                   'artifact_revision': artifact['revision'], 'proposal_id': proposal['id']}
         store.put('chat', {**store.get('chat', chat['id']), '_native_artifact_prompt': prompt})
         view = await review_view(store, runtime, artifact['id'])
-        assert view['proposal_kind'] == 'native_revision_proposal'
+        assert view['proposal_kind'] == 'revision'
+        assert view['mode'] == 'ai_proposal'
         rows = copy.deepcopy(view['proposed_items'])
         rows[0]['preconditions'] = '人工确认：使用已认证的有效账号'
         body = TableSave(items=rows, expected_revision=view['artifact_revision'], profile_id=view['profile_id'],
@@ -139,7 +140,9 @@ async def test_artifact_preview_saves_human_resolution_and_approval_receipt(setu
         result = await save_review(store, business, runtime, artifact['id'], body)
         assert result['artifact']['revision'] == artifact['revision'] + 1
         assert result['artifact']['items'][0]['preconditions'] == rows[0]['preconditions']
-        assert store.get('native_revision_proposal', proposal['id'])['_applied']
+        saved_proposal = store.get('artifact_proposal', proposal['id'])
+        assert saved_proposal['status'] == 'applied'
+        assert saved_proposal['applied_revision'] == artifact['revision'] + 1
         assert store.get('native_approval_receipt', 'approval:' + prompt['id'])['parts'][0]['revision'] == artifact['revision'] + 1
         await settled(runtime, run['id'])
         assert (await current_prompt(store, runtime, store.get('chat', chat['id'])))['kind'] == 'case_result_review'
@@ -159,8 +162,8 @@ async def test_history_is_read_only_and_foreign_proposal_is_denied(setup):
         with pytest.raises(DomainError, match='历史'):
             await save_review(store, business, runtime, view['artifact_id'],
                 TableSave(**body, revision=1, client_request_id='history'))
-        proposal = store.get('review_proposal', body['proposal_id'])
-        store.put('review_proposal', {**proposal, 'id': 'foreign', 'chat_id': 'another-chat'})
+        proposal = store.get('artifact_proposal', body['proposal_id'])
+        store.put('artifact_proposal', {**proposal, 'id': 'foreign', 'chat_id': 'another-chat'})
         with pytest.raises(DomainError, match='不属于'):
             await review_view(store, runtime, view['artifact_id'], proposal_id='foreign')
     finally:

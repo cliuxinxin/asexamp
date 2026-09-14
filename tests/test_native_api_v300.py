@@ -42,11 +42,11 @@ def test_clarification_projection_adoption_and_direct_revision_reanchor(native_j
     shared = j.client.get('/api/projects/' + j.project['id'] + '/shared-context').json()
     assert answer in str(shared)
 
-    # The retained edit/restore API uses the same native gate and optimistic revision.
+    # Workspace saving and the restore API uses the same native gate and optimistic revision.
     rows = copy.deepcopy(updated['items'])
     rows[0]['title'] = '已明确锁定规则的登录需求'
-    response = j.client.put('/api/artifacts/' + updated['id'],
-        json={'expected_revision': updated['revision'], 'items': rows})
+    response = j.client.post('/api/artifacts/' + updated['id'] + '/workspace-grid/save',
+        json={'expected_revision': updated['revision'], 'items': rows, 'client_request_id': 'analysis-edit'})
     assert response.status_code == 200, response.text
     _, changed, current = j.gate('strategy_review')
     assert changed['revision'] == updated['revision'] + 1 and current['id'] != understanding['id']

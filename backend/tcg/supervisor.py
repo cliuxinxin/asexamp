@@ -89,15 +89,11 @@ def simple_control(body, prompt):
             return 'answer_clarification_tool', {}, False
         if body.get('reply_kind') != 'confirm':
             return None
-        if name in ('artifact.apply', 'artifact.discard') and prompt.get('kind') == 'artifact_proposal':
-            for field, actual in (('proposal_id', prompt.get('proposal_id')),
-                                  ('artifact_id', prompt.get('artifact_id')),
-                                  ('expected_revision', prompt.get('artifact_revision'))):
-                if args.get(field) is not None and args[field] != actual:
-                    raise DomainError('确认对象或版本与当前预览不一致', 409)
-            return ('apply_artifact_preview_tool', {}, False) if name == 'artifact.apply' else (
-                'discard_artifact_preview_tool', {}, True)
+        if name in ('artifact.apply', 'artifact.discard'):
+            raise DomainError('请打开成果工作区查看并保存修改选择。', 409)
         if name == 'workflow.resume':
+            if prompt.get('proposal_id') or prompt.get('review_proposal_id'):
+                return 'workspace_guidance', {}, False
             if args.get('run_id') and args['run_id'] != prompt.get('run_id'):
                 raise DomainError('确认任务与当前提示不一致', 409)
             action = args.get('action', command.get('action', 'approved'))
@@ -118,8 +114,8 @@ def simple_control(body, prompt):
         return None
     if body.get('reply_to') and body['reply_to'] != prompt['id']:
         raise DomainError('确认提示已改变，请查看当前提示后再回复', 409)
-    if prompt.get('kind') == 'artifact_proposal':
-        return ('discard_artifact_preview_tool' if reject else 'apply_artifact_preview_tool'), {}, reject
+    if prompt.get('kind') == 'artifact_proposal' or prompt.get('proposal_id') or prompt.get('review_proposal_id'):
+        return 'workspace_guidance', {}, False
     if prompt.get('kind') == 'profile':
         return ('discard_template_tool' if reject else 'apply_profile_tool'), {}, reject
     if text == '场景同意，生成关联用例' and prompt.get('kind') == 'scenario_review':
@@ -262,11 +258,10 @@ class Supervisor:
             if part.get('type') == 'artifact' and part.get('artifact_id') and part.get('revision'):
                 plan['_bindings'][part['artifact_id']] = part['revision']
                 plan['_output_artifact_id'] = part['artifact_id']
-            if part.get('type') == 'diff' and part.get('artifact_id'):
+            if part.get('type') == 'artifact_proposal' and part.get('artifact_id'):
                 plan['_output_artifact_id'] = part['artifact_id']
-                for change in part.get('changes', []):
-                    if change.get('artifact_id') and change.get('expected_revision'):
-                        plan['_bindings'][change['artifact_id']] = change['expected_revision']
+                if part.get('artifact_revision'):
+                    plan['_bindings'][part['artifact_id']] = part['artifact_revision']
         profile = receipt.get('profile')
         if isinstance(profile, dict) and profile.get('id') and profile.get('version'):
             plan['_profile_binding'] = {'id': profile['id'], 'version': profile['version']}
@@ -314,7 +309,7 @@ class Supervisor:
                     if row['status'] != 'completed':
                         row.update(status='cancelled', message='已在本次确认后的计划中继续处理。')
                 self.save(prior)
-            if resolved and (resolved.get('tool_name') in ('discard_artifact_preview_tool', 'discard_template_tool')
+            if resolved and (resolved.get('tool_name') in ('discard_template_tool',)
                              or resolved.get('resolution') == 'rejected'):
                 step.update(status='completed', message='已拒绝当前修改')
                 plan['status'] = 'cancelled'
@@ -384,8 +379,8 @@ class Supervisor:
                     turn.update(status='needs_input', message=message)
                     break
                 kind = (prompt or {}).get('kind')
-                allowed = set(READS) | ({'apply_artifact_preview_tool', 'discard_artifact_preview_tool'}
-                    if kind == 'artifact_proposal' else {'apply_profile_tool', 'discard_template_tool'}
+                allowed = set(READS) | (set()
+                    if kind == 'artifact_proposal' or (prompt or {}).get('proposal_id') else {'apply_profile_tool', 'discard_template_tool'}
                     if kind == 'profile' else {'answer_clarification_tool'} if kind == 'clarification'
                     else {'resume_pipeline_tool'})
             if step['capability'] == 'pipeline_control':
@@ -400,7 +395,7 @@ class Supervisor:
                     return
                 compact = {key: item[key] for key in ('tool_name', 'status', 'message', 'run_id', 'pending', 'resolution') if key in item}
                 compact['parts'] = [{key: p[key] for key in ('type', 'artifact_id', 'revision', 'proposal_id', 'files') if key in p}
-                    for p in item.get('parts', []) if p.get('type') in ('artifact', 'diff', 'files')]
+                    for p in item.get('parts', []) if p.get('type') in ('artifact', 'artifact_proposal', 'files')]
                 step['receipts'].append(compact)
                 self._bind_receipt(plan, item)
                 self.save(plan)

@@ -52,15 +52,18 @@ def test_dialogue_addition_returns_to_gate_and_profile_edit_exports_without_uplo
         reply=prompt, status='needs_confirmation')
     preview_prompt = j.snapshot()['conversation_prompt']
     assert preview_prompt['kind'] == 'artifact_proposal'
-    assert len(staged['parts'][0]['changes']) == 1
+    assert staged['parts'][0]['type'] == 'artifact_proposal'
+    proposal = j.app.state.store.get('artifact_proposal', staged['parts'][0]['proposal_id'])
+    assert len(proposal['changes']) == 1
     receipt = json.loads(j.gateway.tool_results[-1].content)
-    assert 'before_items' not in receipt['parts'][0]['changes'][-1]
-    assert receipt['parts'][0]['changes'][-1]['added'] == [
-        {'id': 'SC-CONCURRENT', 'title': '第二次登录使旧会话失效'}]
+    assert receipt['parts'][0]['type'] == 'artifact_proposal'
+    assert 'changes' not in receipt['parts'][0]
+    assert proposal['changes'][0]['op'] == 'add'
+    assert proposal['changes'][0]['after']['id'] == 'SC-CONCURRENT'
     assert j.artifact(scenarios['id']) == scenarios
     assert j.artifact(analysis['id']) == analysis
     assert j.snapshot()['sources'] == sources_before
-    j.turn('同意应用这次新增', 'apply_artifact_preview_tool', reply=preview_prompt)
+    j.turn('同意应用这次新增', 'workspace_save', reply=preview_prompt)
     _, updated, prompt = j.gate('scenario_review')
     assert updated['items'][0] == scenarios['items'][0]
     added = updated['items'][1]

@@ -31,6 +31,13 @@ class PipelineState(TypedDict, total=False):
     phase: str
 
 
+def _compatible_run(run):
+    """Only supported native checkpoints may be read or scheduled for continuation."""
+    return (run.get('runtime') == 'native' and run.get('graph_version') in (8, 9, 10)
+            and run.get('migration', {}).get('status') != 'restart_required'
+            and run.get('stage') != 'restart_required')
+
+
 GATES = {
     'understanding_gate': ('strategy_review', 'analysis_ref', '确认需求理解', 'scenarios'),
     'scenario_gate': ('scenario_review', 'scenario_ref', '确认测试场景', 'cases'),
@@ -119,7 +126,13 @@ class PipelineRuntime:
         graph.add_edge('finish', END)
         self.graph = graph.compile(checkpointer=saver)
         for run in self.store.runs(statuses=('queued', 'running', 'waiting')):
-            if run.get('runtime') != 'native':
+            if not _compatible_run(run):
+                self.store.update_run(run['id'], status='failed', stage='restart_required',
+                    error='旧版本任务无法继续；已有资料和成果版本已保留，请通过聊天重新开始任务。',
+                    interrupt=None, interrupt_id=None,
+                    migration={'status': 'restart_required', 'from_graph_version': run.get('graph_version')},
+                    recovery={'category': 'restart_required', 'retryable': False,
+                        'suggestions': ['查看已有成果和资料，再通过聊天重新开始任务。']})
                 continue
             state = await self.graph.aget_state(self._config(run['id']))
             if state.tasks and any(t.interrupts for t in state.tasks):
@@ -239,6 +252,8 @@ class PipelineRuntime:
         return public(run)
 
     def _schedule(self, run_id, value):
+        if not _compatible_run(self.store.run(run_id)):
+            raise DomainError('此历史任务需要重新开始；已有资料和成果均已保留', 409)
         if self._stopping:
             raise DomainError('服务正在停止，请稍后重试', 409)
         if run_id in self.tasks and not self.tasks[run_id].done():
@@ -310,7 +325,7 @@ class PipelineRuntime:
 
     async def snapshot(self, run_id):
         run = self.store.run(run_id)
-        if run.get('runtime') != 'native' or self.graph is None:
+        if self.graph is None or not _compatible_run(run):
             return public(run)
         def project(value):
             if value.get('knowledge_rebuild_required') and value['status'] == 'waiting':
@@ -373,6 +388,8 @@ class PipelineRuntime:
             if run_id in self.tasks and not self.tasks[run_id].done():
                 raise DomainError('当前步骤仍在执行，请等待完成', 409)
             run = await self.snapshot(run_id)
+            if not _compatible_run(run):
+                raise DomainError('此历史任务需要重新开始；已有资料和成果均已保留', 409)
             if run['status'] != 'waiting' or not run.get('interrupt'):
                 raise DomainError('当前没有等待确认的步骤', 409)
             waiting = run['interrupt']
@@ -449,6 +466,8 @@ class PipelineRuntime:
         run = self.store.run(run_id)
         async with self._mutation_session(run['chat_id']), self._lock(run_id):
             run = await self.snapshot(run_id)
+            if not _compatible_run(run):
+                raise DomainError('此历史任务需要重新开始；已有资料和成果均已保留', 409)
             if run['status'] != 'waiting' or (run.get('interrupt') or {}).get('type') != 'case_result_review':
                 raise DomainError('当前没有等待确认的评审建议', 409)
             gate = run['interrupt']
@@ -505,7 +524,7 @@ class PipelineRuntime:
     async def retry(self, run_id):
         async with self._mutation_session(self.store.run(run_id)['chat_id']), self._lock(run_id):
             run = self.store.run(run_id)
-            if run.get('runtime') != 'native' or run.get('migration', {}).get('status') == 'restart_required':
+            if not _compatible_run(run):
                 raise DomainError('此历史任务需要重新开始；已有资料和成果均已保留', 409)
             if run['status'] != 'failed':
                 raise DomainError('只有失败步骤可以重试', 409)
@@ -536,7 +555,7 @@ class PipelineRuntime:
         if not active:
             candidates = candidates[:1]
         for run in candidates:
-            if run.get('runtime') != 'native':
+            if not _compatible_run(run):
                 continue
             async with self._lock(run['id']):
                 state = await self.graph.aget_state(self._config(run['id']))
@@ -584,22 +603,6 @@ class PipelineRuntime:
                 results.append(await self.snapshot(run['id']))
                 break
         return results
-
-    async def restore_waiting(self, run_id, values, gate_type):
-        """Upgrade a known persisted review position into a real native gate."""
-        predecessor = {'clarification': 'understand', 'strategy_review': 'clarification_gate', 'scenario_review': 'scenarios',
-                       'case_draft_review': 'cases', 'case_result_review': 'review'}
-        if gate_type not in predecessor:
-            raise DomainError('此旧确认位置需要先检查资料后重新开始', 409)
-        run = self.store.run(run_id)
-        async with self._mutation_session(run['chat_id']), self._lock(run_id):
-            pointer_values = {key: value for key, value in values.items() if key in PipelineState.__annotations__}
-            pointer_values.update(run_id=run_id, project_id=run['project_id'], chat_id=run['chat_id'], phase=gate_type)
-            await self.graph.aupdate_state(self._config(run_id), pointer_values, as_node=predecessor[gate_type])
-            self.store.update_run(run_id, runtime='native', graph_version=9, status='running',
-                                  pause_after_step=True, interrupt=None, interrupt_id=None)
-            await self.graph.ainvoke(None, self._config(run_id))
-            return await self.snapshot(run_id)
 
     def _after_understanding(self, state):
         run = self.store.run(state['run_id'])
@@ -750,7 +753,7 @@ class PipelineRuntime:
             return await self._gate(state, 'review_result_gate')
         from .review_proposals import require_current_review
         run = self._run(state, 'case_result_review')
-        saved = self.store.get('review_proposal', state['review_ref'])
+        saved = self.store.get('artifact_proposal', state['review_ref'])
         if saved.get('status') == 'rejected' and saved.get('run_id') == run['id']:
             return {'phase': 'review_rejected', 'current_artifact_id': saved['artifact_id']}
         proposal = require_current_review(self.store, run['id'], state['review_ref'])
@@ -760,7 +763,7 @@ class PipelineRuntime:
                 'title': '确认评审建议', 'message': MESSAGES['case_result_review'],
                 'next_stage': 'apply_review', 'confirm_label': '确认评审建议并修改用例'})
             if response.get('action') == 'rejected':
-                self.store.put('review_proposal', {**proposal, 'status': 'rejected', 'rejected_at': now()})
+                self.store.put('artifact_proposal', {**proposal, 'status': 'rejected', 'rejected_at': now()})
                 self.store.update_run(run['id'], pause_after_step=False)
                 self._record('review.rejected', run['id'], proposal_id=proposal['id'])
                 return {'phase': 'review_rejected', 'current_artifact_id': proposal['artifact_id']}
@@ -793,9 +796,9 @@ class PipelineRuntime:
                 raise DomainError('任务已取消', 409)
             previous_id = self.store.run(run['id']).get('review_proposal_id')
             if previous_id and previous_id != proposal['id']:
-                previous = self.store.get('review_proposal', previous_id)
+                previous = self.store.get('artifact_proposal', previous_id)
                 if previous['status'] == 'pending':
-                    self.store.put('review_proposal', {**previous, 'status': 'superseded', 'superseded_by': proposal['id']})
+                    self.store.put('artifact_proposal', {**previous, 'status': 'superseded', 'superseded_by': proposal['id']})
             self.store.update_run(run['id'], review_proposal_id=proposal['id'])
             event_id = 'review-event:' + proposal['id']
             self.store.put('pipeline_result', {'id': event_id, 'run_id': run['id'], 'chat_id': run['chat_id'],

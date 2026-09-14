@@ -3,7 +3,6 @@ import copy
 
 import pytest
 
-from tcg.dialogue_lineage import preview_changes
 from tcg.schemas import DomainError
 from tcg.workspace_coverage import lineage_rows
 from test_native_business_v300 import setup, generated
@@ -41,7 +40,7 @@ async def test_add_independent_item_preserves_upstream_and_all_existing_rows(set
     proposal = await service.revise(target, instruction='新增并发登录', add=True,
         dialogue_content='请增加并发登录验证，结果暂未定义，不修改前面的成果。')
     assert proposal['dialogue']['parent_changes'] == []
-    assert len(preview_changes(proposal, target)) == 1
+    assert len(proposal['changes']) == 1
     assert store.list('source') == original_sources
     assert store.list('artifact') == original_artifacts
     updated = service.apply_revision_preview(proposal)

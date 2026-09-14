@@ -203,14 +203,17 @@ async def test_edit_and_old_confirmation_are_serialized_without_durable_edit_loc
 
 
 @pytest.mark.asyncio
-async def test_restore_waiting_uses_actual_native_checkpoint_without_generation(tmp_path):
+async def test_restart_uses_actual_native_checkpoint_without_generation(tmp_path):
     store, chat, business, runtime = setup(tmp_path)
     await runtime.start()
     run = await settled(runtime, (await runtime.start_run(chat['id'], {'mode': 'hitp'}))['id'])
     run = await agree(runtime, run)
     state = await runtime.graph.aget_state(runtime._config(run['id']))
     calls = copy.deepcopy(business.calls)
-    restored = await runtime.restore_waiting(run['id'], state.values, 'scenario_review')
+    await runtime.stop()
+    runtime = PipelineRuntime(store, business)
+    await runtime.start()
+    restored = await runtime.snapshot(run['id'])
     assert restored['interrupt']['type'] == 'scenario_review'
     assert business.calls == calls
     checkpoint = await runtime.graph.aget_state(runtime._config(run['id']))

@@ -132,17 +132,6 @@ def prepare_dialogue(store, artifact, content, *, add=False, parent_id=None):
             'addition_parent_id': selected_parent, 'add': add, 'legacy_unlinked_cases': legacy}
 
 
-def preview_changes(proposal, artifact):
-    changes = [{'artifact_id': c['artifact_id'], 'title': c['value']['title'],
-        'expected_revision': c['base_revision'], 'before_items': c['before']['items'],
-        'items': c['value']['items'], 'report': c['value']['report']}
-        for c in proposal.get('dialogue', {}).get('parent_changes', [])]
-    changes.append({'artifact_id': artifact['id'], 'title': artifact['title'],
-        'expected_revision': artifact['revision'], 'before_items': artifact['items'],
-        'items': proposal['items'], 'report': proposal['report']})
-    return changes
-
-
 def commit_dialogue(service, proposal):
     """Publish the source and target revision atomically; upstream stays read-only."""
     from .operations import native_writes
@@ -155,13 +144,13 @@ def commit_dialogue(service, proposal):
         artifact = store.get('artifact', proposal['artifact_id'])
         if (artifact['chat_id'], artifact['project_id']) != (draft['chat_id'], draft['project_id']):
             raise DomainError('对话补充不属于当前成果', 404)
-        deps.assert_manifest(store, proposal['dependencies'])
-        if artifact['revision'] != proposal['base_revision']:
+        deps.assert_manifest(store, proposal['_dependencies'])
+        if artifact['revision'] != proposal['artifact_revision']:
             raise DomainError('成果已改变，请重新查看修改预览', 409)
         store.add_source(draft['chat_id'], draft['name'], 'supplement', draft['content'],
                          draft['chunks'], source_id=draft['id'])
-        sources = list(dict.fromkeys(proposal['source_ids'] + [draft['id']]))
-        roles = {**proposal['source_roles'], draft['id']: 'supplement'}
+        sources = list(dict.fromkeys(proposal['_source_ids'] + [draft['id']]))
+        roles = {**proposal['_source_roles'], draft['id']: 'supplement'}
         parents = [_scope(store.get('artifact', p['id']), artifact) for p in bundle['parents']]
         for parent in parents:
             if parent['type'] == 'scenarios':
@@ -169,7 +158,7 @@ def commit_dialogue(service, proposal):
         evidence = store.evidence(sources, roles)
         service._validate(artifact['type'], proposal['items'], evidence, parents, artifact.get('_profile'))
         guard = service._manifest(sources, parents + [artifact])
-        result = store.revise_artifact(artifact['id'], proposal['base_revision'], proposal['items'],
+        result = store.revise_artifact(artifact['id'], proposal['artifact_revision'], proposal['items'],
             reason='native_dialogue_edit', report=proposal['report'], source_ids=sources, source_roles=roles,
             dependencies=guard, provenance=guard)
         store.audit(artifact['id'], 'dialogue_supplement_applied', {'source_id': draft['id'],
