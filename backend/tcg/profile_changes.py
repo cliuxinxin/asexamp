@@ -7,6 +7,9 @@ from .storage import now, public, uid
 
 
 LABELS = {
+    'language': '输出语言',
+    'scenario_level': '场景详细程度',
+    'scope': '默认测试范围',
     'excel_columns': '用例列、顺序与填写规则',
     'excel_layout': '用例导出布局',
     'sheet_name': '用例工作表名称',
@@ -40,25 +43,28 @@ def _proposal(store, chat_id, prompt_id):
     chat = store.get('chat', chat_id)
     pending = chat.get('_native_template_prompt')
     if not pending or not prompt_id or pending.get('id') != prompt_id or pending.get('kind') != 'profile':
-        raise DomainError('模板提示已改变，请查看当前建议后再确认', 409)
+        raise DomainError('Profile 更改提示已改变，请查看当前建议后再确认', 409)
     current = store.get('profile', pending['profile_id'])
     if current['project_id'] != chat['project_id']:
         raise DomainError('Profile 不属于当前项目', 404)
     if current['version'] != pending['expected_version']:
-        raise DomainError('Profile 已改变，请重新学习并查看新的更改建议', 409)
+        raise DomainError('Profile 已改变，请查看当前配置后重新提出更改建议', 409)
     ids = pending.get('template_ids') or []
     if not ids or len(ids) != len(set(ids)):
-        raise DomainError('模板提示缺少有效的建议，请重新学习', 409)
+        raise DomainError('Profile 提示缺少有效建议，请重新提出更改', 409)
     templates, config = [], copy.deepcopy(current['config'])
     for template_id in ids:
         suggestion = store.get('template', template_id)
         if suggestion['chat_id'] != chat_id or suggestion['project_id'] != chat['project_id']:
-            raise DomainError('模板建议不属于当前对话', 404)
+            raise DomainError('Profile 更改建议不属于当前对话', 404)
         if suggestion.get('_applied'):
-            raise DomainError('此模板已经应用，请查看当前 Profile', 409)
+            raise DomainError('此更改已经应用，请查看当前 Profile', 409)
         if suggestion['profile_id'] != current['id'] or suggestion['base_profile_version'] != current['version']:
-            raise DomainError('Profile 已改变，请重新学习或确认新的模板建议', 409)
-        config, _ = merge_template_config(config, suggestion['config'], suggestion['template_kinds'])
+            raise DomainError('Profile 已改变，请查看当前配置后重新提出更改', 409)
+        if suggestion.get('_proposal_type') == 'direct_profile':
+            config = profile_config(copy.deepcopy(suggestion['config']))
+        else:
+            config, _ = merge_template_config(config, suggestion['config'], suggestion['template_kinds'])
         templates.append(suggestion)
     changes = config_changes(current['config'], config)
     summary = '\n'.join(dict.fromkeys(str(t.get('summary', '')).strip() for t in templates if t.get('summary')))
@@ -99,7 +105,7 @@ def apply_profile_change(store, chat_id, prompt_id, expected_version, selected_k
         store.put('chat', {**chat, 'profile_id': updated['id'], '_native_template_prompt': None})
         labels = '、'.join(available[key]['label'] for key in keys)
         message = f'已应用 {len(keys)} 项 Profile 更改：{labels}。' + (
-            f'其余 {len(skipped)} 项保留原配置。' if skipped else '') + '后续新任务使用此 Profile。'
+            f'其余 {len(skipped)} 项保留原配置。' if skipped else '') + '当前成果可按最新 Profile 导出，后续新任务使用此 Profile。'
         audit = {'prompt_id': prompt_id, 'profile_id': current['id'], 'template_ids': preview['template_ids'],
             'base_version': current['version'], 'version': updated['version'],
             'selected_keys': keys, 'skipped_keys': skipped}

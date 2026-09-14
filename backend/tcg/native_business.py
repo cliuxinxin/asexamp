@@ -13,6 +13,7 @@ from .case_fields import (MANUAL_FIELDS, column_signature, filled, materialize_f
                           protect_non_ai_fields, template_check, template_columns)
 from .clarification import pending_questions, question_key, submitted_answers
 from .native_schemas import ANSWER_SCHEMA, ESTIMATE_SCHEMA, completion_schema, rows_schema
+from .reference_repair import repair_reference_fields
 from .schemas import DomainError, validate_items
 from .server_capacity import ContextCapacityError
 
@@ -94,7 +95,8 @@ class NativeBusiness:
         return {'profile': profile, 'template_contract': template_columns(profile),
             'evidence': [copy.deepcopy(e) for e in evidence if e.get('role') != 'example'],
             'format_references': [copy.deepcopy(e) for e in evidence if e.get('role') == 'example'],
-            'instruction': holder.get('_request', {}).get('content', ''), **fields}
+            'instruction': holder.get('_request', {}).get('content', ''),
+            'legacy_unlinked_cases': copy.deepcopy(holder.get('report', {}).get('_legacy_unlinked_cases', {})), **fields}
 
     def _manifest(self, sources, parents=()):
         return deps.manifest(self.store, source_ids=sources,
@@ -116,12 +118,18 @@ class NativeBusiness:
             cached = self.store.cache_get(run['id'], key)
             if cached is not None:
                 return [cached]
+        candidate_key = key + ':reference_candidate'
+        candidate = self.store.cache_get(run['id'], candidate_key) if run else None
         diagnostics = getattr(self.gateway, 'diagnostics', None)
         diagnostic_scope = diagnostics.bind(run_id=run['id'], chat_id=run['chat_id'],
             project_id=run['project_id'], stage=task) if diagnostics and run else nullcontext()
         try:
             with diagnostic_scope:
-                result = await self._call(task, context, schema, instruction)
+                if candidate:
+                    from .native_model import NativeResult
+                    result = NativeResult(candidate['result'], candidate.get('call_id'))
+                else:
+                    result = await self._call(task, context, schema, instruction)
         except DomainError as exc:
             output_capacity = getattr(exc, 'category', None) == 'output_capacity'
             if not isinstance(exc, ContextCapacityError) and not output_capacity:
@@ -137,18 +145,33 @@ class NativeBusiness:
             right = await self._groups(task, rows[middle:], build, schema, instruction, run)
             return left + right
         try:
+            def save_candidate(value):
+                if run:
+                    self.store.cache_set(run['id'], candidate_key,
+                        {'result': value, 'call_id': getattr(result, 'call_id', None)})
+            scope = diagnostics.bind(**({'run_id': run['id'], 'chat_id': run['chat_id'],
+                'project_id': run['project_id'], 'stage': task} if run else {})) if diagnostics else nullcontext()
+            with scope:
+                result = await repair_reference_fields(self._call, task, context, result,
+                    save_candidate=save_candidate if run else None, diagnostics=diagnostics)
             self._validate_submission(task, context, result)
         except DomainError as exc:
+            # A candidate with other business errors should regenerate normally.
+            if run and not getattr(exc, 'category', None) and not getattr(exc, 'item_ids', None):
+                self.store.cache_delete(run['id'], candidate_key)
             if diagnostics:
                 with diagnostics.bind(**({'run_id': run['id'], 'chat_id': run['chat_id'],
                                           'project_id': run['project_id']} if run else {})):
                     diagnostics.record('batch.validation_failed', level='ERROR',
-                        call_id=getattr(result, 'call_id', None), task=task,
+                        call_id=getattr(exc, 'call_id', None) or getattr(result, 'call_id', None), task=task,
                         node=self._run(run).get('stage', task) if run else task,
-                        errors=[str(exc)])
+                        errors=[str(exc)], item_ids=getattr(exc, 'item_ids', []),
+                        category=getattr(exc, 'category', None))
             raise
         if run:
             self.store.cache_set(run['id'], key, result)
+            if candidate or self.store.cache_get(run['id'], candidate_key):
+                self.store.cache_delete(run['id'], candidate_key)
         return [result]
 
     def _validate_submission(self, task, context, result):
@@ -159,6 +182,9 @@ class NativeBusiness:
         if kind:
             # Invalid business rows must not become a reusable successful leaf.
             parents = [{'type': key, 'items': context[key]} for key in ('analysis', 'scenarios') if key in context]
+            for parent in parents:
+                if parent['type'] == 'scenarios':
+                    parent['_legacy_unlinked_cases'] = context.get('legacy_unlinked_cases', {})
             self._validate(kind, result['items'], context['evidence'], parents, context.get('profile'))
         if task in ('generate_scenarios', 'generate_cases'):
             parent_key = 'analysis' if task == 'generate_scenarios' else 'scenarios'
@@ -198,8 +224,14 @@ class NativeBusiness:
         refs = {e['id']: e for e in evidence}
         scenarios = next((a for a in parents if a['type'] == 'scenarios'), None)
         analysis = next((a for a in parents if a['type'] == 'analysis'), None)
+        scenario_ids = {r['id'] for r in scenarios['items']} if scenarios is not None else None
+        legacy = scenarios.get('_legacy_unlinked_cases', {}) if scenarios is not None else {}
         validate_items(kind, rows, refs,
-            {r['id'] for r in scenarios['items']} if scenarios is not None and kind == 'cases' else None)
+            scenario_ids | set(legacy.values()) if scenario_ids is not None and kind == 'cases' else None)
+        if kind == 'cases' and scenario_ids is not None:
+            for row in rows:
+                if row['scenario_id'] not in scenario_ids and (row['id'] not in legacy or legacy[row['id']] != row['scenario_id']):
+                    raise DomainError('新增或重新关联的用例必须属于当前场景；历史导入关联只保留原条目')
         if kind == 'analysis' and any(any(k in r for k in ('steps', 'scenario_id', 'preconditions')) for r in rows):
             raise DomainError('需求理解包含用例字段；当前结果尚未保存')
         if kind == 'scenarios':
@@ -324,6 +356,9 @@ class NativeBusiness:
         analysis = self._artifact(analysis) if analysis else parent
         parents = [parent] if kind == 'scenarios' else [analysis, parent]
         old = self._existing(run, kind)
+        legacy = (old or {}).get('report', {}).get('_legacy_unlinked_cases', {}) if kind == 'cases' else {}
+        if legacy:
+            parent['_legacy_unlinked_cases'] = copy.deepcopy(legacy)
         sources, roles, evidence = self._evidence(run, parent.get('_source_ids'), parent.get('_source_roles'))
         guard = self._manifest(sources, parents)
         changed = self._affected(old, parent)
@@ -389,6 +424,8 @@ class NativeBusiness:
         prefix = 'analysis' if kind == 'scenarios' else 'scenario'
         report['lineage'] = {prefix + '_artifact_id': parent['id'], prefix + '_revision': parent['revision'],
             'parent_item_hashes': _rows_digest(parent['items']), 'parent_rules_hash': deps.digest(_global_rules(parent))}
+        if legacy:
+            report['_legacy_unlinked_cases'] = copy.deepcopy(legacy)
         if kind == 'cases':
             report['lineage'].update(analysis_artifact_id=analysis['id'], analysis_revision=analysis['revision'],
                 analysis_item_hashes=_rows_digest(analysis['items']), analysis_rules_hash=deps.digest(_global_rules(analysis)))
@@ -405,7 +442,11 @@ class NativeBusiness:
 
     def _parents(self, artifact):
         lineage = artifact.get('report', {}).get('lineage', {})
-        return [self._artifact(lineage[key]) for key in ('analysis_artifact_id', 'scenario_artifact_id') if lineage.get(key)]
+        parents = [self._artifact(lineage[key]) for key in ('analysis_artifact_id', 'scenario_artifact_id') if lineage.get(key)]
+        for parent in parents:
+            if parent['type'] == 'scenarios':
+                parent['_legacy_unlinked_cases'] = copy.deepcopy(artifact.get('report', {}).get('_legacy_unlinked_cases', {}))
+        return parents
 
     async def review(self, run, cases):
         run, cases = self._run(run), self._artifact(cases)
@@ -424,6 +465,7 @@ class NativeBusiness:
             return self._context(run, [e for e in evidence if e['id'] in refs or e.get('role') == 'example'],
                 cases=group, previous_items=group,
                 selected_scope=selected_ids is not None,
+                legacy_unlinked_cases=cases.get('report', {}).get('_legacy_unlinked_cases', {}),
                 scenarios=[r for a in parents if a['type'] == 'scenarios' for r in a['items'] if r['id'] in scenario_ids])
         results = await self._groups('review_cases', selected, build, rows_schema('cases', run['_profile']),
             'Review supplied cases once. Return the complete reviewed rows for this batch plus report.summary '
@@ -550,13 +592,27 @@ class NativeBusiness:
             raise DomainError('所选条目不属于当前成果')
         return [copy.deepcopy(r) for r in artifact['items'] if ids is None or r['id'] in ids]
 
-    async def revise(self, artifact, ids=None, instruction='', new_values=None, source_ids=None, source_roles=None, preview=False):
+    async def revise(self, artifact, ids=None, instruction='', new_values=None, source_ids=None, source_roles=None,
+                     preview=False, dialogue_content=None, add=False, parent_id=None):
         artifact = self._artifact(artifact)
         selected = self._selection(artifact, ids)
         selected_ids = {r['id'] for r in selected}
         sources, roles, evidence = self._evidence(artifact, source_ids, source_roles)
         parents = self._parents(artifact)
-        guard = self._manifest(sources, parents + [artifact])
+        dialogue = None
+        guard_parents = parents
+        if dialogue_content is not None:
+            from .dialogue_lineage import prepare_dialogue
+            dialogue = prepare_dialogue(self.store, artifact, dialogue_content, add=add, parent_id=parent_id)
+            parents, guard_parents = dialogue['parents'], dialogue['original_parents']
+            parent_sources = [sid for p in guard_parents for sid in p.get('_source_ids', [])]
+            parent_roles = {sid: role for p in guard_parents for sid, role in p.get('_source_roles', {}).items()}
+            sources, roles, evidence = self._evidence(artifact, list(source_ids or []) + parent_sources,
+                {**parent_roles, **(source_roles or {})})
+            evidence += dialogue['evidence']
+        if add and (dialogue is None or new_values is not None):
+            raise DomainError('新增条目需要当前用户的具体要求，字段直接赋值仅用于已有条目')
+        guard = self._manifest(sources, guard_parents + [artifact])
         diagram_response_is_whole = False
         if new_values is not None:
             if not isinstance(new_values, dict) or set(new_values) & {'id', 'report', '_source_ids'} or any(k.startswith('_') for k in new_values):
@@ -566,35 +622,88 @@ class NativeBusiness:
         else:
             def build(group):
                 refs = {ref for row in group for ref in row.get('refs', [])}
+                context_parents = parents
+                if add:
+                    parent_id = dialogue['addition_parent_id']
+                    scenario_rows = [r for p in parents if p['type'] == 'scenarios' for r in p['items'] if r['id'] == parent_id]
+                    requirement_ids = {rid for r in scenario_rows for rid in r.get('requirement_ids', [])}
+                    if artifact['type'] == 'scenarios':
+                        requirement_ids.add(parent_id)
+                    context_parents = [{**p, 'items': [r for r in p['items'] if r['id'] in
+                        (requirement_ids if p['type'] == 'analysis' else {parent_id})]} for p in parents]
+                    refs = {ref for p in context_parents for r in p['items'] for ref in r.get('refs', [])}
+                    if ids is not None:
+                        refs.update(ref for r in selected for ref in r.get('refs', []))
+                if dialogue and dialogue['addition_parent_id']:
+                    refs.update(ref for parent in parents for row in parent['items']
+                                if row['id'] == dialogue['addition_parent_id'] for ref in row.get('refs', []))
                 incoming = set(source_ids or [])
+                if dialogue:
+                    incoming.add(dialogue['source']['id'])
                 relevant = [e for e in evidence if e['id'] in refs or e['source_id'] in incoming or e.get('role') == 'example']
-                return self._context(artifact, relevant, artifact_type=artifact['type'], items=group,
-                    previous_items=group, instruction=instruction,
-                    report=_report({'report': artifact.get('report', {})}),
-                    **{a['type']: a['items'] for a in parents})
-            results = await self._groups('revise_artifact', selected, build,
+                return self._context(artifact, relevant, artifact_type=artifact['type'], items=[] if add else group,
+                    previous_items=[] if add else group, instruction=instruction,
+                    existing_item_ids=[r['id'] for r in artifact['items']] if add else [],
+                    existing_items=selected if add and ids is not None else [],
+                    addition_parent_id=dialogue['addition_parent_id'] if dialogue else None,
+                    dialogue_evidence_ids=[e['id'] for e in dialogue['evidence']] if dialogue else [],
+                    legacy_unlinked_cases=dialogue.get('legacy_unlinked_cases', {}) if dialogue else artifact.get('report', {}).get('_legacy_unlinked_cases', {}),
+                    add_only=add,
+                    report={} if add else _report({'report': artifact.get('report', {})}),
+                    **{a['type']: a['items'] for a in context_parents})
+            # An addition is one requested work item; never repeat it once per old-row capacity batch.
+            inputs = [{'id': 'dialogue-addition', 'refs': []}] if add else selected
+            results = await self._groups('revise_artifact', inputs, build,
                 rows_schema(artifact['type'], artifact.get('_profile')),
                 'Apply the user instruction to supplied items. Return all supplied IDs unchanged, including '
                 'unchanged rows, and preserve unrelated fields. Only add business rows when explicitly requested. '
                 'Update requirement understanding from new evidence when requested. Never confirm a workflow stage. '
+                + ('Return only the requested NEW rows, never existing_item_ids or copies of existing_items. '
+                   'existing_items is optional read-only user-selected context. For every added scenario use '
+                   'requirement_ids=[addition_parent_id]; for every added case use scenario_id=addition_parent_id. '
+                   'Cite dialogue_evidence_ids for the human request. Organizational dialogue parents contain only '
+                   'the exact human request, not invented business rules. Unspecified expected behavior must remain '
+                   'explicitly unspecified; never guess a success outcome, threshold or role. ' if add else '')
                 + (ANALYSIS_DIAGRAM_INSTRUCTION if artifact['type'] == 'analysis' else ''))
-            diagram_response_is_whole = len(results) == 1 and len(selected) == len(artifact['items'])
+            diagram_response_is_whole = not add and len(results) == 1 and len(selected) == len(artifact['items'])
             revised, new_report = self._merge_results(results)
             supplied_report_fields = {key for result in results for key in result.get('report', {})}
             for key in ('questions', 'question_suggestions', 'assumptions'):
                 if key not in supplied_report_fields:
                     new_report.pop(key, None)
-            if not selected_ids <= {r['id'] for r in revised}:
+            if not add and not selected_ids <= {r['id'] for r in revised}:
                 raise DomainError('修改遗漏了选定条目，原内容已经保留')
-            if ids is not None and {r['id'] for r in revised} != selected_ids:
+            if ids is not None and not add and {r['id'] for r in revised} != selected_ids:
                 raise DomainError('修改超出了所选条目范围')
             original = {r['id']: r for r in selected}
+            if add:
+                all_existing = {r['id'] for r in artifact['items']}
+                if any(r['id'] in all_existing for r in revised):
+                    raise DomainError('新增返回复用了已有条目编号；原成果已保留')
+                added = [r for r in revised if r['id'] not in all_existing]
+                if not added:
+                    raise DomainError('模型未返回新增条目，请补充具体希望增加的行为')
+                for row in added:
+                    relation = row.get('requirement_ids') if artifact['type'] == 'scenarios' else [row.get('scenario_id')]
+                    if artifact['type'] in ('scenarios', 'cases') and relation != [dialogue['addition_parent_id']]:
+                        raise DomainError('新增条目未关联指定的上游条目；原成果已保留')
+                    row['refs'] = list(dict.fromkeys(row.get('refs', []) + [e['id'] for e in dialogue['evidence']]))
+                    row['_dialogue_origin'] = {'source_id': dialogue['source']['id'],
+                                              'kind': 'dialogue_supplement', 'label': '用户对话补充'}
+                revised = [copy.deepcopy(r) for r in selected] + added
             revised = [{**original.get(r['id'], {}), **r} for r in revised]
             if artifact['type'] == 'cases':
                 revised = _case_fields(revised, artifact.get('_profile', {}), selected)
             report = {**copy.deepcopy(artifact.get('report', {})), **new_report}
         changes = {r['id']: r for r in revised}
         rows = [changes.pop(r['id'], copy.deepcopy(r)) for r in artifact['items']] + list(changes.values())
+        if dialogue and not add:
+            original_rows = {r['id']: r for r in artifact['items']}
+            for row in rows:
+                if row != original_rows.get(row['id']):
+                    row['refs'] = list(dict.fromkeys(row.get('refs', []) + [e['id'] for e in dialogue['evidence']]))
+                    row['_dialogue_origin'] = {'source_id': dialogue['source']['id'],
+                        'kind': 'dialogue_supplement', 'label': '用户对话补充'}
         self._validate(artifact['type'], rows, evidence, parents, artifact.get('_profile'))
         self._suggestions(report, evidence)
         if artifact['type'] == 'analysis':
@@ -603,14 +712,30 @@ class NativeBusiness:
         if artifact['type'] == 'cases':
             report['template_check'] = template_check(artifact.get('_profile', {}), rows)
         report.pop('_native_input_digest', None)
+        if dialogue:
+            from .dialogue_lineage import link_report
+            added_ids = {r['id'] for r in rows} - {r['id'] for r in artifact['items']}
+            parent_ids = {rid for r in rows if r['id'] in added_ids for rid in
+                          (r.get('requirement_ids', []) if artifact['type'] == 'scenarios' else [r.get('scenario_id')])}
+            requirement_ids = {rid for p in parents if p['type'] == 'scenarios'
+                               for r in p['items'] if r['id'] in parent_ids for rid in r.get('requirement_ids', [])}
+            report = link_report(report, artifact['type'], parents, parent_ids, requirement_ids,
+                existing_items=artifact['items'], new_item_ids=added_ids)
+            if dialogue.get('legacy_unlinked_cases'):
+                report['_legacy_unlinked_cases'] = copy.deepcopy(dialogue['legacy_unlinked_cases'])
         proposal = {'artifact_id': artifact['id'], 'base_revision': artifact['revision'],
             'items': rows, 'report': report, 'source_ids': sources, 'source_roles': roles,
             'dependencies': guard}
-        if preview:
+        if dialogue:
+            proposal['dialogue'] = dialogue
+        if preview or dialogue:
             return proposal
         return self.apply_revision_preview(proposal)
 
     def apply_revision_preview(self, proposal):
+        if proposal.get('dialogue'):
+            from .dialogue_lineage import commit_dialogue
+            return commit_dialogue(self, proposal)
         artifact = self._artifact(proposal['artifact_id'])
         sources, roles, evidence = self._evidence(artifact, proposal['source_ids'], proposal['source_roles'])
         self._validate(artifact['type'], proposal['items'], evidence, self._parents(artifact), artifact.get('_profile'))

@@ -28,6 +28,7 @@ export type ClarificationQuestion={id:string;question:string;answer:string;sugge
 export type ClarificationDraft={id:string;run_id:string;revision:number;question_set_version:string;questions:ClarificationQuestion[];answer:string;submitted:boolean;source_id:string|null;shared?:boolean};
 export type TurnCommand={name:string;arguments:Json};
 export type TurnPart=
+ |{type:'assistant_note';text:string}
  |{type:'answer';text:string;refs?:string[]}
  |{type:'diagnostic';reference_id:string;call_id?:string;category:string;message:string;hints:string[];log_path:string}
  |{type:'artifact';artifact_id:string;revision:number}

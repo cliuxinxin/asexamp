@@ -9,12 +9,13 @@ import {api,errText} from './api';
 import {ErrorBox} from './ui';
 import type {Artifact,Json,TurnResponse} from './types';
 
-export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,onOpen,onChanged,compact=false}:{chatOnly?:boolean;response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;compact?:boolean}){
+export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,onOpen,onChanged,compact=false,displayedTexts=[]}:{chatOnly?:boolean;response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;compact?:boolean;displayedTexts?:string[]}){
  return <div className="conversation-parts">{(response.parts??[]).map((part,index)=>{
   const key=response.id+':'+index;
   const value=part as Json;
   switch(value.type){
-   case 'answer':return <section key={key} className="turn-answer"><p className="preserve">{value.text}</p>{!!value.refs?.length&&<p className="muted small-text">依据：{value.refs.join(' · ')}</p>}</section>;
+   case 'assistant_note':return typeof value.text==='string'&&value.text.trim()&&!displayedTexts.includes(value.text.trim())?<p key={key} className="preserve">{value.text}</p>:null;
+   case 'answer':return <section key={key} className="turn-answer">{!displayedTexts.includes(String(value.text??'').trim())&&<p className="preserve">{value.text}</p>}{!!value.refs?.length&&<p className="muted small-text">依据：{value.refs.join(' · ')}</p>}</section>;
    case 'diagnostic':return <details key={key} className="receipt-details"><summary>查看排查信息</summary><p>{value.message}</p>{value.hints?.length>0&&<ul>{value.hints.map((hint:string,i:number)=><li key={i}>{hint}</li>)}</ul>}<p className="small-text">问题编号：<code>{value.reference_id}</code></p>{value.call_id&&value.call_id!==value.reference_id&&<p className="small-text">调用编号：<code>{value.call_id}</code></p>}<p className="small-text">日志：<code>{value.log_path}</code></p></details>;
    case 'estimate':return compact?<details key={key} className="receipt-details"><summary>查看用例数量估算</summary><ChatEstimate estimate={value.data as any}/></details>:<ChatEstimate key={key} estimate={value.data as any}/>;
    case 'artifact':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} revision={value.revision} readOnly refreshKey={refreshKey} onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;

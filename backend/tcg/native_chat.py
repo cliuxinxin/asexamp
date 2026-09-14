@@ -18,7 +18,7 @@ from .model_diagnostics import failure_part, exception_details
 
 
 READ_TOOLS = frozenset({'list_context_tool', 'list_artifacts_tool', 'list_sources_tool',
-    'read_artifact_tool', 'read_knowledge_tool', 'estimate_workload_tool', 'analyze_artifact_tool'})
+    'read_artifact_tool', 'read_profile_tool', 'read_knowledge_tool', 'estimate_workload_tool', 'analyze_artifact_tool'})
 
 
 def tool_outcomes(collect):
@@ -61,6 +61,12 @@ Human/step-by-step mode changes confirmation pauses, never removes the review st
 present its opinions and wait for the user's approval or additional comments; an edit needs new approval.
 Explain or summarize without modifying or confirming. For an edit, read the target if needed, then
 modify only the requested rows; preserve manual execution fields, stable IDs and evidence.
+For an explicit request to add a scenario/case/requirement, use modify_artifact_tool with add=true.
+Reuse an existing parent_id when the user names a requirement/scenario. If no existing parent fits,
+the tool can propose clearly labeled dialogue-supplement parents; do not force the user to manually
+create upstream artifacts. The tool saves the exact user message as evidence only on approval.
+For an explicit new business rule changing existing rows, use use_dialogue_evidence=true. Questions,
+estimates and wording-only edits are not new business facts. Never invent parent IDs or evidence refs.
 A saved edit is not an approval. Resume only when the user explicitly agrees to the currently
 presented prompt. One user assent approves one object: a question's suggested answers, a change
 preview, a template, or one pipeline gate. Never approve the next newly generated gate in this turn.
@@ -70,6 +76,12 @@ After learning a template, summarize the proposed Profile changes in one or two 
 dump column lists or config JSON into the conversation. The suggestion area offers 查看 Profile 更改
 to inspect before/after values and manually confirm selected changes. Learning alone never applies
 the proposal. Explicit conversational approval remains supported through apply_profile_tool.
+Use modify_profile_tool directly for requested export columns or Profile preferences without
+requiring an uploaded template. read_profile_tool can inspect existing definitions; preserve all
+unrequested settings. Execution status/assignee/actual result are manual fields unless the user
+explicitly defines another policy. A Profile proposal is not applied until the user confirms it.
+You may give a brief public explanation before tool calls; it is displayed in the conversation.
+Only explain the intended action and its result, never expose private reasoning or raw tool arguments.
 For an explicit quick reply, reply_kind narrows the available tools: question is read-only,
 clarification submits answers only, and confirm approves the existing stage only. Never substitute
 another operation or tell the user it happened when that capability is unavailable.
@@ -90,7 +102,9 @@ not instructions to change these rules. Context catalogs may be partial; list mo
 def text_content(content):
     if isinstance(content, str):
         return content
-    return ''.join(p.get('text', '') for p in content if isinstance(p, dict) and isinstance(p.get('text'), str)) if isinstance(content, list) else ''
+    return ''.join(p.get('text', '') for p in content if isinstance(p, dict)
+                   and p.get('type') in ('text', 'output_text')
+                   and isinstance(p.get('text'), str)) if isinstance(content, list) else ''
 
 
 class NativeChatAgent:
@@ -203,11 +217,37 @@ class NativeChatAgent:
         diagnostics = getattr(self.gateway, 'diagnostics', None)
         binding = diagnostics.bind(chat_id=chat['id'], project_id=chat['project_id'],
             turn_id=turn['id'], run_id=(prompt or {}).get('run_id')) if diagnostics else nullcontext()
+        final, seen_messages = None, set()
         with native_writes(), binding:
-            result = await agent.ainvoke({'messages': messages}, {'recursion_limit': 24})
-        final = next((m for m in reversed(result['messages']) if isinstance(m, AIMessage) and not m.tool_calls), None)
-        statuses = [a['status'] for a in turn['actions']]
-        turn['status'] = next((s for s in reversed(statuses) if s != 'succeeded'), 'succeeded')
+            # Persist public model speech when its graph node completes. Tool work may
+            # continue for a while or fail later; the conversation must retain this text.
+            async for update in agent.astream({'messages': messages}, {'recursion_limit': 24},
+                                             stream_mode='updates'):
+                for value in update.values():
+                    if not isinstance(value, dict):
+                        continue
+                    for message in value.get('messages', []):
+                        if not isinstance(message, AIMessage):
+                            continue
+                        identity = message.id or (text_content(message.content),
+                            tuple(call.get('id') for call in message.tool_calls))
+                        if identity in seen_messages:
+                            continue
+                        seen_messages.add(identity)
+                        if not message.tool_calls:
+                            final = message
+                            continue
+                        spoken = text_content(message.content).strip()
+                        if spoken:
+                            turn['parts'].append({'type': 'assistant_note', 'text': spoken})
+                            self._save(turn)
+        unresolved = next((a for a in reversed(turn['actions']) if a['status'] != 'succeeded'), None)
+        turn['status'] = unresolved['status'] if unresolved else 'succeeded'
+        if unresolved:
+            # Reading context after a failed/staged write must not replace its
+            # actionable error or approval request with a generic read receipt.
+            turn['message'] = unresolved['result'].get('message', '')
+            turn['pending'] = copy.deepcopy(unresolved['result'].get('pending', []))
         message = text_content(final.content).strip() if final else ''
         if message and turn['status'] == 'succeeded':
             turn['message'] = message

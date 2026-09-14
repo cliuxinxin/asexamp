@@ -86,3 +86,35 @@ test('partial case-details export includes only displayed rows and ignores unrel
   assert.equal(url.searchParams.get('ids'),'C1');assert.equal(url.searchParams.get('revision'),'2');
  }finally{dom.window.HTMLAnchorElement.prototype.click=click;}
 });
+
+test('current export selects newly confirmed chat Profile while frozen snapshot stays selectable',async()=>{
+ const requests:{path:string}[]=[];const profile={id:'new-profile',name:'当前 Profile',config:{excel_layout:'case'},field_check:{missing:[],manual_columns:['执行状态']}};
+ globalThis.fetch=(async(input:any)=>{const path=String(input);requests.push({path});return path.includes('/export?')?new Response('xlsx'):new Response(JSON.stringify(path.includes('/export-options')?{revision:2,snapshot:{excel_layout:'case'},snapshot_check:{missing:[]},profiles:[profile],default_profile_id:profile.id}:path.includes('/workspace')?{lineage_rows:[]}:cases));}) as typeof fetch;
+ const click=dom.window.HTMLAnchorElement.prototype.click;dom.window.HTMLAnchorElement.prototype.click=function(){};
+ try{
+  render(<ArtifactCard id={cases.id} snapshot={cases} chatOnly onTarget={()=>{}} onChanged={()=>{}}/>);
+  fireEvent.click(screen.getByRole('button',{name:'导出 Excel'}));
+  await waitFor(()=>assert.equal((screen.getByLabelText('导出格式 Profile') as HTMLSelectElement).value,profile.id));
+  assert.ok(screen.getByRole('option',{name:'生成时的配置快照'}));
+  fireEvent.click(screen.getByRole('button',{name:'下载 XLSX'}));
+  await waitFor(()=>assert.ok(requests.some(r=>r.path.includes('/export?'))));
+  const url=new URL(requests.find(r=>r.path.includes('/export?'))!.path,'http://localhost');
+  assert.equal(url.searchParams.get('profile_id'),profile.id);
+ }finally{dom.window.HTMLAnchorElement.prototype.click=click;}
+});
+
+test('export options refresh preserves a snapshot choice made while the request was in flight',async()=>{
+ let reload:((value:Response)=>void)|undefined;let count=0;
+ const options={snapshot:{excel_layout:'case'},snapshot_check:{missing:[]},default_profile_id:'current',profiles:[{id:'current',name:'当前',config:{excel_layout:'step'},field_check:{missing:[]}}]};
+ globalThis.fetch=(async(input:any)=>{const path=String(input);if(path.includes('/export-options')){count++;if(count===2)return await new Promise<Response>(resolve=>{reload=resolve;});return new Response(JSON.stringify(options));}return new Response(JSON.stringify(path.includes('/workspace')?{lineage_rows:[]}:cases));}) as typeof fetch;
+ const props={id:cases.id,snapshot:cases,chatOnly:true,onTarget:()=>{},onChanged:()=>{}};
+ const view=render(<ArtifactCard {...props} refreshKey="one"/>);
+ fireEvent.click(screen.getByRole('button',{name:'导出 Excel'}));
+ await waitFor(()=>assert.equal((screen.getByLabelText('导出格式 Profile') as HTMLSelectElement).value,'current'));
+ view.rerender(<ArtifactCard {...props} refreshKey="two"/>);
+ await waitFor(()=>assert.ok(reload));
+ fireEvent.change(screen.getByLabelText('导出格式 Profile'),{target:{value:''}});
+ await React.act(async()=>reload!(new Response(JSON.stringify(options))));
+ assert.equal((screen.getByLabelText('导出格式 Profile') as HTMLSelectElement).value,'');
+ assert.equal((screen.getByLabelText('Excel 布局') as HTMLSelectElement).value,'case');
+});

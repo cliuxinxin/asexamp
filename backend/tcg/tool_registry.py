@@ -16,6 +16,7 @@ from langchain_core.tools import tool
 from .documents import export_artifact, parse_text
 from .project_context import merge_template_config, pin_samples, share_clarification
 from .profile_changes import apply_profile_change, config_changes, change_summary
+from .profile_edits import ProfileColumnEdit, propose_profile_edit, read_profile
 from .schemas import DomainError, ROLES
 from .storage import now, public, uid
 from .model_diagnostics import failure_part
@@ -27,6 +28,25 @@ def _result(message, parts=(), status='succeeded', **extra):
 
 async def _await(value):
     return await value if inspect.isawaitable(value) else value
+
+
+def _model_receipt(result):
+    """The UI owns full comparisons; the chat model needs only their changes."""
+    value = copy.deepcopy(result)
+    for part in value.get('parts', []):
+        if part.get('type') != 'diff':
+            continue
+        changes = []
+        for change in part.get('changes', []):
+            before = {r['id']: r for r in change.get('before_items', [])}
+            after = {r['id']: r for r in change.get('items', [])}
+            changes.append({key: change[key] for key in ('artifact_id', 'title', 'expected_revision') if key in change} | {
+                'added': [{'id': key, 'title': row.get('title', '')} for key, row in after.items() if key not in before],
+                'updated': [{'id': key, 'title': row.get('title', '')} for key, row in after.items()
+                            if key in before and row != before[key]],
+                'deleted': [key for key in before if key not in after], 'total_items': len(after)})
+        part['changes'] = changes
+    return value
 
 
 def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=None):
@@ -48,6 +68,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             result['tool_name'] = fn.__name__
             if on_result:
                 await _await(on_result(copy.deepcopy(result)))
+                return _model_receipt(result)
             return result
         return invoke
 
@@ -237,12 +258,19 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     @emit
     async def modify_artifact_tool(artifact_id: str | None = None, item_id: str | None = None,
                                     new_content: str | None = None, instruction: str = '',
-                                    new_values: dict[str, Any] | None = None, preview: bool = False) -> dict:
+                                    new_values: dict[str, Any] | None = None, preview: bool = False,
+                                    add: bool = False, parent_id: str | None = None,
+                                    use_dialogue_evidence: bool = False) -> dict:
         """Modify the requested artifact rows and save a new version, preserving other rows and manual data.
 
         Use new_values for explicit field changes, or instruction for a natural-language revision.
         Set preview=true when the user asks to inspect changes before saving. This tool never approves
         or resumes the pipeline after changing the result.
+        For requested additions set add=true and parent_id to the user's specified requirement ID
+        (adding scenarios) or scenario ID (adding cases). Existing rows remain unchanged. If no parent
+        was specified, the preview includes labeled dialogue parents quoting the exact human message.
+        Set use_dialogue_evidence=true for user-supplied new business facts in an ordinary edit.
+        These two modes always stage a preview and save no evidence until the user approves it.
         """
         if not instruction and new_content is None and new_values is None:
             raise DomainError('请说明需要修改的内容')
@@ -250,8 +278,27 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             instruction = instruction + '\n用户要求的新内容：' + new_content
         async with edit_session():
             value = target(artifact_id)
-            updated = await business.revise(value, ids=selection(value, [item_id] if item_id else None),
-                                            instruction=instruction, new_values=new_values, preview=preview)
+            ids = selection(value, [item_id] if item_id else None)
+            if add and body.get('selected_ids'):
+                selected_artifact = target(body.get('artifact_id'))
+                selected_rows = [r for r in selected_artifact['items'] if r['id'] in body['selected_ids']]
+                allowed_parents = ({r['id'] for r in selected_rows}
+                    if (value['type'], selected_artifact['type']) in (('cases', 'scenarios'), ('scenarios', 'analysis'))
+                    else {r.get('scenario_id') for r in selected_rows}
+                    if value['type'] == selected_artifact['type'] == 'cases' else None)
+                if allowed_parents is not None:
+                    if parent_id and parent_id not in allowed_parents:
+                        raise DomainError('新增条目只能关联本轮选中的上游范围')
+                    if not parent_id:
+                        if len(allowed_parents) != 1:
+                            raise DomainError('本轮选择了多个上游条目，请说明要在哪个条目下新增')
+                        parent_id = next(iter(allowed_parents))
+            dialogue_kwargs = {}
+            if add or use_dialogue_evidence:
+                dialogue_kwargs = {'dialogue_content': body.get('content', ''), 'add': add, 'parent_id': parent_id}
+                preview = True
+            updated = await business.revise(value, ids=ids, instruction=instruction,
+                                            new_values=new_values, preview=preview, **dialogue_kwargs)
             if preview:
                 proposal = {**updated, 'id': uid('revprop_'), 'chat_id': chat['id'],
                     'project_id': chat['project_id'], 'created_at': now()}
@@ -264,11 +311,16 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                     store.put('native_revision_proposal', proposal)
                     current = store.get('chat', chat['id'])
                     store.put('chat', {**current, '_native_artifact_prompt': pending})
-                return _result(pending['message'], [{'type': 'diff', 'artifact_id': value['id'],
-                    'proposal_id': proposal['id'], 'changes': [{'artifact_id': value['id'],
-                        'title': value['title'], 'expected_revision': value['revision'],
-                        'before_items': value['items'], 'items': proposal['items'],
-                        'report': proposal['report']}]}], status='needs_confirmation', pending=[pending])
+                from .dialogue_lineage import preview_changes
+                message = pending['message']
+                if proposal.get('dialogue'):
+                    message = '已准备修改预览，依据为本条用户对话。'
+                    if proposal['dialogue']['parent_changes']:
+                        message += '预览包含自动关联的“对话补充需求/场景”，可一并核对。'
+                    message += '回复“同意”后统一保存，随后仍需确认主流程。'
+                return _result(message, [{'type': 'diff', 'artifact_id': value['id'],
+                    'proposal_id': proposal['id'], 'changes': preview_changes(proposal, value)}],
+                    status='needs_confirmation', pending=[pending])
             await _await(pipeline.on_artifact_changed(updated))
         return artifact_result(updated, '修改已保存；请查看新版本，满意后再回复继续。')
 
@@ -475,6 +527,38 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
 
     @tool
     @emit
+    async def read_profile_tool(profile_id: str | None = None) -> dict:
+        """Read current Profile columns/preferences and any saved pending changes; no documents or writes."""
+        return _result('当前 Profile 配置；pending_config 是等待确认的修改草稿。',
+                       **read_profile(store, chat['id'], profile(profile_id)))
+
+    @tool
+    @emit
+    async def modify_profile_tool(upsert_columns: list[ProfileColumnEdit] | None = None,
+                                  remove_columns: list[str] | None = None,
+                                  column_order: list[str] | None = None,
+                                  preferences: dict[str, Any] | None = None,
+                                  kind: str = 'cases', summary: str = '',
+                                  profile_id: str | None = None) -> dict:
+        """Propose incremental Profile/Excel changes directly from conversation; no uploaded template required.
+
+        upsert_columns merges ONLY supplied properties by field; new fields append at the end.
+        remove_columns removes named fields. column_order optionally lists ALL final fields in order.
+        kind is cases or scenarios. preferences changes named settings such as language, case_level,
+        scenario_level, case_types, additional_rules, scope, template_rules, excel_layout, sheet_name,
+        filename_pattern, scenario_sheet_name or scenario_filename_pattern. Empty strings clear rules.
+        Execution status/tester/results use manual fields; fixed values use value_source=default.
+        Prior pending edits are retained for follow-up requests. Use read_profile_tool if field names
+        or order are unclear. Always stage changes for preview and later user agreement; never apply
+        them in this call. summary is a brief user-facing explanation, not a complete config dump.
+        """
+        result = propose_profile_edit(store, chat['id'], profile(profile_id), kind=kind,
+            upsert_columns=upsert_columns or [], remove_columns=remove_columns or [],
+            column_order=column_order, preferences=preferences, summary=summary)
+        return _result(result.pop('message'), **result)
+
+    @tool
+    @emit
     async def learn_template_tool(source_ids: list[str], kind: str = 'both',
                                     instruction: str = '学习字段定义、列顺序与填写规则',
                                     apply: bool = False, profile_id: str | None = None) -> dict:
@@ -539,14 +623,14 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     async def apply_profile_tool(template_ids: list[str] | None = None,
                                    profile_id: str | None = None,
                                    selected_keys: list[str] | None = None) -> dict:
-        """Apply the presented template suggestion after explicit user agreement.
+        """Apply presented Profile changes (learned template or direct edits) after explicit user agreement.
 
         Use the original Profile version. Omit selected_keys to apply all proposed changes, or
         include only saved top-level config keys the user explicitly approved. Never invent values.
         """
         ids = template_ids or prompt.get('template_ids')
         if not ids:
-            raise DomainError('请先学习模板并查看模板建议')
+            raise DomainError('请先提出 Profile 更改并查看建议')
         async with approval({'profile'}, template_ids=ids,
                             profile_id=profile_id or prompt.get('profile_id')):
             applied = apply_profile_change(store, chat['id'], reply_token,
@@ -626,7 +710,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                  | {'url': '/api/exports/' + r['id']} for r in records]
         return _result('已导出 Excel。', [{'type': 'files', 'files': files}])
 
-    reads = [list_context_tool, list_artifacts_tool, list_sources_tool, read_artifact_tool, read_knowledge_tool,
+    reads = [list_context_tool, list_artifacts_tool, list_sources_tool, read_artifact_tool, read_knowledge_tool, read_profile_tool,
              estimate_workload_tool, analyze_artifact_tool]
     # A clicked reply is an explicit user scope, not a model-predicted intent.
     # Typed conversation retains the full registry and native tool selection.
@@ -637,5 +721,5 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     return [*reads, modify_artifact_tool, apply_artifact_preview_tool, discard_artifact_preview_tool,
             update_from_sources_tool, add_knowledge_tool,
             start_pipeline_tool, resume_pipeline_tool, answer_clarification_tool, control_pipeline_tool,
-            learn_template_tool, apply_profile_tool, discard_template_tool, save_samples_tool,
+            learn_template_tool, modify_profile_tool, apply_profile_tool, discard_template_tool, save_samples_tool,
             complete_template_fields_tool, export_artifact_tool]

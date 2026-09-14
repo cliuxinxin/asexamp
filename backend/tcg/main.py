@@ -115,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='3.0.6', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.7', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -174,7 +174,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '3.0.6', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.7', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -386,7 +386,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '3.0.6', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.7', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -554,13 +554,18 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         artifact = export_snapshot(artifact_id, revision)
         from .case_fields import template_check
         profiles=app.state.store.list('profile',project_id=artifact['project_id'])
+        current = visible_artifact(artifact_id)
+        chat = app.state.store.get('chat', artifact['chat_id'])
+        default_profile_id = chat.get('profile_id') if current['revision'] == artifact['revision'] else None
+        if default_profile_id not in {p['id'] for p in profiles}:
+            default_profile_id = None
         if artifact['type']=='scenarios':
             from .schemas import DEFAULT_PROFILE
             defaults={key:value for key,value in DEFAULT_PROFILE.items() if key.startswith('scenario_')}
-            return {'kind':'scenarios','revision':artifact['revision'],'snapshot':{**defaults,**artifact.get('_profile',{})},
+            return {'kind':'scenarios','revision':artifact['revision'],'default_profile_id':default_profile_id,'snapshot':{**defaults,**artifact.get('_profile',{})},
                     'profiles':[{**p,'config':{**defaults,**p['config']},'field_check':None} for p in profiles]}
         if artifact['type']!='cases':raise DomainError('仅测试场景或测试用例支持 Excel 导出')
-        return {'revision':artifact['revision'],'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
+        return {'revision':artifact['revision'],'default_profile_id':default_profile_id,'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
                 'profiles':[{**p,'field_check':template_check(p['config'],artifact['items'])} for p in profiles]}
 
     async def schedule_field_completion(artifact_id,body,description_compat=False):

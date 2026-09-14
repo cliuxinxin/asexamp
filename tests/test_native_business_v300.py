@@ -55,6 +55,9 @@ class NativeModel:
                 if self.invalid_ref:
                     row['refs'] = ['invented#P1']
             return {'items': rows, 'report': {'summary': '修改完成', 'questions': []}}
+        if task == 'repair_evidence_refs':
+            return {'items': [{'id': row['id'], 'refs': [], 'support': [],
+                'reason': 'The simulated model cannot ground this row.'} for row in context['items']]}
         if task == 'estimate_workload':
             return {'summary': '估算范围', 'scenarios': [{'scenario_id': r['id'], 'min_count': 2,
                 'max_count': 4, 'rationale': '正向及异常', 'assumptions': ['组合量待核实']}
@@ -152,7 +155,7 @@ async def test_invalid_model_evidence_does_not_mutate_artifact(setup):
     store, run, service, model = setup
     analysis, scenarios, cases = await generated(setup)
     model.invalid_ref = True
-    with pytest.raises(DomainError, match='Evidence'):
+    with pytest.raises(DomainError, match='证据引用'):
         await service.revise(cases, instruction='修改标题')
     assert store.get('artifact', cases['id']) == cases
 
