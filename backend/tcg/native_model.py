@@ -6,6 +6,7 @@ business result accepted here is the arguments of the explicitly bound tool.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
@@ -404,7 +405,8 @@ def chat_model(gateway):
 
 
 async def generate_native(gateway, task, context, schema, instruction):
-    """Accept exactly one schema-valid native submission, with one correction."""
+    """Use the pipeline's correction owner, or one local correction otherwise."""
+    from .generation_repair import NativeSubmissionError, external_repair_active, schema_issue
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     name = 'submit_' + re.sub(r'[^a-zA-Z0-9_-]', '_', task)[:56]
@@ -413,25 +415,30 @@ async def generate_native(gateway, task, context, schema, instruction):
     model = gateway.chat_model().bind_tools([tool], tool_choice=name)
     messages = [SystemMessage(content=NATIVE_SYSTEM + '\nCurrent task:\n' + instruction),
                 HumanMessage(content=json.dumps(context, ensure_ascii=False))]
-    for attempt in range(2):
+    attempts = 1 if external_repair_active() else 2
+    for attempt in range(attempts):
         response = await model.ainvoke(messages, tcg_task=task)
         calls = response.tool_calls
-        issue = None
+        issue, details = None, {}
+        candidate = {'content': copy.deepcopy(response.content), 'tool_calls': response.tool_calls,
+                     'invalid_tool_calls': response.invalid_tool_calls}
         if response.invalid_tool_calls:
             issue = 'Native tool arguments are incomplete or invalid; use the declared object schema.'
         elif len(calls) != 1 or calls[0]['name'] != name:
             issue = f'Call exactly {name} once using its declared argument schema.'
         else:
+            candidate = calls[0]['args']
             error = next(validator.iter_errors(calls[0]['args']), None)
             if error is None:
                 return NativeResult(calls[0]['args'], response.response_metadata.get('tcg_call_id'))
             # Schema diagnostics avoid echoing potentially huge or sensitive field values.
-            path = '.'.join(map(str, error.absolute_path)) or '$'
-            issue = f'Field {path} fails the {error.validator} constraint. Correct the arguments using the declared schema.'
+            issue, details = schema_issue(error)
         if gateway.diagnostics:
             _record(gateway.diagnostics, 'batch.validation_failed', level='ERROR', task=task,
                 call_id=response.response_metadata.get('tcg_call_id'), errors=[issue], protocol='tool_calling')
-        if attempt == 1:
+        if external_repair_active():
+            raise NativeSubmissionError(issue, candidate, response.response_metadata.get('tcg_call_id'), details)
+        if attempt == attempts - 1:
             error = _error('模型未返回有效的原生 Tool Calling 参数；已停止重试且没有应用结果。'
                            '请确认模型与网关支持工具调用，再重试当前阶段。', 'tool_calling')
             error.call_id = response.response_metadata.get('tcg_call_id')

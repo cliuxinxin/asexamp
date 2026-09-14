@@ -90,10 +90,13 @@ async def current_prompt(store, pipeline, chat):
     run = await pipeline.snapshot(current['id'])
     if run['status'] in ('queued', 'running'):
         return {'id': 'working:' + run['id'], 'kind': 'busy', 'busy': True, 'run_id': run['id'],
-            'title': '正在处理当前步骤', 'message': '完成后会在这里显示结果。你可以继续提问，或要求在这一步完成后暂停。'}
+            'stage': run.get('stage'), 'repair_progress': run.get('repair_progress'),
+            'title': '正在处理当前步骤', 'message': (run.get('repair_progress') or {}).get('message') or '完成后会在这里显示结果。你可以继续提问，或要求在这一步完成后暂停。'}
     if run['status'] == 'failed':
         next_step = ' 请查看已有成果，再通过聊天重新开始任务。' if run.get('migration', {}).get('status') == 'restart_required' else ' 已有成果已保留。可以说明修改内容，或回复“重试当前步骤”。'
         return {'id': 'failed:' + run['id'], 'kind': 'failed', 'run_id': run['id'],
+            'stage': run.get('failed_node') or run.get('stage'),
+            'category': run.get('failure_category'), 'candidate_id': run.get('candidate_id'),
             'title': '当前步骤尚未完成', 'message': str(run.get('error') or '当前步骤未完成。')[:500] + next_step}
     gate = run.get('interrupt') or {}
     if not gate:
@@ -135,7 +138,7 @@ async def chat_context(store, pipeline, chat, body, prompt):
         'knowledge_selection': {'version': chat.get('_project_knowledge_version', 1),
             'excluded_source_ids': list(chat.get('_excluded_project_source_ids', [])),
             'policy': 'Excluded project facts and earlier assistant answers are not current generation evidence. Explicit historical explanations remain read-only.'},
-        'runs': [{k: r.get(k) for k in ('id', 'status', 'mode', 'stage', 'stop_after', 'artifact_ids', 'knowledge_rebuild_required', 'shared_facts_used')} for r in runs],
+        'runs': [{k: r.get(k) for k in ('id', 'status', 'mode', 'stage', 'stop_after', 'artifact_ids', 'knowledge_rebuild_required', 'shared_facts_used', 'failed_node', 'failure_category', 'candidate_id', 'repair_progress')} for r in runs],
         'artifacts': [{'id': a['id'], 'type': a['type'], 'title': a['title'], 'revision': a['revision'],
                        'count': len(a['items'])} for a in artifacts[-60:]],
         'sources': [{'id': s['id'], 'name': s['name'], 'role': chat.get('_source_roles', {}).get(s['id'], s['role']),

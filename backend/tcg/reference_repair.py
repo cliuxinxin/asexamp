@@ -35,6 +35,7 @@ def _failure(rows, call_id, reason='', *, retained=False):
     error = DomainError('证据引用仍未解决：' + '、'.join(ids) + '。原有成果及已完成批次保持不变，'
         '未发布缺少依据的条目；' + next_step + reason)
     error.category, error.call_id, error.item_ids = 'invalid_reference', call_id, ids
+    error.repairable = True
     return error
 
 
@@ -48,7 +49,7 @@ def _schema(ids, refs):
         'minItems': len(ids), 'maxItems': len(ids)}}, ['items'])
 
 
-async def repair_reference_fields(call, task, context, original, save_candidate=None, diagnostics=None):
+async def repair_reference_fields(call, task, context, original, save_candidate=None, diagnostics=None, strict=False):
     """One native repair call per attempt; only exact grounded refs can be merged.
 
     Candidates are durable, unpublished data. Manual retry can reuse their valid
@@ -69,7 +70,9 @@ async def repair_reference_fields(call, task, context, original, save_candidate=
     for row in rows:
         valid = [ref for ref in row['refs'] if ref in evidence]
         removed = len(row['refs']) - len(valid)
-        if valid and removed:
+        if strict and removed:
+            pending.append(row)
+        elif valid and removed:
             row['refs'] = valid
             filtered.append(row['id'])
             _issue(result, row, 'reference_filtered',

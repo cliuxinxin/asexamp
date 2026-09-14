@@ -1,4 +1,4 @@
-// Retained current contracts extracted from workspace-smoke.test.tsx; archived legacy controls remain in legacy-tests/frontend.
+// Current Profile column editing contract.
 import {JSDOM} from 'jsdom';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,19 +12,6 @@ dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
 dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
 const React=await import('react');
 const {render,fireEvent,screen,waitFor,cleanup,within}=await import('@testing-library/react');
-const {App}=await import('../src/App');
-test('failed task exposes the small log without opening run details',async()=>{
- const {RunCard}=await import('../src/RunCard');
- try{
-  render(<RunCard run={{id:'failed-run',status:'failed',intent:'generate_case',mode:'auto',stage:'failed',updated_at:'2026-09-09',artifact_ids:[],experience:'reliable',graph_version:7,error:'JSON 语法错误'}} onChanged={()=>{}} onTarget={()=>{}}/>);
-  const link=screen.getByRole('link',{name:/下载失败步骤日志/});
-  assert.equal(link.getAttribute('href'),'/api/runs/failed-run/failed-step');
-  assert.equal(link.hasAttribute('download'),true);
-  assert.equal(link.closest('details'),null);
- }finally{cleanup();}
-});
-
-
 test('template column definition can be edited without losing its header',async()=>{
  const {ProfileEditor}=await import('../src/ProfileEditor');let saved:any;
  try{

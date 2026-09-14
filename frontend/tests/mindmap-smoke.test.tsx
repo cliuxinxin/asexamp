@@ -10,7 +10,7 @@ const {default:mermaid}=await import('mermaid');
 mermaid.initialize({startOnLoad:false,securityLevel:'strict',htmlLabels:false});
 
 test('accept and parse the actual Chinese mindmap from the user analysis',async()=>{
- const report=JSON.parse(await readFile(new URL('../../legacy-tests/fixtures/user_analysis.json',import.meta.url),'utf8')).report;
+ const report=JSON.parse(await readFile(new URL('./fixtures/user_analysis.json',import.meta.url),'utf8')).report;
  const source=report.diagrams.find((d:{mermaid:string})=>d.mermaid.startsWith('mindmap')).mermaid;
  const parsed=await mermaid.parse(checkDiagram('```mermaid\n'+source+'\n```'));
  assert.equal(parsed&&parsed.diagramType,'mindmap');

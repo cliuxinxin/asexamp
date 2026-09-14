@@ -1,4 +1,4 @@
-// Retained current contracts extracted from conversation-v260.test.tsx; archived legacy controls remain in legacy-tests/frontend.
+// Retained current contracts extracted from conversation-v260.test.tsx.
 import {JSDOM} from 'jsdom';
 import {afterEach,test} from 'node:test';
 import assert from 'node:assert/strict';

@@ -4,8 +4,9 @@ import type {ConversationPrompt as Prompt} from './types';
 const confirmationGates=new Set(['workflow_gate','strategy_review','scenario_review','case_draft_review','case_result_review']);
 
 // WorkflowSummary owns the stage; this area only shows material to answer or review.
-export function ConversationPrompt({prompt,waiting=false}:{prompt?:Prompt|null;waiting?:boolean}){
+export function ConversationPrompt({prompt,waiting=false,errorInConversation=false}:{prompt?:Prompt|null;waiting?:boolean;errorInConversation?:boolean}){
  if(!prompt||prompt.busy||prompt.kind==='busy'||prompt.kind==='profile')return null;
+ if(errorInConversation&&['failed','cancelled'].includes(prompt.kind))return null;
  const review=prompt.kind==='case_result_review'?prompt.review:undefined;
  const hasQuestions=!!prompt.questions?.length;
  const hasChoices=!!prompt.choices?.length;

@@ -1,5 +1,6 @@
 """Compatibility routes around native tools and read-only project data."""
 import base64
+import json
 from urllib.parse import quote
 
 from fastapi.responses import Response
@@ -12,6 +13,18 @@ from .storage import public, uid
 
 
 def register_routes(app):
+    @app.get('/api/runs/{run_id}/candidates/{candidate_id}')
+    def generation_candidate(run_id: str, candidate_id: str):
+        from .generation_candidates import read_candidate
+        return read_candidate(app.state.store, run_id, candidate_id)
+
+    @app.get('/api/runs/{run_id}/candidates/{candidate_id}/download')
+    def download_generation_candidate(run_id: str, candidate_id: str):
+        from .generation_candidates import read_candidate
+        record = read_candidate(app.state.store, run_id, candidate_id)
+        return Response(json.dumps(record, ensure_ascii=False, indent=2), media_type='application/json',
+            headers={'Content-Disposition': 'attachment; filename=tcg-unvalidated-draft.json'})
+
     @app.get('/api/chats/{chat_id}/profile-change')
     def profile_change(chat_id: str, prompt_id: str):
         from .profile_changes import preview_profile_change

@@ -8,3 +8,5 @@ import './artifact-lineage.css';
 import './project-knowledge.css';
 import './field-drift.css';
 createRoot(document.getElementById('root')!).render(<App/>);
+
+import './generation-candidate.css';

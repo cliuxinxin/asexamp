@@ -12,6 +12,7 @@ from .analysis_diagrams import ANALYSIS_DIAGRAM_INSTRUCTION, complete_analysis_d
 from .case_fields import (MANUAL_FIELDS, column_signature, filled, materialize_fields,
                           protect_non_ai_fields, template_check, template_columns)
 from .clarification import pending_questions, question_key, submitted_answers
+from .generation_repair import GenerationRepairExhausted, repair_submission
 from .native_schemas import ANSWER_SCHEMA, ESTIMATE_SCHEMA, completion_schema, rows_schema
 from .reference_repair import repair_reference_fields
 from .schemas import DomainError, validate_items
@@ -126,18 +127,25 @@ class NativeBusiness:
             cached = self.store.cache_get(run['id'], key)
             if cached is not None:
                 return [cached]
-        candidate_key = key + ':reference_candidate'
-        candidate = self.store.cache_get(run['id'], candidate_key) if run else None
+        candidate_key = key + ':repair_history'
+        previous_state = self.store.cache_get(run['id'], candidate_key) if run else None
+        retry_round = self._run(run).get('_content_retry_round', 0) if run else 0
+        def save_history(value):
+            self.store.cache_set(run['id'], candidate_key, value)
+            # Each explicit retry round keeps its complete original responses.
+            self.store.cache_set(run['id'], candidate_key + ':' + str(retry_round), value)
+        def save_progress(value):
+            self.store.update_run(run['id'], repair_progress=value)
         diagnostics = getattr(self.gateway, 'diagnostics', None)
         diagnostic_scope = diagnostics.bind(run_id=run['id'], chat_id=run['chat_id'],
             project_id=run['project_id'], stage=task) if diagnostics and run else nullcontext()
         try:
             with diagnostic_scope:
-                if candidate:
-                    from .native_model import NativeResult
-                    result = NativeResult(candidate['result'], candidate.get('call_id'))
-                else:
-                    result = await self._call(task, context, schema, instruction)
+                result = await repair_submission(self._call, self._validate_submission,
+                    task, context, schema, instruction, diagnostics=diagnostics,
+                    save_history=save_history if run else None, candidate_key=candidate_key,
+                    previous_state=previous_state, retry_round=retry_round,
+                    save_progress=save_progress if run else None)
         except DomainError as exc:
             output_capacity = getattr(exc, 'category', None) == 'output_capacity'
             if not isinstance(exc, ContextCapacityError) and not output_capacity:
@@ -150,36 +158,14 @@ class NativeBusiness:
                 raise ContextCapacityError(message='模型服务器拒绝了单个完整业务条目；请拆分该条需求或使用容量更大的模型，已保存成果保持不变。') from None
             middle = len(rows) // 2
             left = await self._groups(task, rows[:middle], build, schema, instruction, run)
-            right = await self._groups(task, rows[middle:], build, schema, instruction, run)
+            try:
+                right = await self._groups(task, rows[middle:], build, schema, instruction, run)
+            except GenerationRepairExhausted as error:
+                error.completed_batches = copy.deepcopy(left) + error.completed_batches
+                raise
             return left + right
-        try:
-            def save_candidate(value):
-                if run:
-                    self.store.cache_set(run['id'], candidate_key,
-                        {'result': value, 'call_id': getattr(result, 'call_id', None)})
-            scope = diagnostics.bind(**({'run_id': run['id'], 'chat_id': run['chat_id'],
-                'project_id': run['project_id'], 'stage': task} if run else {})) if diagnostics else nullcontext()
-            with scope:
-                result = await repair_reference_fields(self._call, task, context, result,
-                    save_candidate=save_candidate if run else None, diagnostics=diagnostics)
-            self._validate_submission(task, context, result)
-        except DomainError as exc:
-            # A candidate with other business errors should regenerate normally.
-            if run and not getattr(exc, 'category', None) and not getattr(exc, 'item_ids', None):
-                self.store.cache_delete(run['id'], candidate_key)
-            if diagnostics:
-                with diagnostics.bind(**({'run_id': run['id'], 'chat_id': run['chat_id'],
-                                          'project_id': run['project_id']} if run else {})):
-                    diagnostics.record('batch.validation_failed', level='ERROR',
-                        call_id=getattr(exc, 'call_id', None) or getattr(result, 'call_id', None), task=task,
-                        node=self._run(run).get('stage', task) if run else task,
-                        errors=[str(exc)], item_ids=getattr(exc, 'item_ids', []),
-                        category=getattr(exc, 'category', None))
-            raise
         if run:
             self.store.cache_set(run['id'], key, result)
-            if candidate or self.store.cache_get(run['id'], candidate_key):
-                self.store.cache_delete(run['id'], candidate_key)
         return [result]
 
     def _validate_submission(self, task, context, result):
@@ -200,7 +186,13 @@ class NativeBusiness:
             covered = {rid for row in result['items'] for rid in (
                 row['requirement_ids'] if task == 'generate_scenarios' else [row['scenario_id']])}
             if not expected <= covered:
-                raise DomainError('模型未覆盖本批全部输入；已保留已有成果，可重试当前阶段')
+                error = DomainError('模型未覆盖本批全部输入：' + '、'.join(sorted(expected - covered)))
+                error.category = 'coverage'
+                error.details = {'parent_type': parent_key,
+                    'input_ids': sorted(expected), 'covered_ids': sorted(expected & covered),
+                    'missing_input_ids': sorted(expected - covered)}
+                error.item_ids = sorted(expected - covered)
+                raise error
             if not {row['id'] for row in context.get('previous_items', [])} <= {row['id'] for row in result['items']}:
                 raise DomainError('更新遗漏了仍然有效的已有条目；未保存本次结果')
         if task == 'review_cases':

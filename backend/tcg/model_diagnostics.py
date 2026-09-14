@@ -11,6 +11,9 @@ from .storage import uid
 
 
 HINTS = {
+    'coverage': ['查看未覆盖的需求或场景编号；草稿保留所有生成尝试，可补充范围说明后再修复。'],
+    'validation': ['查看草稿中的字段或关联问题及每次修复记录；已通过的成果保持不变。'],
+    'schema': ['查看具体字段路径和模型原始工具参数；草稿保留原始输出。'],
     'dns': ['在启动 TCG 的同一台机器检查模型域名解析和 VPN / 内网 DNS。'],
     'connection': ['检查模型服务是否启动、主机端口及防火墙；容器里的 127.0.0.1 指向容器自身。'],
     'tls': ['检查模型证书的域名、有效期和 Python 信任的 CA；浏览器信任证书不代表 Python 也信任。'],
@@ -129,7 +132,8 @@ def failure_part(exc):
     reference = getattr(exc, 'call_id', None) or uid('diag_')
     fields = getattr(exc, 'model_diagnostic', {})
     return {'type': 'diagnostic', 'reference_id': reference, 'call_id': getattr(exc, 'call_id', None),
-        'category': category, 'message': '可按诊断编号在服务日志中定位本次失败。',
+        'category': category, 'missing_input_ids': getattr(exc, 'missing_ids', []),
+        'retry_count': getattr(exc, 'retry_count', None), 'message': '可按诊断编号在服务日志中定位本次失败。',
         'http_status': fields.get('http_status'),
         'hints': HINTS.get(category, ['查看该诊断编号对应的异常类别和代码位置。']),
         'log_path': 'logs/tcg.log'}

@@ -8,13 +8,15 @@ import {useConversationCommand} from './conversation';
 import {api,errText} from './api';
 import {ErrorBox} from './ui';
 import {KnowledgeUsage} from './KnowledgeUsage';
-import type {Artifact,Json,TurnResponse} from './types';
+import {GenerationCandidate} from './GenerationCandidate';
+import type {Artifact,GenerationCandidatePart,Json,TurnResponse} from './types';
 
 export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,onOpen,onChanged,onOpenKnowledge,compact=false,displayedTexts=[]}:{chatOnly?:boolean;response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;onOpenKnowledge?:()=>void;compact?:boolean;displayedTexts?:string[]}){
  return <div className="conversation-parts">{(response.parts??[]).map((part,index)=>{
   const key=response.id+':'+index;
   const value=part as Json;
   switch(value.type){
+   case 'generation_candidate':return <GenerationCandidate key={key} part={part as GenerationCandidatePart}/>;
    case 'project_knowledge':return <KnowledgeUsage key={key} facts={Array.isArray(value.facts)?value.facts:[]} onOpenKnowledge={onOpenKnowledge} summaryShown={displayedTexts.includes(response.message.trim())}/>;
    case 'assistant_note':return typeof value.text==='string'&&value.text.trim()&&!displayedTexts.includes(value.text.trim())?<p key={key} className="preserve">{value.text}</p>:null;
    case 'answer':return <section key={key} className="turn-answer">{!displayedTexts.includes(String(value.text??'').trim())&&<p className="preserve">{value.text}</p>}{!!value.refs?.length&&<p className="muted small-text">依据：{value.refs.join(' · ')}</p>}</section>;

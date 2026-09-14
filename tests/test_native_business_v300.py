@@ -258,8 +258,9 @@ async def test_template_completion_records_unknown_facts_and_rejects_existing_fi
         return {'items': [{'id': row['id'], 'fields': {'purpose': '模型试图覆盖已有内容'},
             'refs': row['refs'], 'unresolved': []} for row in context['cases']]}
     model.generate_native = unsafe
-    with pytest.raises(DomainError, match='已有或人工字段'):
+    with pytest.raises(DomainError, match='purpose') as rejected:
         await service.complete_fields(updated, config)
+    assert rejected.value.details['unexpected_fields'] == ['purpose']
     assert store.get('artifact', updated['id']) == updated
 
 
@@ -317,7 +318,7 @@ async def test_review_honors_selected_case_scope_and_passes_complete_steps(setup
 
 
 @pytest.mark.asyncio
-async def test_incomplete_case_batch_is_not_cached_as_a_success_and_can_retry(setup):
+async def test_incomplete_case_batch_is_corrected_before_it_can_be_cached_as_success(setup):
     from tcg.diagnostics import Diagnostics
     from tcg.native_model import NativeResult
     store, run, service, model = setup
@@ -335,9 +336,6 @@ async def test_incomplete_case_batch_is_not_cached_as_a_success_and_can_retry(se
             return NativeResult(result, call_id='call_invalid_batch')
         return result
     model.generate_native = incomplete
-    with pytest.raises(DomainError, match='未覆盖本批全部输入'):
-        await service.cases(run, analysis, scenarios)
-    assert not [a for a in store.list('artifact', chat_id=run['chat_id']) if a['type'] == 'cases']
     cases = await service.cases(run, analysis, scenarios)
     assert len(cases['items']) == 2
     assert len([task for task, _ in model.calls if task == 'generate_cases']) == 2

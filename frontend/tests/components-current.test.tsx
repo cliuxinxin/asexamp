@@ -1,4 +1,4 @@
-// Retained current contracts extracted from interactions.test.tsx; archived legacy controls remain in legacy-tests/frontend.
+// Current settings, artifact editing and diagram contracts.
 import {JSDOM} from 'jsdom';
 import {test,afterEach} from 'node:test';
 import assert from 'node:assert/strict';
@@ -108,13 +108,6 @@ test('custom header settings preserve secrets unless explicitly replaced',async(
  await waitFor(()=>assert.deepEqual(saved.headers,{'X-Tenant-ID':'tenant-2'}));assert.equal(saved.auth_mode,'headers');
 });
 
-test('recovery guidance offers model settings and identifies preserved progress',async()=>{
- const {RunCard}=await import('../src/RunCard');let opened=false;
- render(<RunCard run={{id:'r-error',experience:'agent',status:'failed',intent:'generate_case',mode:'auto',stage:'failed',updated_at:'2026-09-08',artifact_ids:[],recovery:{category:'authentication',title:'模型鉴权失败',detail:'检查网关请求头',suggestions:['核对 X-API-Key'],preserved:['需求分析'],retryable:false}} as any} onChanged={()=>{}} onTarget={()=>{}} onSettings={()=>{opened=true;}}/>);
- assert.ok(screen.getByText('核对 X-API-Key'));assert.ok(screen.getByText(/已保留.*需求分析/));
- fireEvent.click(screen.getByRole('button',{name:'打开模型设置'}));assert.equal(opened,true);
-});
-
 test('business diagram rejects executable directives and leaves a recoverable source view',async()=>{
  const {BusinessDiagram}=await import('../src/BusinessDiagram');
  render(<BusinessDiagram title="退款业务图" source={'flowchart TD\nA-->B\nclick A "https://evil.example"'}/>);
@@ -133,17 +126,6 @@ test('business branches display case links and explicit association gaps',async(
  const {AnalysisReport}=await import('../src/AnalysisReport');
  render(<AnalysisReport report={{business_model:{edges:[{id:'B1',from:'N1',to:'N2',label:'退款成功',refs:[]},{id:'B2',from:'N1',to:'N2',label:'退款失败',refs:[]}]},traceability:[{id:'C1',case_id:'C1',title:'成功退款到账',branch_ids:['B1'],requirement_ids:['R1'],scenario_id:'S1',refs:[]}]}}/>);
  assert.ok(screen.getByText('关联用例：C1'));assert.ok(screen.getByText('尚无关联用例'));
-});
-
-test('switching workspace artifact discards old editors before new data arrives',async()=>{
- const {ArtifactWorkspace}=await import('../src/ArtifactWorkspace');const pending=deferred();
- const a={id:'a1',type:'cases',title:'用例甲',revision:1,items:[{id:'C1',title:'原用例',steps:[],refs:[]}]} as any;
- fixture(path=>path==='/artifacts/a1'?Promise.resolve(json(a)):path==='/artifacts/a2'?pending.promise:undefined);
- const props={refreshKey:'x',onClose:()=>{},onTarget:()=>{},onChanged:()=>{}};
- const view=render(<ArtifactWorkspace artifact={a} {...props}/>);await screen.findByText('原用例');fireEvent.click(screen.getByRole('button',{name:'编辑',exact:true}));
- await screen.findByLabelText('条目 C1 标题');view.rerender(<ArtifactWorkspace artifact={{...a,id:'a2',title:'用例乙'}} {...props}/>);
- assert.ok(screen.queryByLabelText('条目 C1 标题')===null);assert.ok(screen.queryByRole('button',{name:'保存新版本'})===null);
- await act(async()=>pending.resolve(json({...a,id:'a2',title:'用例乙',items:[]})));
 });
 
 test('switching to private gateway seeds documented endpoint and displays actual timeout',async()=>{

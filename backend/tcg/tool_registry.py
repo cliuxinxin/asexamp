@@ -30,6 +30,32 @@ async def _await(value):
     return await value if inspect.isawaitable(value) else value
 
 
+def _control_receipt(action, before, after):
+    """Describe the acknowledged control operation using runtime state only."""
+    replacement = after.get('id', before['id']) != before['id']
+    stage = (after.get('stage') or 'understand') if replacement else (
+        before.get('failed_node') if action == 'retry' else None) or before.get('stage') or after.get('stage')
+    labels = {'understand': '理解需求', 'apply_clarification': '更新需求理解',
+        'scenarios': '生成场景', 'cases': '生成用例', 'review': '评审用例',
+        'clarification': '需求澄清', 'strategy_review': '确认需求理解',
+        'scenario_review': '确认场景', 'case_draft_review': '确认用例草稿',
+        'case_result_review': '确认评审结果', 'intake': '理解需求'}
+    label = labels.get(stage, '当前步骤')
+    status = after.get('status', before.get('status'))
+    if action == 'retry':
+        progress = {'queued': '等待执行', 'running': '正在执行',
+            'waiting': '等待当前节点的回复', 'failed': '当前步骤仍未完成',
+            'cancelled': '任务已取消', 'completed': '任务已完成'}.get(status, '请求已提交')
+        message = (f'已请求重新理解需求，{progress}。' if replacement else
+            f'已请求重新处理“{label}”，{progress}。') + '已有成果已保留。'
+    elif action == 'pause':
+        message = '当前任务已暂停，等待你的回复。' if status == 'waiting' else '已请求在当前步骤完成后暂停。'
+    else:
+        message = '任务已经完成，已有成果保留。' if status == 'completed' else '已取消任务，已有成果保留。'
+    return {'action': action, 'run_id': after.get('id', before['id']), 'stage': stage,
+        'stage_label': label, 'status': status, 'message': message}
+
+
 def _model_receipt(result):
     """The UI owns full comparisons; the chat model needs only their changes."""
     value = copy.deepcopy(result)
@@ -530,8 +556,10 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         if action not in handlers:
             raise DomainError('控制动作为 pause、cancel 或 retry')
         value = await _await(handlers[action](run['id']))
-        return _result({'pause': '已请求暂停。', 'cancel': '已取消任务。', 'retry': '已请求重试失败步骤。'}[action],
-                       run_id=run['id'], run=public(value) if isinstance(value, dict) else None)
+        current = value if isinstance(value, dict) else store.run(run['id'])
+        receipt = _control_receipt(action, run, current)
+        return _result(receipt['message'], run_id=receipt['run_id'], run=public(current),
+                       control_receipt=receipt)
 
     @tool
     @emit

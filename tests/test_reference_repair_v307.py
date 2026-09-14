@@ -24,14 +24,15 @@ def grounded(context):
 
 
 @pytest.mark.asyncio
-async def test_invalid_extras_are_filtered_without_model_retry_and_are_reported(setup):
+async def test_invalid_extras_are_repaired_with_grounding_and_are_reported(setup):
     store, run, service, model, analysis, scenarios = await upstream(setup)
     original = model.generate_native
     generated = None
 
     async def mixed(task, context, schema, instruction):
         nonlocal generated
-        assert task != 'repair_evidence_refs'
+        if task == 'repair_evidence_refs':
+            return grounded(context)
         result = await original(task, context, schema, instruction)
         if task == 'generate_cases':
             result['items'][0]['refs'] += ['string', 'sample#P1']
@@ -44,9 +45,9 @@ async def test_invalid_extras_are_filtered_without_model_retry_and_are_reported(
     assert cases['items'][0]['steps'] == generated[0]['steps']
     assert cases['items'][1]['refs'] == generated[1]['refs']
     issues = cases['report']['issues']
-    assert issues[-1]['code'] == 'reference_filtered'
+    assert issues[-1]['code'] == 'reference_repaired'
     assert issues[-1]['item_ids'] == [generated[0]['id']]
-    assert issues[-1]['removed_count'] == 2
+    assert issues[-1]['support']
 
 
 @pytest.mark.asyncio
@@ -77,7 +78,7 @@ async def test_only_ungrounded_rows_receive_refs_only_repair_and_correct_rows_st
 
 
 @pytest.mark.asyncio
-async def test_unresolved_repair_stops_with_diagnostics_then_retries_only_retained_candidate(setup):
+async def test_unresolved_repair_automatically_retries_only_retained_candidate(setup):
     store, run, service, model, analysis, scenarios = await upstream(setup)
     original = model.generate_native
     model.diagnostics = Diagnostics(store)
@@ -97,15 +98,10 @@ async def test_unresolved_repair_stops_with_diagnostics_then_retries_only_retain
         return result
 
     model.generate_native = invalid
-    with pytest.raises(DomainError, match='证据引用.*未解决') as caught:
-        await service.cases(run, analysis, scenarios)
-    assert caught.value.category == 'invalid_reference'
-    assert caught.value.call_id == 'call_ref_unresolved'
-    assert not [a for a in store.list('artifact', chat_id=run['chat_id']) if a['type'] == 'cases']
+    cases = await service.cases(run, analysis, scenarios)
     failed = [event['data'] for event in store.events(run['id']) if event['data'].get('event') == 'batch.validation_failed']
     assert failed[-1]['call_id'] == 'call_ref_unresolved'
     assert failed[-1]['item_ids'] == [repairs[0]['items'][0]['id']]
-    cases = await service.cases(run, analysis, scenarios)
     assert len(cases['items']) == 2
     assert len(repairs) == 2
     assert repairs[0]['items'] == repairs[1]['items']
@@ -167,8 +163,6 @@ async def test_valid_split_batch_is_reused_after_other_batch_reference_failure(s
         return result
 
     model.generate_native = split
-    with pytest.raises(DomainError, match='证据引用'):
-        await service.cases(run, analysis, scenarios)
     cases = await service.cases(run, analysis, scenarios)
     assert {row['scenario_id'] for row in cases['items']} == {good_id, bad_id}
     assert generated_groups.count([good_id]) == 1

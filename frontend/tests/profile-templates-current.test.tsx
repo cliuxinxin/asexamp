@@ -1,4 +1,4 @@
-// Retained current contracts extracted from guided-v258.test.tsx; archived legacy controls remain in legacy-tests/frontend.
+// Retained current contracts extracted from guided-v258.test.tsx.
 import {JSDOM} from 'jsdom';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';

@@ -238,7 +238,10 @@ class NativeChatAgent:
                             final = message
                             continue
                         spoken = text_content(message.content).strip()
-                        if spoken:
+                        # Control receipts name the actual stage. A model's pre-tool
+                        # retelling can name the wrong stage even when its arguments are right.
+                        controls_only = all(call['name'] == 'control_pipeline_tool' for call in message.tool_calls)
+                        if spoken and not controls_only:
                             turn['parts'].append({'type': 'assistant_note', 'text': spoken})
                             self._save(turn)
         unresolved = next((a for a in reversed(turn['actions']) if a['status'] != 'succeeded'), None)
@@ -249,7 +252,14 @@ class NativeChatAgent:
             turn['message'] = unresolved['result'].get('message', '')
             turn['pending'] = copy.deepcopy(unresolved['result'].get('pending', []))
         message = text_content(final.content).strip() if final else ''
-        if message and turn['status'] == 'succeeded':
+        controls_only = bool(turn['actions']) and all(action['name'] == 'control_pipeline_tool'
+            and action['result'].get('control_receipt') for action in turn['actions'])
+        if controls_only and turn['status'] == 'succeeded':
+            # Keep mixed explanation/edit turns free-form; pure controls use the
+            # runtime acknowledgement instead of a model claim of completion.
+            turn['message'] = '\n'.join(dict.fromkeys(action['result']['control_receipt']['message']
+                for action in turn['actions']))
+        elif message and turn['status'] == 'succeeded':
             turn['message'] = message
         elif not turn['message']:
             turn['message'] = message or '本轮处理完成。'

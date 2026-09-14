@@ -1,4 +1,4 @@
-// Retained current contracts extracted from settings-capacity.test.tsx; archived legacy controls remain in legacy-tests/frontend.
+// Current model connection and output-capacity contracts.
 import {JSDOM} from 'jsdom';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,8 +14,6 @@ dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
 const React=await import('react');
 const {render,fireEvent,screen,waitFor,cleanup}=await import('@testing-library/react');
 const {SettingsDialog}=await import('../src/SettingsDialog');
-const {RunCard}=await import('../src/RunCard');
-const {ConversationContext}=await import('../src/conversation');
 
 function json(value:unknown){return new Response(JSON.stringify(value),{status:200,headers:{'Content-Type':'application/json'}});}
 

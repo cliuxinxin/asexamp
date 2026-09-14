@@ -246,7 +246,8 @@ class PipelineRuntime:
             if self.store.run(run_id)['status'] == 'cancelled':
                 return
             self.store.update_run(run_id, status='running', error=None, interrupt=None,
-                                  interrupt_id=None)
+                                  interrupt_id=None, failed_node=None, candidate_id=None,
+                                  failure_category=None, failure_call_id=None, repair_progress=None)
             try:
                 if isinstance(value, dict) and value.get('phase') in ENTRY_PREDECESSORS:
                     await self.graph.aupdate_state(self._config(run_id), value,
@@ -266,21 +267,32 @@ class PipelineRuntime:
                                  node=self.store.run(run_id).get('stage'), call_id=diagnostic['call_id'],
                                  reference_id=diagnostic['reference_id'], category=diagnostic['category'],
                                  **error_details(exc))
-                if self.store.run(run_id)['status'] != 'cancelled':
-                    run = self.store.run(run_id)
-                    detail = str(exc) if isinstance(exc, DomainError) else '处理遇到异常，请按诊断编号查看服务日志。'
-                    self.store.update_run(run_id, status='failed', error=detail,
-                                          failed_node=run.get('stage'), interrupt=None,
-                                          interrupt_id=None)
-                    message_id = 'pipeline-error:' + diagnostic['reference_id']
-                    message = '当前步骤未完成：' + detail + ' 已有成果已保留；处理连接问题后，可在对话中回复“重试当前步骤”。'
-                    self.store.put('message', {'id': message_id, 'project_id': run['project_id'],
-                        'chat_id': run['chat_id'], 'role': 'assistant', 'content': message,
-                        'created_at': now(), 'metadata': {'run_id': run_id, 'pipeline_failure': True,
-                            'turn_response': {'id': message_id, 'status': 'failed', 'message': message,
-                                'parts': [diagnostic], 'pending': [], 'actions': []}}})
-                    self._record('node.error', run_id, node=run.get('stage'), level='ERROR')
-                    self._record('run.failed', run_id, node=run.get('stage'), level='ERROR')
+                with self.store.transaction():
+                    if self.store.run(run_id)['status'] != 'cancelled':
+                        run = self.store.run(run_id)
+                        detail = str(exc) if isinstance(exc, DomainError) else '处理遇到异常，请按诊断编号查看服务日志。'
+                        self.store.update_run(run_id, status='failed', error=detail,
+                                              failed_node=run.get('stage'), interrupt=None,
+                                              interrupt_id=None, repair_progress=None,
+                                              failure_category=diagnostic['category'], failure_call_id=diagnostic['call_id'])
+                        from .generation_candidates import save_candidate, STAGE_LABELS
+                        candidate = save_candidate(self.store, run, exc)
+                        parts = [diagnostic]
+                        stage_label = STAGE_LABELS.get(run.get('stage'), '当前步骤')
+                        if candidate:
+                            parts.insert(0, candidate)
+                            self.store.update_run(run_id, candidate_id=candidate['candidate_id'])
+                            message = stage_label + '已自动修复 3 次，仍有未通过的校验。生成内容已保留为待核对草稿，可打开查看具体问题和各次输出。你可以补充说明，或回复“重试当前步骤”。'
+                        else:
+                            message = stage_label + '未完成：' + detail + ' 已有成果已保留；可按下方排查信息处理，或回复“重试当前步骤”。'
+                        message_id = 'pipeline-error:' + diagnostic['reference_id']
+                        self.store.put('message', {'id': message_id, 'project_id': run['project_id'],
+                            'chat_id': run['chat_id'], 'role': 'assistant', 'content': message,
+                            'created_at': now(), 'metadata': {'run_id': run_id, 'pipeline_failure': True,
+                                'turn_response': {'id': message_id, 'status': 'failed', 'message': message,
+                                    'parts': parts, 'pending': [], 'actions': []}}})
+                        self._record('node.error', run_id, node=run.get('stage'), level='ERROR')
+                        self._record('run.failed', run_id, node=run.get('stage'), level='ERROR')
 
     async def snapshot(self, run_id):
         run = self.store.run(run_id)
@@ -430,7 +442,9 @@ class PipelineRuntime:
                 raise DomainError('当前对话已有另一个活动任务，请先处理当前任务', 409)
             if run.get('knowledge_rebuild_required'):
                 return await self._restart_for_knowledge(run)
-            self.store.update_run(run_id, status='queued', error=None)
+            self.store.update_run(run_id, status='queued', error=None,
+                _content_retry_round=run.get('_content_retry_round', 0) + 1, repair_progress=None,
+                failed_node=None, candidate_id=None, failure_category=None, failure_call_id=None)
             self._record('run.retried', run_id, node=run.get('failed_node') or run.get('stage'))
             state = await self.graph.aget_state(self._config(run_id))
             self._schedule(run_id, None if state.values else self._initial(run))

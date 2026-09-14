@@ -13,7 +13,6 @@ const React=await import('react');
 const {render,fireEvent,screen,waitFor,cleanup,within,act}=await import('@testing-library/react');
 const {App}=await import('../src/App');
 const {ConversationPrompt}=await import('../src/ConversationPrompt');
-const {RunCard}=await import('../src/RunCard');
 const originalFetch=globalThis.fetch;
 afterEach(()=>{cleanup();globalThis.fetch=originalFetch;});
 const json=(v:unknown)=>new Response(JSON.stringify(v),{status:200,headers:{'Content-Type':'application/json'}});
@@ -80,12 +79,6 @@ test('clarification suggestions are text only and disappear when answered',()=>{
  const view=render(<ConversationPrompt prompt={prompt}/>);assert.equal(screen.getAllByText(/建议假设/).length,2);assert.equal(screen.queryByRole('button'),null);assert.equal(screen.queryByRole('textbox'),null);
  view.rerender(<ConversationPrompt prompt={{...prompt,id:'p2',questions:[{...prompt.questions[1],answer:'提示联系管理员'}]}}/>);
  assert.equal(screen.queryByText('多久解锁？'),null);assert.equal(screen.queryByText(/建议提示稍后重试/),null);assert.ok(screen.getByText('已确认：提示联系管理员'));
-});
-
-test('source clarification and failure run cards stay read-only in conversation mode',()=>{
- globalThis.fetch=(async()=>json([])) as typeof fetch;const base:any={id:'run',status:'waiting',stage:'source_review',updated_at:'now',mode:'hitp',artifact_ids:[],interrupt:{type:'source_review',sources:[{id:'source',name:'样例.xlsx'}]}};
- const view=render(<RunCard run={base} chatOnly compact onChanged={()=>{}} onTarget={()=>{}}/>);assert.equal(screen.queryByRole('textbox'),null);assert.equal(screen.queryByRole('button'),null);
- view.rerender(<RunCard run={{...base,status:'failed',error:'模型连接失败'}} chatOnly compact onChanged={()=>{}} onTarget={()=>{}}/>);assert.ok(screen.getByText('模型连接失败'));assert.equal(screen.queryByRole('button',{name:/重试/}),null);
 });
 
 test('change details remain readable while proposal application uses chat',async()=>{
