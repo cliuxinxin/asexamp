@@ -3,9 +3,29 @@
   "workflow_version": 10,
   "conversation_version": "native-planner-artifact-workspace",
   "pipeline_version": "native-interrupt-sqlite",
-  "baseline": "tcg-case-agent-local-v3.0.13.zip",
-  "frontend_source_changed": true,
+  "release_revision": "prompt-json-nesting-1",
+  "baseline": "tcg-case-agent-local-v3.0.14.zip",
+  "frontend_source_changed": false,
+  "changes": [
+    "Explicit object/array nesting and schema-specific report guidance in native.yaml",
+    "Nested clarification options, review summary/issues and exclusion records in business.yaml",
+    "Nested diagrams array with title/mermaid fields in analysis.yaml",
+    "Retained stable IDs, evidence constraints and strict backend validation"
+  ],
   "validation": {
+    "prompt_suite": {
+      "command": "python -m pytest -q tests/test_prompt_externalization_v311.py",
+      "result": "12 passed"
+    },
+    "schema_reproduction": "Actual analysis/scenarios/cases schemas accept nested controls and reject flattened or dotted-key report fields.",
+    "remaining_dotted_report_output_references": 0,
+    "git_diff_check": "passed",
+    "real_model_provider_tested": false,
+    "frontend_rebuilt": false,
+    "frontend_note": "The previously verified v3.0.14 source and production assets are unchanged.",
+    "package_integrity": "All archived file hashes verified; only the three YAML files, prompt documentation and release manifest differ from the base ZIP."
+  },
+  "baseline_validation": {
     "scope": "Focused affected workflow and regression checks; historical full suite not rerun.",
     "backend": [
       {
@@ -82,15 +102,7 @@
     ],
     "user_runtime_data_inspected": false
   },
-  "changes": [
-    "Unified ArtifactWorkspace for requirements, scenarios and cases",
-    "Read-only history, manual row/cell editing and AI cell decisions",
-    "Shared workspace-grid projection, export and save gateway",
-    "One artifact_proposal storage kind with review/revision discriminator",
-    "Removed inline editors, inline diff confirmation and duplicate manual save logic",
-    "Removed early graph replay; preserved old proposal IDs through normalization"
-  ],
-  "code_commit": "aaee309ca2518aaba0664fd70cfb2dd3a09106c2",
+  "code_commit": "79d280300054ceef0c7d3758b850882440c81e2b",
   "files": {
     ".dockerignore": "ef59c3ab3402d1aebcb6b7b46980f4f5125e925881fda30378eadadbc216647b",
     ".env.example": "68c742124605897b8911b1569a6c4f90b0eb792308f04de941c0213646f01974",
@@ -137,11 +149,11 @@
     "backend/tcg/project_context.py": "af3253186291e905e386ad26a6bc6e2da4b59eca298d467ce4974a32437fc9cc",
     "backend/tcg/project_facts.py": "cc407c8f59698d9a8ef82fab1f52a6b68aa3435cce1eba75a46ee5de84956757",
     "backend/tcg/prompt_loader.py": "027ece2148a59f8d6dc26df4800c74704bdf30298a8bc6ebd8da6133d00a3d3f",
-    "backend/tcg/prompts/analysis.yaml": "6a1830f538cb2509b1ccd1400738ae2c0f448b41bba4deae2fe68b059f0ef403",
-    "backend/tcg/prompts/business.yaml": "0be99902dcf1543c0cfdab45fc2049d6ed3d0465f915ef5b4b538cab00435c0c",
+    "backend/tcg/prompts/analysis.yaml": "e0a16fd18eda1bcb17a487a6ba01b4a35cce41e08a712c4c12ef3b2bcb328701",
+    "backend/tcg/prompts/business.yaml": "bd916d65317fc85a2a7e7a69845e8b5ac640082059ad980bf2864c3206b7447b",
     "backend/tcg/prompts/chat.yaml": "2cb2f4d3605d7e7acd27a0510631771f0abfa62cafda8aff217fa6acf8fa277d",
     "backend/tcg/prompts/evidence.yaml": "1f6f0e97e600b12b0a4779c6754abddd17a8851a9510b35af473f7966fe2e93e",
-    "backend/tcg/prompts/native.yaml": "cf4368a0d760f3688cfd40e189c8dc21387cfa8240695b57a50ff0d97b1f6266",
+    "backend/tcg/prompts/native.yaml": "8ed3fe061aa85733d0742e186568ee5a5a729c0b2bdb939110a6208699095da2",
     "backend/tcg/prompts/planner.yaml": "1fadfe14868cf8d44acce5a60ae573c95e222f52dc84a7638c628c299b91d4fa",
     "backend/tcg/reference_repair.py": "ff5dc3a4d7feb921d302e407120a4eb0a6e76d4ce542c19cdf8b00cf1c987c03",
     "backend/tcg/review_proposals.py": "46cb7f89e5a7b806ab420fd73c1aaab891579bda881bec8749ac9aa0b65db6a8",
@@ -174,7 +186,7 @@
     "docs/DESIGN-v3.0.11.md": "5b36ea9248a1d143da2fdd330a31bcfb9dba7d77e9c22ce4b9ddd796c8dc365e",
     "docs/DESIGN-v3.0.12.md": "a5f08e45001230d1e5e436d720992a941522394c232e9724a8500b9848da6967",
     "docs/IMMERSIVE_REVIEW.md": "99fb8491176d805025c797b872ba7cd53367f48d4f50c6f15920a665a7cdc603",
-    "docs/PROMPTS.md": "d5d5e126d8646a2d0efb4860f056ed421a453260924b4efd21c202f40686031c",
+    "docs/PROMPTS.md": "42bb87502d6785aa08d61b23ffa7017c9f121a2823dbebea6020bcc556b2df3a",
     "docs/REVIEW-v3.0.5.md": "bb0b824174c2155d841c31c46e8016fe4c73097973599306003d0516e7bc1007",
     "docs/VALIDATION-v3.0.13.md": "81cf2f2c04bfbce37b5a19e4a92d2b3e43da3a5b7e049f9c0f0d09d2e13e8973",
     "docs/WORKSPACE-v3.0.14.md": "dc0072f48ce9d90567a32d9f3e7864f9a9bd3f7d07a2bce4a972fc90ce46d4b2",

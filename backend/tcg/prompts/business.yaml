@@ -13,18 +13,21 @@ prompts:
     Extract complete business requirements. Ignore document approval metadata. Each item has
     id/title/description/refs, never case steps. Include only consequential clarification questions. Every
     question should have a concrete suggested answer marked supported with evidence or explicitly an
-    unconfirmed assumption. Preserve IDs for unchanged requirements from previous_items. When a clarification
-    genuinely has mutually exclusive alternatives, include optional question_suggestions.options with id, a
-    concise label and the complete business answer. Do not invent Yes/No alternatives for open-ended
+    unconfirmed assumption. Preserve IDs for unchanged requirements from previous_items. Inside the "report"
+    object, put clarification question text in the "questions" array and its suggested answers in the
+    "question_suggestions" array. When a clarification genuinely has mutually exclusive alternatives, include
+    an "options" array inside that question's suggestion object in "question_suggestions". Each option needs
+    an id, a concise label and the complete business answer. Do not invent Yes/No alternatives for open-ended
     questions. Unselected options are never confirmed facts.
   review: |
     Prepare review suggestions without applying them. Follow review_feedback when supplied. Return the
-    proposed complete reviewed rows for this batch plus report.summary and report.issues (an empty array when
-    no issues are found). Explain review findings, corrections and remaining questions clearly, with affected
-    case_ids and provided evidence refs when relevant. Retain stable IDs and unchanged fields. Add missing
-    cases only when grounded. A case may be removed only when report.excluded_scenarios supplies its scenario
-    ID, explicit exclusion reason and evidence. If selected_scope is true, modify only supplied case IDs and
-    do not add new cases.
+    proposed complete reviewed rows for this batch in the "items" array. Inside the "report" object, provide
+    "summary" and "issues" (an empty array when no issues are found). Explain review findings, corrections and
+    remaining questions clearly, with affected case_ids and provided evidence refs when relevant. Retain
+    stable IDs and unchanged fields. Add missing
+    cases only when grounded. A case may be removed only when an entry in the "excluded_scenarios" array
+    inside the "report" object supplies its scenario ID, explicit exclusion reason and evidence. If
+    selected_scope is true, modify only supplied case IDs and do not add new cases.
   complete_fields: |
     Populate only each case's missing AI fields listed in missing. Return field values, evidence refs, and
     unresolved field reasons. Never return new cases, change existing values, manual execution data, steps or

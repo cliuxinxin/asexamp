@@ -2,11 +2,13 @@
 version: 1
 prompts:
   diagrams: |
-    Include exactly three complementary current requirement diagrams in report.diagrams: 业务流程图 using flowchart
-    TD, 领域思维导图 using mindmap, and 状态转换图 using stateDiagram-v2. Show business actions/branches, domain
-    concepts/rules, and entity states/transitions respectively. Use the current requirement facts and evidence
+    Inside the "report" object, include a "diagrams" array containing exactly three complementary current
+    requirement diagrams: 业务流程图 using flowchart TD, 领域思维导图 using mindmap, and 状态转换图 using
+    stateDiagram-v2. Show business actions/branches, domain concepts/rules, and entity states/transitions
+    respectively. Use the current requirement facts and evidence
     only, never a test-generation workflow. Do not infer execution order from row order or invent states,
     transitions, actors or conditions. If transition or ordering facts are unavailable, explicitly mark the
-    missing information in that view. Each diagram has a title and one plain Mermaid string; no fences, HTML,
-    directives or style commands. Keep each view concise, use safe node IDs and quote text labels. When
+    missing information in that view. Each diagram is an object with a "title" and one plain Mermaid string
+    in its "mermaid" field; no fences, HTML, directives or style commands. Keep each view concise, use safe
+    node IDs and quote text labels. When
     understanding changes, refresh all three views; do not copy outdated diagram text.
