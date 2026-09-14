@@ -154,7 +154,35 @@ def revise_artifact(store, artifact_id, expected_revision, items, reason='manual
                 raise DomainError('来源用途不属于当前范围')
             roles.update(source_roles)
         evidence = {e['id']: e for e in store.evidence(sources, roles)}
+        if reason == 'manual_edit':
+            from .dialogue_lineage import normalize_independent_rows
+            items = normalize_independent_rows(previous['type'], items, previous['items'], '用户手动设置为 N/A')
         validate_items(previous['type'], items, evidence)
+        # Full-table edits use this same commit boundary, so parent IDs are checked here too.
+        from .schemas import independent_item
+        parent_kind, key = ('analysis', 'analysis_artifact_id') if previous['type'] == 'scenarios' else ('scenarios', 'scenario_artifact_id')
+        lineage = (report or previous.get('report') or {}).get('lineage', {})
+        if previous['type'] in ('scenarios', 'cases') and lineage.get(key):
+            parent = store.get('artifact', lineage[key])
+            if parent['type'] != parent_kind or (parent['chat_id'], parent['project_id']) != (previous['chat_id'], previous['project_id']):
+                raise DomainError('上游成果不属于当前对话', 404)
+            known = {row['id'] for row in parent['items']}
+            old_rows = {row['id']: row for row in previous['items']}
+            legacy = (report or previous.get('report') or {}).get('_legacy_unlinked_cases', {})
+            for row in items:
+                links = row.get('requirement_ids') if previous['type'] == 'scenarios' else [row.get('scenario_id')]
+                if independent_item(previous['type'], row):
+                    continue
+                if previous['type'] == 'cases' and row['id'] in legacy and row.get('scenario_id') == legacy[row['id']] and row['id'] in old_rows:
+                    continue
+                if not isinstance(links, list) or not links or not all(isinstance(link, str) for link in links) or not set(links) <= known:
+                    raise DomainError('条目关联了不属于当前上游成果的编号；需要独立条目时请明确设置 N/A')
+        elif previous['type'] in ('scenarios', 'cases'):
+            field = 'requirement_ids' if previous['type'] == 'scenarios' else 'scenario_id'
+            previous_rows = {row['id']: row for row in previous['items']}
+            for row in items:
+                if row.get(field) and row.get(field) != previous_rows.get(row['id'], {}).get(field):
+                    raise DomainError('无法核实指定的上游编号；请选择已有上游成果，或设置为 N/A')
         before, after = {i['id']: i for i in previous['items']}, {i['id']: i for i in items}
         diff = {'added': [i for i in after if i not in before], 'deleted': [i for i in before if i not in after],
                 'updated': [i for i in after if i in before and before[i] != after[i]]}

@@ -3,6 +3,8 @@ import {Check,MessageSquare,Sparkles,RefreshCw,Calculator} from 'lucide-react';
 import {api,errText} from './api';
 import {useConversationCommand} from './conversation';
 import {Dialog,ErrorBox,Spinner,TextValue} from './ui';
+import {ChangePreview} from './ChangePreview';
+export {ChangePreview} from './ChangePreview';
 import type {Artifact,Json} from './types';
 
 type Action='estimate'|'explain'|'modify'|'sync';
@@ -47,10 +49,3 @@ export function ArtifactActions({artifact,selected,onChanged,onSaved,syncRequest
  <div className="dialog-actions"><button disabled={busy||!instruction.trim()||(action==='sync'&&(!workspace||!targets.length))} onClick={()=>void preview()}>{busy?<Spinner/>:<Sparkles size={16}/>} {action==='estimate'?'开始估算':action==='explain'?'生成说明':proposal?'重新预览':'预览修改'}</button>{proposal&&['modify','sync'].includes(action)&&(proposal.changes??[]).length>0&&<button className="primary" disabled={busy} onClick={()=>void apply()}><Check size={16}/>确认应用修改</button>}{proposal?.id&&<button disabled={busy} onClick={()=>void discard()}>取消此修改</button>}<button onClick={close} disabled={busy}>关闭</button></div></Dialog>}
  </>;
 }
-
-export function ChangePreview({change,before}:{change:Json;before?:Artifact}){
- const prior=new Map<string,Json>((before?.items??change.before_items??[]).map((item:Json)=>[item.id,item]));const next=new Map((change.items??[]).map((item:Json)=>[item.id,item])) as Map<string,Json>;
- const ids=[...new Set([...prior.keys(),...next.keys()])];const altered=ids.filter(id=>JSON.stringify(prior.get(id))!==JSON.stringify(next.get(id)));
- return <section className="artifact-change"><h4>{change.title??before?.title??change.artifact_id} · v{change.expected_revision} → 新版本</h4><p className="muted small-text">新增 {ids.filter(id=>!prior.has(id)).length} · 更新 {ids.filter(id=>prior.has(id)&&next.has(id)&&JSON.stringify(prior.get(id))!==JSON.stringify(next.get(id))).length} · 删除 {ids.filter(id=>!next.has(id)).length}</p>{altered.map(id=>{const old=prior.get(id),item=next.get(id);const fields=[...new Set([...Object.keys(old??{}),...Object.keys(item??{})])].filter(key=>JSON.stringify(old?.[key])!==JSON.stringify(item?.[key]));const operation=(change.operations??[]).find((op:Json)=>op.id===id&&op.op==='delete');return <div className="item-change" key={id}><strong>{id} · {item?.title??old?.title} · {!old?'新增':!item?'删除':'更新'}</strong>{operation&&<p className="action-deletion-reason">删除原因：{operation.reason} · 依据：{(operation.refs??[]).join('、')||'未提供'}</p>}<div className="table-scroll"><table><thead><tr><th>字段</th><th>修改前</th><th>修改后</th></tr></thead><tbody>{fields.map(field=><tr key={field}><th>{({title:'标题',description:'描述',preconditions:'前置条件',steps:'步骤 / 预期结果',priority:'优先级',type:'类型',refs:'需求依据',scenario_id:'关联场景'} as Record<string,string>)[field]??field}</th><td><FieldValue field={field} value={old?.[field]}/></td><td><FieldValue field={field} value={item?.[field]}/></td></tr>)}</tbody></table></div></div>;})}{change.report&&JSON.stringify(change.report)!==JSON.stringify(before?.report)&&<details><summary>报告变更</summary><div className="action-report-diff"><div><strong>修改前</strong><pre>{JSON.stringify(before?.report??{},null,2)}</pre></div><div><strong>修改后</strong><pre>{JSON.stringify(change.report,null,2)}</pre></div></div></details>}</section>;
-}
-function FieldValue({field,value}:{field:string;value:unknown}){if(field==='steps'&&Array.isArray(value))return <ol className="action-step-list">{value.map((step:Json,i:number)=><li key={i}><p><strong>操作：</strong><TextValue value={step.action}/></p><p><strong>预期：</strong><TextValue value={step.expected}/></p></li>)}</ol>;return <TextValue value={value}/>;}

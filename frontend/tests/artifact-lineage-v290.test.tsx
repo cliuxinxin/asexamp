@@ -41,8 +41,10 @@ test('collapsed case review keeps first step paired with expected result and exp
  fireEvent.click(within(row).getByRole('button',{name:'展开 C-1',exact:true}));
  const steps=screen.getByRole('table',{name:'C-1 步骤与预期结果'});
  const second=within(steps).getByText('再次尝试登录').closest('tr')!;assert.ok(within(second).getByText('拒绝登录并提示锁定'));
- fireEvent.click(screen.getByText('显示模板列'));fireEvent.click(screen.getByLabelText('显示 实际结果'));
  assert.ok(within(row).getByText('人工记录：尚未执行'));
+ fireEvent.click(screen.getByText('显示模板列'));fireEvent.click(screen.getByLabelText('显示 实际结果'));
+ assert.equal(within(row).queryByText('人工记录：尚未执行'),null);
+ fireEvent.click(screen.getByLabelText('显示 实际结果'));assert.ok(within(row).getByText('人工记录：尚未执行'));
 });
 
 test('inline filters preserve selected IDs and render missing lineage and pending upstream differences',async()=>{

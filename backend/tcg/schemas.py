@@ -85,6 +85,8 @@ class MessageInput(BaseModel):
 
 
 class RevisionInput(BaseModel):
+    column_changes: dict[str, Any] | None = None
+    profile_id: str | None = None
     report: dict[str, Any] | None = None
     expected_revision: int = Field(ge=1)
     items: list[dict[str, Any]]
@@ -191,6 +193,12 @@ def profile_config(config):
     return result
 
 
+def independent_item(kind, item):
+    marker = item.get('_independent_origin')
+    empty = item.get('requirement_ids') == [] if kind == 'scenarios' else item.get('scenario_id') == ''
+    return kind in ('scenarios', 'cases') and empty and isinstance(marker, dict) and isinstance(marker.get('reason'), str) and bool(marker['reason'].strip())
+
+
 def validate_items(kind, items, evidence, scenario_ids=None):
     """Evidence is a server-built map; examples never ground business facts."""
     if not isinstance(items, list):
@@ -226,7 +234,7 @@ def validate_items(kind, items, evidence, scenario_ids=None):
             for field in ('type', 'priority', 'preconditions', 'scenario_id'):
                 if not isinstance(item.get(field), str):
                     raise OutputValidationError('Case ' + field + ' 必须为字符串', path + '.' + field, 'string', item.get(field, MISSING))
-            if scenario_ids is not None and item['scenario_id'] not in scenario_ids:
+            if scenario_ids is not None and item['scenario_id'] not in scenario_ids and not independent_item(kind, item):
                 raise OutputValidationError('Case scenario_id 不属于本次 Scenario', path + '.scenario_id', 'provided_scenario_id', item['scenario_id'], 'invalid_reference')
             if not isinstance(item.get('steps'), list) or not item['steps']:
                 raise OutputValidationError('Case steps 至少包含一个步骤', path + '.steps', 'nonempty_array', item.get('steps', MISSING))

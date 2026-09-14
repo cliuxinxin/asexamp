@@ -92,9 +92,28 @@ test('a dialogue parent preview displays added rows without loading nonexistent 
   items:[{id:'R-CHAT-1',title:'并发登录校验',description:'用户要求验证同一账号同时登录的行为。',refs:['src-chat#P1']}],
  }]}]});
  render(<Reply response={response}/>);
+ const archived=screen.getByText('修改预览 · 查看当时的差异');
+ assert.equal((archived.closest('details') as HTMLDetailsElement).open,false);
+ assert.deepEqual(calls,[]);
+ fireEvent.click(archived);
  await waitFor(()=>assert.ok(screen.getByText('R-CHAT-1 · 并发登录校验 · 新增')));
  assert.ok(screen.getByText('对话补充需求 · v0 → 新版本'));
  assert.ok(screen.getByText('新增 1 · 更新 0 · 删除 0'));
  assert.deepEqual(calls,[]);
  assert.equal(screen.queryByText('应用此修改'),null);
+});
+
+test('an operations-only archived preview keeps before rows intact while showing added updated and deleted rows',async()=>{
+ const before=[{id:'S1',title:'原场景'},{id:'S2',title:'删除场景'}];
+ const response=turn({status:'needs_confirmation',parts:[{type:'diff',proposal_id:'old-proposal',changes:[{
+  artifact_id:'scenes',title:'场景',expected_revision:2,before_items:before,
+  operations:[{op:'update',id:'S1',item:{title:'更新场景'}},{op:'delete',id:'S2',reason:'用户明确删除'},{op:'add',item:{id:'S3',title:'新增场景'}}],
+ }]}]});
+ render(<Reply response={response}/>);
+ fireEvent.click(screen.getByText('修改预览 · 查看当时的差异'));
+ await screen.findByText('新增 1 · 更新 1 · 删除 1');
+ const comparison=screen.getByRole('table',{name:'S1 修改对比'});
+ assert.match(comparison.querySelector('td')?.textContent??'',/原场景/);
+ assert.ok(screen.getByText('S2 · 删除场景 · 删除'));assert.ok(screen.getByText('S3 · 新增场景 · 新增'));
+ assert.deepEqual(before,[{id:'S1',title:'原场景'},{id:'S2',title:'删除场景'}]);
 });

@@ -109,8 +109,14 @@ def propose_profile_edit(store, chat_id, current, *, kind='cases', upsert_column
         config = profile_config(config)
         changes = config_changes(current['config'], config)
         if not changes:
+            previous = chat.get('_native_template_prompt')
+            from .case_columns import cancel_deferred_export
+            cancel_deferred_export(store, previous)
             store.put('chat', {**chat, '_native_template_prompt': None})
-            return {'status': 'succeeded', 'message': change_summary(changes), 'profile': public(current)}
+            message = change_summary(changes)
+            if previous and previous.get('deferred_export_id'):
+                message += '已撤销这项模板更改及关联的自动导出请求；已保存用例保持不变。'
+            return {'status': 'succeeded', 'message': message, 'profile': public(current)}
         summary = summary.strip() or change_summary(changes)
         suggestion = {'id': uid('tmpl_'), 'project_id': chat['project_id'], 'chat_id': chat_id,
             'created_at': now(), 'source_ids': [], 'template_kinds': [kind],
@@ -124,6 +130,8 @@ def propose_profile_edit(store, chat_id, current, *, kind='cases', upsert_column
             'change_summary': change_summary(changes),
             'message': summary + ('\n' + change_summary(changes) if summary != change_summary(changes) else '') +
                 '\n可从输入框上方“查看 Profile 更改”逐项查看并确认，也可以继续说明修改意见。'}
+        from .case_columns import rebind_case_profile
+        rebind_case_profile(store, chat, chat.get('_native_template_prompt'), pending, config)
         store.put('chat', {**chat, '_native_template_prompt': pending})
         return {'status': 'needs_confirmation', 'message': pending['message'], 'pending': [pending],
                 'proposal': {key: suggestion[key] for key in ('id', 'summary', 'template_kinds')}}

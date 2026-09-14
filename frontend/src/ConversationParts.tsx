@@ -1,6 +1,6 @@
 import {useEffect,useState} from 'react';
 import {ArtifactCard} from './ArtifactCard';
-import {ChangePreview} from './ArtifactActions';
+import {ChangePreview} from './ChangePreview';
 import {ChatEstimate} from './ChatEstimate';
 import {WorkspaceCoverage} from './WorkspaceCoverage';
 import {ClarificationDraftEditor} from './ClarificationDraftEditor';
@@ -24,7 +24,7 @@ export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,o
    case 'estimate':return compact?<details key={key} className="receipt-details"><summary>查看用例数量估算</summary><ChatEstimate estimate={value.data as any}/></details>:<ChatEstimate key={key} estimate={value.data as any}/>;
    case 'artifact':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} revision={value.revision} readOnly refreshKey={refreshKey} onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
    case 'case_details':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} snapshot={{id:value.artifact_id,type:'cases',title:value.title??'用例步骤与预期',revision:value.revision,items:value.items,view_item_ids:value.items.map((item:Json)=>String(item.id))}} readOnly initialDetailsOpen onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
-   case 'diff':return compact?<details key={key} className="receipt-details"><summary>修改预览 · 已记录</summary><ConversationDiff proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged} readOnly/></details>:<ConversationDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged} readOnly={chatOnly}/>;
+   case 'diff':return compact||chatOnly?<ArchivedDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged}/>:<ConversationDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged}/>;
    case 'coverage':return <WorkspaceCoverage key={key} artifactId="" revision={0} initialData={value.data} initialOpen={!compact}/>;
    case 'source_impact':return compact?<details key={key} className="receipt-details"><summary>资料影响 · {value.data.summary||'查看分析结果'}</summary><SourceImpact data={value.data}/></details>:<SourceImpact key={key} data={value.data}/>;
    case 'files':return <div key={key} className="turn-files" aria-label="导出文件">{value.files.map((file:Json,i:number)=>/^\/(?!\/)|^https?:\/\//.test(file.url)?<a key={i} className="text-accent" href={file.url} download={file.name}>{file.name}</a>:<span key={i}>{file.name}（下载地址不可用）</span>)}</div>;
@@ -35,6 +35,11 @@ export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,o
 
 function PendingItems({items}:{items:Json[]}){
  return <>{items.map((item,index)=><div key={item.id??index}><p>{item.message??item.question??item.title??'请明确本次操作的对象。'}</p>{Array.isArray(item.candidates)&&item.candidates.length>0&&<ol>{item.candidates.map((candidate:Json,candidateIndex:number)=><li key={candidate.id??candidateIndex}>{candidate.title??candidate.name??'未命名成果'} · {candidate.id}{candidate.revision!==undefined?` · v${candidate.revision}`:''}</li>)}</ol>}</div>)}</>;
+}
+
+function ArchivedDiff({proposalId,changes,onChanged}:{proposalId:string;changes:Json[];onChanged:()=>void}){
+ const [open,setOpen]=useState(false);
+ return <details className="receipt-details" onToggle={event=>setOpen(event.currentTarget.open)}><summary>修改预览 · 查看当时的差异</summary>{open&&<ConversationDiff proposalId={proposalId} changes={changes} onChanged={onChanged} readOnly/>}</details>;
 }
 
 function SourceImpact({data}:{data:Json}){

@@ -93,7 +93,7 @@ test('template proposal starts at active Profile and survives destination change
 test('invalid JSON cannot crash the readable artifact editor',async()=>{
  fixture(path=>path==='/artifacts/a1'?Promise.resolve(json({id:'a1',type:'cases',title:'用例',revision:1,items:[]})):undefined);
  render(<ArtifactCard id="a1" refreshKey="x" onTarget={()=>{}} onChanged={()=>{}}/>);await screen.findByRole('button',{name:'编辑',exact:true});fireEvent.click(screen.getByRole('button',{name:'编辑',exact:true}));fireEvent.click(screen.getByRole('button',{name:'JSON · 全部字段'}));
- for(const invalid of ['[null]','[{"id":"TC-1","steps":"wrong"}]','[{"id":"TC-1","steps":[],"refs":"x"}]','[{"id":"TC-1","steps":[],"refs":[{}]}]']){fireEvent.change(screen.getByLabelText('产物 JSON'),{target:{value:invalid}});fireEvent.click(screen.getByRole('button',{name:'表单编辑'}));await screen.findAllByText(/每个条目必须是对象/);assert.equal((screen.getByLabelText('产物 JSON') as HTMLTextAreaElement).value,invalid);}
+ for(const invalid of ['[null]','[{"id":"TC-1","steps":"wrong"}]','[{"id":"TC-1","steps":[],"refs":"x"}]','[{"id":"TC-1","steps":[],"refs":[{}]}]']){fireEvent.change(screen.getByLabelText('产物 JSON'),{target:{value:invalid}});fireEvent.click(screen.getByRole('button',{name:'表格编辑'}));await screen.findAllByText(/每个条目必须是对象/);assert.equal((screen.getByLabelText('产物 JSON') as HTMLTextAreaElement).value,invalid);}
 });
 
 test('custom header settings preserve secrets unless explicitly replaced',async()=>{

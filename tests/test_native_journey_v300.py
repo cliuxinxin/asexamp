@@ -245,7 +245,10 @@ def test_native_chat_tools_drive_each_human_gate_and_resume_reads_current_artifa
 
     j.turn('把这个场景标题改成“验证注册用户凭证登录”，先不要继续。', 'modify_artifact_tool',
            {'artifact_id': scenarios['id'], 'item_id': scenarios['items'][0]['id'],
-            'new_values': {'title': '验证注册用户凭证登录'}}, reply=scenario_prompt)
+            'new_values': {'title': '验证注册用户凭证登录'}}, reply=scenario_prompt, status='needs_confirmation')
+    preview = j.snapshot()['conversation_prompt']
+    assert preview['kind'] == 'artifact_proposal'
+    j.turn('同意保存场景修改', 'apply_artifact_preview_tool', reply=preview)
     run, modified, changed_prompt = j.gate('scenario_review')
     assert modified['id'] == scenarios['id'] and modified['revision'] == scenarios['revision'] + 1
     assert modified['items'][0]['title'] == '验证注册用户凭证登录'
@@ -254,17 +257,13 @@ def test_native_chat_tools_drive_each_human_gate_and_resume_reads_current_artifa
     assert not j.counts().get('generate_cases')
 
     j.turn('同意，继续', 'resume_pipeline_tool', {'run_id': rid}, reply=changed_prompt)
-    run, cases, draft_prompt = j.gate('case_draft_review')
+    run, cases, review_prompt = j.gate('case_result_review')
     generation = next(context for task, context in j.gateway.generations if task == 'generate_cases')
     assert generation['scenarios'] == modified['items']
     assert cases['items'][0]['scenario_id'] == modified['items'][0]['id']
     assert cases['items'][0]['title'] == modified['items'][0]['title']
-    assert not j.counts().get('review_cases')
-
-    j.turn('确认这些用例草稿，继续评审', 'resume_pipeline_tool', {'run_id': rid}, reply=draft_prompt)
-    run, reviewed, review_prompt = j.gate('case_result_review')
-    assert reviewed['items'][0]['steps'] == cases['items'][0]['steps']
-    assert reviewed['items'][0]['title'].startswith('已评审：')
+    assert j.counts()['review_cases'] == 1
+    assert review_prompt['changes'][0]['after']['title'].startswith('已评审：')
     j.turn('评审结果可以，完成吧', 'resume_pipeline_tool', {'run_id': rid}, reply=review_prompt)
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
@@ -309,13 +308,13 @@ def test_completed_pipeline_supplement_preview_and_shared_clarification_close_th
     j.turn('生成场景和用例，每步等我确认。', 'start_pipeline_tool',
            {'mode': 'hitp', 'stop_after': 'review'})
     initial = {}
-    for kind in ('strategy_review', 'scenario_review', 'case_draft_review', 'case_result_review'):
+    for kind in ('strategy_review', 'scenario_review', 'case_result_review'):
         run, artifact, pending = j.gate(kind)
         initial[artifact['type']] = artifact
         j.turn('同意，继续', 'resume_pipeline_tool', {'run_id': run['id']}, reply=pending)
     completed = j.completed()
     rid = completed['id']
-    old_analysis, old_scenarios, old_cases = (initial[k] for k in ('analysis', 'scenarios', 'cases'))
+    old_analysis, old_scenarios, old_cases = (j.artifact(initial[k]['id']) for k in ('analysis', 'scenarios', 'cases'))
 
     # Uploading a file does not approve changes or reopen the completed graph.
     uploaded = j.client.post('/api/chats/' + j.chat['id'] + '/sources',
@@ -381,14 +380,11 @@ def test_completed_pipeline_supplement_preview_and_shared_clarification_close_th
     assert j.gate('scenario_review')[2]['id'] == modified_prompt['id']
 
     j.turn('场景同意，生成关联用例', 'resume_pipeline_tool', {'run_id': rid}, reply=modified_prompt)
-    run, cases, case_prompt = j.gate('case_draft_review')
+    run, cases, review_prompt = j.gate('case_result_review')
     assert cases['id'] == old_cases['id']
     assert cases['items'][0]['steps'][0]['expected'] == SUPPLEMENT
     assert supplement_refs <= set(cases['items'][0]['refs'])
-    assert j.counts()['generate_cases'] == 2 and j.counts()['review_cases'] == 1
-    j.turn('用例草稿同意，继续评审', 'resume_pipeline_tool', {'run_id': rid}, reply=case_prompt)
-    run, reviewed, review_prompt = j.gate('case_result_review')
-    assert reviewed['items'][0]['steps'][0]['expected'] == SUPPLEMENT
+    assert j.counts()['generate_cases'] == j.counts()['review_cases'] == 2
     j.turn('评审同意，完成吧', 'resume_pipeline_tool', {'run_id': rid}, reply=review_prompt)
     assert j.completed()['id'] == rid
     assert j.counts()['understand_requirements'] == 1

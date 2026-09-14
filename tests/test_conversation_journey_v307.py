@@ -17,7 +17,7 @@ def test_dialogue_addition_returns_to_gate_and_profile_edit_exports_without_uplo
             j.gateway.generations.append((task, copy.deepcopy(context)))
             return {'items': copy.deepcopy(context['items']) + [{
                 'id': 'SC-CONCURRENT', 'title': '第二次登录使旧会话失效', 'description': request,
-                'priority': 'P1', 'requirement_ids': [context['addition_parent_id']],
+                'priority': 'P1', 'requirement_ids': [context['addition_parent_id']] if context['addition_parent_id'] else [],
                 'refs': context['dialogue_evidence_ids']}], 'report': {'summary': '已准备新增并发登录场景。'}}
         if task == 'generate_cases':
             j.gateway.generations.append((task, copy.deepcopy(context)))
@@ -52,7 +52,7 @@ def test_dialogue_addition_returns_to_gate_and_profile_edit_exports_without_uplo
         reply=prompt, status='needs_confirmation')
     preview_prompt = j.snapshot()['conversation_prompt']
     assert preview_prompt['kind'] == 'artifact_proposal'
-    assert len(staged['parts'][0]['changes']) == 2
+    assert len(staged['parts'][0]['changes']) == 1
     receipt = json.loads(j.gateway.tool_results[-1].content)
     assert 'before_items' not in receipt['parts'][0]['changes'][-1]
     assert receipt['parts'][0]['changes'][-1]['added'] == [
@@ -66,21 +66,27 @@ def test_dialogue_addition_returns_to_gate_and_profile_edit_exports_without_uplo
     added = updated['items'][1]
     assert added['id'] == 'SC-CONCURRENT'
     upstream = j.artifact(analysis['id'])
-    requirement = next(row for row in upstream['items'] if row['id'] == added['requirement_ids'][0])
-    assert requirement['description'] == request
-    assert requirement['refs'] == added['refs']
+    assert upstream == analysis
+    assert added['requirement_ids'] == []
+    assert added['_independent_origin']['reason']
+    assert added['_independent_origin']['source_id'] + '#P1' in added['refs']
     assert not j.counts().get('generate_cases')
     j.turn('场景确认，继续生成用例', 'resume_pipeline_tool', reply=prompt)
-    _, cases, draft_prompt = j.gate('case_draft_review')
+    _, cases, review_prompt = j.gate('case_result_review')
     assert {c['scenario_id'] for c in cases['items']} == {s['id'] for s in updated['items']}
     assert j.counts()['generate_cases'] == 1 and j.counts()['repair_evidence_refs'] == 1
     repaired = next(c for c in cases['items'] if c['scenario_id'] == 'SC-CONCURRENT')
     assert repaired['refs'] == added['refs'] and repaired['steps'][0]['expected'] == '第一次登录的会话失效'
     assert any(issue.get('code') == 'reference_repaired' for issue in cases['report']['issues'])
-    j.turn('同意，评审用例', 'resume_pipeline_tool', reply=draft_prompt)
-    _, reviewed, review_prompt = j.gate('case_result_review')
+    assert j.counts()['review_cases'] == 1
+    assert cases['revision'] == 1
+    assert review_prompt['review']['summary'] == '已核对步骤与预期结果。'
     j.turn('评审结果同意，完成', 'resume_pipeline_tool', reply=review_prompt)
     j.completed()
+    reviewed = j.artifact(cases['id'])
+    assert reviewed['revision'] == cases['revision'] + 1
+    assert j.artifact(analysis['id']) == analysis
+    assert j.artifact(scenarios['id']) == updated
 
     calls_before = len(j.gateway.generations)
     j.turn('导出格式加一列执行状态，人工填写，不上传模板。', 'modify_profile_tool',

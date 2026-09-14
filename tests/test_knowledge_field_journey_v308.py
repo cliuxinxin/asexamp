@@ -57,7 +57,7 @@ def test_shared_fact_disable_native_resume_field_preview_and_real_excel(native_j
     assert SHARED_RULE not in str(current['items'])
     assert shared_id not in str(current['report']['source_provenance'])
     assert j.artifact(old_analysis['id']) == old_analysis
-    for next_kind in ('scenario_review', 'case_draft_review', 'case_result_review'):
+    for next_kind in ('scenario_review', 'case_result_review'):
         j.turn('同意，继续', 'resume_pipeline_tool', {'run_id': new_run_id}, reply=prompt)
         _, current, prompt = await_gate(j, new_run_id, next_kind)
     j.turn('评审同意，完成', 'resume_pipeline_tool', {'run_id': new_run_id}, reply=prompt)

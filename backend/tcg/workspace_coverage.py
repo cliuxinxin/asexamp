@@ -5,7 +5,7 @@ unrelated generations, so matching them never establishes an artifact relation.
 """
 import copy
 
-from .schemas import DomainError
+from .schemas import DomainError, independent_item
 
 
 PARENT_KEYS = {
@@ -147,6 +147,10 @@ def lineage_rows(store, artifact):
     for row in artifact['items']:
         linked = {'item_id': row['id'], 'scenario': None, 'requirements': [], 'status': 'linked'}
         current, current_row = artifact, row
+        if independent_item(artifact['type'], row):
+            linked.update(status='independent', reason=row['_independent_origin']['reason'], stale=False)
+            result.append(linked)
+            continue
         if artifact['type'] == 'cases':
             current = _parent_snapshot(store, artifact, 'scenarios', row.get('scenario_id'), row['id'])
             current_row = next((r for r in current['items'] if r['id'] == row.get('scenario_id')), None) if current else None
@@ -158,7 +162,9 @@ def lineage_rows(store, artifact):
         if current and current_row and current['type'] == 'scenarios':
             ids = current_row.get('requirement_ids', [])
             if not ids:
-                linked['status'] = 'missing_parent'
+                linked['status'] = 'independent' if independent_item('scenarios', current_row) else 'missing_parent'
+                if linked['status'] == 'independent':
+                    linked['reason'] = current_row['_independent_origin']['reason']
             for rid in ids:
                 analysis = _parent_snapshot(store, current, 'analysis', rid, current_row['id'])
                 requirement = next((r for r in analysis['items'] if r['id'] == rid), None) if analysis else None
@@ -295,7 +301,7 @@ def structural_coverage(analysis=None, scenarios=None, cases=None):
         else:
             orphans.append({'id': row['id'], 'title': row.get('title', ''),
                             'scenario_id': sid or '',
-                            'status': 'unlinked' if scenarios is None else 'missing_scenario'})
+                            'status': 'independent' if independent_item('cases', row) else 'unlinked' if scenarios is None else 'missing_scenario'})
     scenario_rows = []
     by_requirement = {item_id: [] for item_id in requirement_ids}
     unknown_requirements = set()
@@ -327,7 +333,7 @@ def structural_coverage(analysis=None, scenarios=None, cases=None):
         notes.append('用例尚无可验证的场景成果关联；相同场景编号不自动建立关联。')
     if unknown_requirements:
         notes.append('场景含未找到的需求编号：' + '、'.join(sorted(unknown_requirements)))
-    unassigned = [item['id'] for item in scenario_items if not item.get('requirement_ids')]
+    unassigned = [item['id'] for item in scenario_items if not item.get('requirement_ids') and not independent_item('scenarios', item)]
     if unassigned:
         notes.append('未分配需求的场景：' + '、'.join(unassigned))
     return {'requirements': requirement_rows, 'scenarios': scenario_rows,

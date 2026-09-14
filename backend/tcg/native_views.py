@@ -47,9 +47,21 @@ def review_opinions(artifact):
 def pipeline_messages(store, chat_id):
     """Project saved stage events into the existing UI message envelope."""
     labels = {'understood': '需求理解已保存', 'scenarios_generated': '测试场景已保存',
-              'cases_generated': '用例草稿已保存', 'reviewed': '用例评审结果已保存'}
+              'cases_generated': '用例已生成', 'reviewed': '已按评审建议修改用例'}
     messages = []
     for event in store.list('pipeline_result', chat_id=chat_id):
+        if event['phase'] == 'review_proposed':
+            proposal = store.get('review_proposal', event['proposal_id'])
+            review = review_opinions(proposal)
+            needs_confirmation = event.get('requires_confirmation', store.run(event['run_id'])['mode'] != 'auto')
+            content = ('评审建议已生成，等待你确认后再修改用例。' if needs_confirmation
+                       else '评审建议已生成，自动模式将按建议修改用例。')
+            if review['summary']:
+                content += '\n' + review['summary'][:1200]
+            messages.append({'id': event['id'], 'role': 'assistant', 'content': content,
+                'created_at': event['created_at'], 'metadata': {'run_id': event['run_id'],
+                    'stage': event['phase'], 'review_proposal_id': proposal['id']}})
+            continue
         artifact = store.revision(event['artifact_id'], event['revision'])
         report = artifact.get('report') or {}
         content = labels.get(event['phase'], '阶段成果已保存') + f"：{len(artifact['items'])} 条 · v{artifact['revision']}。"
@@ -66,20 +78,20 @@ def pipeline_messages(store, chat_id):
 
 
 async def current_prompt(store, pipeline, chat):
-    template = chat.get('_native_template_prompt')
-    if template:
-        try:
-            profile = store.get('profile', template['profile_id'])
-            if profile['version'] == template['expected_version']:
-                return copy.deepcopy(template)
-        except (DomainError, KeyError):
-            pass
     proposal = chat.get('_native_artifact_prompt')
     if proposal:
         try:
             artifact = store.get('artifact', proposal['artifact_id'])
             if artifact['revision'] == proposal['artifact_revision']:
                 return copy.deepcopy(proposal)
+        except (DomainError, KeyError):
+            pass
+    template = chat.get('_native_template_prompt')
+    if template:
+        try:
+            profile = store.get('profile', template['profile_id'])
+            if profile['version'] == template['expected_version']:
+                return copy.deepcopy(template)
         except (DomainError, KeyError):
             pass
     runs = store.runs(chat_id=chat['id'])
@@ -106,8 +118,15 @@ async def current_prompt(store, pipeline, chat):
         'message': gate.get('message', '回复同意继续，或直接说明修改意见。'),
         'artifact_id': gate.get('artifact_id'), 'artifact_revision': gate.get('artifact_revision')}
     if gate['type'] == 'case_result_review' and gate.get('artifact_id'):
-        artifact = store.revision(gate['artifact_id'], gate['artifact_revision'])
-        result['review'] = review_opinions(artifact)
+        if gate.get('proposal_id'):
+            from .review_proposals import read_review_proposal
+            proposal = read_review_proposal(store, run['id'], gate['proposal_id'])
+            result.update(proposal_id=proposal['id'], review_proposal_id=proposal['id'],
+                review=review_opinions(proposal), changes=proposal['changes'],
+                proposal_stale=proposal['stale'], artifact_revision=proposal['artifact_revision'])
+        else:
+            artifact = store.revision(gate['artifact_id'], gate['artifact_revision'])
+            result['review'] = review_opinions(artifact)
     if gate['type'] == 'clarification':
         suggestions = {q.get('question'): q for q in gate.get('question_suggestions', [])}
         result['questions'] = []
@@ -123,6 +142,29 @@ async def current_prompt(store, pipeline, chat):
     return result
 
 
+def model_prompt(prompt):
+    """Project a lightweight control receipt; preview tables are fetched on demand."""
+    if not prompt or prompt.get('kind') != 'case_result_review':
+        return copy.deepcopy(prompt)
+    value = {key: copy.deepcopy(prompt[key]) for key in (
+        'id', 'kind', 'run_id', 'title', 'message', 'artifact_id', 'artifact_revision',
+        'proposal_id', 'review_proposal_id', 'proposal_stale') if key in prompt}
+    review = prompt.get('review') or {}
+    scope = review.get('scope') or {}
+    value['review'] = {'summary': str(review.get('summary') or '')[:1200],
+        'issue_count': len(review.get('issues') or []),
+        'scope': {key: scope[key] for key in ('all', 'reviewed_count', 'total_count') if key in scope}}
+    counts = {'add': 0, 'update': 0, 'delete': 0}
+    for change in prompt.get('changes') or []:
+        if change.get('op') in counts:
+            counts[change['op']] += 1
+    value['change_counts'] = counts
+    value['details_available'] = bool(value.get('proposal_id'))
+    value['read_hint'] = ('Use read_review_proposal_tool for specific review issues or before/after rows; '
+                          'read_artifact_tool reads the saved cases, which are unchanged until review approval.')
+    return value
+
+
 async def chat_context(store, pipeline, chat, body, prompt):
     artifacts = sorted((a for a in store.list('artifact', chat_id=chat['id']) if a.get('_visible')),
                        key=lambda a: (a.get('created_at', ''), a['id']))
@@ -134,7 +176,7 @@ async def chat_context(store, pipeline, chat, body, prompt):
     for run in runs:
         run['shared_facts_used'] = [{key: fact[key] for key in ('source_id', 'source_version', 'name') if key in fact}
             for fact in run.get('shared_facts_used', []) if fact.get('source_id') in allowed]
-    return {'project_id': chat['project_id'], 'chat_id': chat['id'], 'current_prompt': prompt,
+    return {'project_id': chat['project_id'], 'chat_id': chat['id'], 'current_prompt': model_prompt(prompt),
         'knowledge_selection': {'version': chat.get('_project_knowledge_version', 1),
             'excluded_source_ids': list(chat.get('_excluded_project_source_ids', [])),
             'policy': 'Excluded project facts and earlier assistant answers are not current generation evidence. Explicit historical explanations remain read-only.'},
@@ -154,13 +196,15 @@ async def workspace_state(store, pipeline, chat_id, artifact_id=None):
     """Keep the existing table navigation API without a second workflow controller."""
     from .workspace_coverage import workspace_context
     chat = store.get('chat', chat_id)
+    from .artifact_previews import pending_artifact_preview
+    pending_proposal = pending_artifact_preview(store, chat)
     prompt = await current_prompt(store, pipeline, chat)
     chosen = artifact_id or (prompt or {}).get('artifact_id')
     visible = [a for a in store.list('artifact', chat_id=chat_id) if a.get('_visible') and a['type'] in ('analysis', 'scenarios', 'cases')]
     if not chosen and visible:
         chosen = visible[-1]['id']
     if not chosen:
-        return {'stages': [], 'impact': {'status': 'current', 'affected': [], 'source_ids': []}, 'next_action': {'kind': 'chat'}}
+        return {'pending_proposal': pending_proposal, 'stages': [], 'impact': {'status': 'current', 'affected': [], 'source_ids': []}, 'next_action': {'kind': 'chat'}}
     artifact = store.get('artifact', chosen)
     if artifact['chat_id'] != chat_id:
         raise DomainError('成果不属于当前对话', 403)
@@ -198,7 +242,7 @@ async def workspace_state(store, pipeline, chat_id, artifact_id=None):
     branch_ids = {a['id'] for a in linked.values() if a}
     gate = prompt if prompt and (not prompt.get('artifact_id') or prompt['artifact_id'] in branch_ids) else None
     summary = '上游内容已更新；可以在聊天中继续确认或指定修改范围。' if affected else '成果已保存；确认、修改与继续请在聊天中说明。'
-    return {'artifact_id': chosen, 'stages': stages, 'current_gate': gate,
+    return {'pending_proposal': pending_proposal, 'artifact_id': chosen, 'stages': stages, 'current_gate': gate,
         'impact': {'status': 'pending' if affected or source_ids else 'current', 'summary': summary,
             'affected': affected, 'source_ids': source_ids},
         'next_action': {'kind': 'chat'}, 'context': context}

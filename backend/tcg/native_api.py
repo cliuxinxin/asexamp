@@ -13,6 +13,11 @@ from .storage import public, uid
 
 
 def register_routes(app):
+    @app.get('/api/runs/{run_id}/review-proposals/{proposal_id}')
+    def review_proposal(run_id: str, proposal_id: str):
+        from .review_proposals import read_review_proposal
+        return read_review_proposal(app.state.store, run_id, proposal_id)
+
     @app.get('/api/runs/{run_id}/candidates/{candidate_id}')
     def generation_candidate(run_id: str, candidate_id: str):
         from .generation_candidates import read_candidate

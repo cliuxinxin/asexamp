@@ -3,9 +3,9 @@ import {api,errText} from './api';
 import {TextValue} from './ui';
 import type {Artifact,Json} from './types';
 
-export type ScopeFilter='all'|'missing'|'unlinked'|'pending'|'issues'|'changed'|'excluded';
+export type ScopeFilter='all'|'missing'|'unlinked'|'independent'|'pending'|'issues'|'changed'|'excluded';
 export type ParentRow={artifact_id:string;revision:number;item:Json;evidence?:Json[]};
-export type RowContext={scenario?:ParentRow;requirements:ParentRow[];missing:boolean;pending:Json[];stale:boolean;excluded?:string;assumption:boolean;issues:Json[];changed:boolean;needsReview:boolean;downstream:string[]};
+export type RowContext={scenario?:ParentRow;requirements:ParentRow[];missing:boolean;independent?:string;pending:Json[];stale:boolean;excluded?:string;assumption:boolean;issues:Json[];changed:boolean;needsReview:boolean;downstream:string[]};
 
 // A card owns one request per immutable version. Row expansion and selection never fetch.
 export function useArtifactLineage(artifact:Artifact|undefined,enabled:boolean){
@@ -33,6 +33,7 @@ function exactParent(parent:Json|undefined,id:string|undefined,revision:number|u
 
 export function rowContext(artifact:Artifact,item:Json,workspace?:Json):RowContext{
  const saved=workspace?.lineage_rows?.find((row:Json)=>row.item_id===item.id);
+ const independent=saved?.status==='independent'?(saved.reason||item._independent_origin?.reason||'用户指定独立条目'):undefined;
  let scenario=saved?.scenario??undefined;
  let requirements:ParentRow[]=saved?.requirements??[];
  // Older workspace responses can only supply content when identity AND revision match.
@@ -54,12 +55,13 @@ export function rowContext(artifact:Artifact,item:Json,workspace?:Json):RowConte
  const diff=workspace?.revision_diff??{};
  const changed=[...(diff.added??[]),...(diff.updated??[])].includes(item.id);
  const needsReview=workspace?.review?.changed_item_ids?.includes(item.id)??false;
- return {scenario,requirements,missing:saved?.status==='missing_parent'||(artifact.type==='cases'?!scenario:artifact.type==='scenarios'?requirements.length===0:!coverageRow?.scenario_ids?.length),pending,stale:!!stale,excluded,assumption:item.assumption===true||item.status==='assumption',issues,changed,needsReview,downstream:coverageRow?.[artifact.type==='analysis'?'scenario_ids':'case_ids']??[]};
+ return {scenario,requirements,independent,missing:!independent&&(saved?.status==='missing_parent'||(artifact.type==='cases'?!scenario:artifact.type==='scenarios'?requirements.length===0:!coverageRow?.scenario_ids?.length)),pending,stale:!!stale,excluded,assumption:item.assumption===true||item.status==='assumption',issues,changed,needsReview,downstream:coverageRow?.[artifact.type==='analysis'?'scenario_ids':'case_ids']??[]};
 }
 
 export function matchesScope(context:RowContext,filter:ScopeFilter,kind:string){
  if(filter==='missing')return !context.excluded&&(kind==='scenarios'?context.downstream.length===0:context.missing);
  if(filter==='unlinked')return !context.excluded&&context.missing;
+ if(filter==='independent')return !!context.independent;
  if(filter==='pending')return !!context.pending.length||context.stale;
  if(filter==='issues')return !!context.issues.length||context.needsReview;
  if(filter==='changed')return context.changed;
@@ -74,13 +76,14 @@ export function ArtifactScope({artifact,workspace,filter,onFilter,contexts}:{art
  const pending=rows.filter(row=>matchesScope(row,'pending',artifact.type)).length;
  const issues=rows.filter(row=>matchesScope(row,'issues',artifact.type)).length;
  const changed=rows.filter(row=>row.changed).length;
+ const independent=rows.filter(row=>row.independent).length;
  const scopeName=artifact.type==='analysis'?'需求':artifact.type==='scenarios'?'场景':'用例';
  const missingName=artifact.type==='analysis'?'待补场景':artifact.type==='scenarios'?'待补用例':'未关联';
  const caseBranch=artifact.type==='scenarios'?workspace.related_artifacts?.find((item:Json)=>item.id===workspace.selected_case_artifact_id):undefined;
  return <div className="artifact-inline-scope" aria-label="当前成果范围">
   <span className="muted small-text">本轮范围内 {rows.length-excluded} 条{scopeName}</span>
   <div className="artifact-scope-filters" role="group" aria-label="关联与评审筛选">
-   {([['all',`全部 ${rows.length}`],['missing',`${missingName} ${missing}`],...(artifact.type==='scenarios'&&unlinked?[['unlinked',`未关联需求 ${unlinked}`]]:[]),...(pending?[['pending',`待同步 ${pending}`]]:[]),...(artifact.type==='cases'?[['issues',`有问题 ${issues}`],['changed',`有变化 ${changed}`]]:[]),...(excluded?[['excluded',`已排除 ${excluded}`]]:[])] as [ScopeFilter,string][]).map(([value,label])=><button key={value} className={filter===value?'selected':''} aria-pressed={filter===value} onClick={()=>onFilter(value)}>{label}</button>)}
+   {([['all',`全部 ${rows.length}`],['missing',`${missingName} ${missing}`],...(artifact.type==='scenarios'&&unlinked?[['unlinked',`未关联需求 ${unlinked}`]]:[]),...(independent?[['independent',`N/A ${independent}`]]:[]),...(pending?[['pending',`待同步 ${pending}`]]:[]),...(artifact.type==='cases'?[['issues',`有问题 ${issues}`],['changed',`有变化 ${changed}`]]:[]),...(excluded?[['excluded',`已排除 ${excluded}`]]:[])] as [ScopeFilter,string][]).map(([value,label])=><button key={value} className={filter===value?'selected':''} aria-pressed={filter===value} onClick={()=>onFilter(value)}>{label}</button>)}
   </div>
   {caseBranch&&<small className="muted">关联用例分支：{caseBranch.title} · v{caseBranch.revision}</small>}
  </div>;
@@ -103,7 +106,8 @@ export function ArtifactLineage({context,kind,loading,error}:{context:RowContext
   {kind==='cases'&&context.scenario&&<ParentContent parent={context.scenario} label="主场景"/>}
   {context.requirements.map(parent=><ParentContent key={parent.artifact_id+':'+parent.revision+':'+parent.item.id} parent={parent} label="需求"/>)}
   {context.missing&&<span className="artifact-row-status">{context.scenario||context.requirements.length?'关联不完整':'尚未关联'}</span>}
-  {!context.missing&&kind==='cases'&&!context.requirements.length&&<span className="artifact-row-status">需求尚未关联</span>}
+  {context.independent&&<details className="artifact-row-status independent"><summary>{kind==='cases'&&!context.scenario?'场景 / 需求：N/A':'需求：N/A'}</summary><p>{context.independent}</p></details>}
+  {!context.missing&&!context.independent&&kind==='cases'&&!context.requirements.length&&<span className="artifact-row-status">需求尚未关联</span>}
   <RowStatus context={context}/>
   {kind==='scenarios'&&<small className="muted">{context.downstream.length?`关联用例：${context.downstream.join('、')}`:context.excluded?'本轮已排除':'尚无下游用例'}</small>}
  </div>;

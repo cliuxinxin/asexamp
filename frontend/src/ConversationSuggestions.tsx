@@ -6,13 +6,14 @@ const reviewReplies:Record<string,{label:string;text:string;subject:string}>={
  strategy_review:{label:'确认需求理解并继续',text:'确认当前需求理解并继续流程。',subject:'需求理解'},
  scenario_review:{label:'确认场景并继续',text:'确认当前测试场景并继续流程。',subject:'测试场景'},
  case_draft_review:{label:'确认用例草稿并继续评审',text:'确认当前用例草稿并继续评审。',subject:'用例草稿'},
- case_result_review:{label:'确认评审结果并完成',text:'确认当前用例评审结果并完成流程。',subject:'用例评审结果'},
+ case_result_review:{label:'确认评审建议并修改用例',text:'确认当前评审建议，并按建议修改用例。',subject:'用例评审建议'},
 };
 
 // Quick replies are ordinary chat turns, scoped to the current server prompt.
-export function ConversationSuggestions({prompt,disabled=false,onChoose,onViewProfileChange}:{prompt?:ConversationPrompt|null;disabled?:boolean;onChoose:(text:string,kind?:ReplyKind)=>void;onViewProfileChange?:()=>void}){
+export function ConversationSuggestions({prompt,disabled=false,onChoose,onViewProfileChange,onViewArtifactChange,hasArtifactPreview=false}:{prompt?:ConversationPrompt|null;disabled?:boolean;onChoose:(text:string,kind?:ReplyKind)=>void;onViewProfileChange?:()=>void;onViewArtifactChange?:()=>void;hasArtifactPreview?:boolean}){
  if(!prompt||prompt.busy||prompt.kind==='busy')return null;
- if(prompt.kind==='profile')return onViewProfileChange?<div className="conversation-suggestions" role="group" aria-label="快捷回复" aria-busy={disabled||undefined}><span className="suggestions-hint">点击查看更改，勾选后再确认应用 · 输入框草稿会保留</span><div className="suggestion-group"><span className="suggestions-label">模板建议</span><button type="button" disabled={disabled} onClick={()=>{if(!disabled)onViewProfileChange();}}>查看 Profile 更改</button></div></div>:null;
+ if(prompt.kind==='profile')return onViewProfileChange?<div className="conversation-suggestions" role="group" aria-label="快捷回复" aria-busy={disabled||undefined}><span className="suggestions-hint">点击查看更改，勾选后再确认应用 · 输入框草稿会保留</span><div className="suggestion-group"><span className="suggestions-label">模板建议</span><button type="button" disabled={disabled} onClick={()=>{if(!disabled)onViewProfileChange();}}>查看 Profile 更改</button></div>{hasArtifactPreview&&onViewArtifactChange&&<div className="suggestion-group"><span className="suggestions-label">成果修改</span><button type="button" disabled={disabled} onClick={onViewArtifactChange}>查看修改预览</button></div>}</div>:null;
+ if(prompt.kind==='artifact_proposal')return onViewArtifactChange?<div className="conversation-suggestions" role="group" aria-label="快捷回复" aria-busy={disabled||undefined}><span className="suggestions-hint">修改建议已准备好 · 查看差异后确认应用，也可以直接在对话中回复</span><div className="suggestion-group"><span className="suggestions-label">成果修改</span><button type="button" disabled={disabled||!hasArtifactPreview} onClick={()=>{if(!disabled&&hasArtifactPreview)onViewArtifactChange();}}>查看修改预览</button></div></div>:null;
  const unanswered=(prompt.questions??[]).filter(question=>!question.answer?.trim());
  const answerPrefix='仅提交以下澄清答案并更新需求理解，不确认需求理解。';
  const questions:Reply[]=prompt.kind==='clarification'?unanswered.filter(question=>question.suggestion?.trim()).map(question=>({
@@ -36,5 +37,5 @@ export function ConversationSuggestions({prompt,disabled=false,onChoose,onViewPr
   else if(prompt.kind==='failed'&&prompt.message.includes('重试当前步骤'))groups.push({label:'恢复流程',replies:[{id:'retry',label:'重试当前步骤',text:'重试当前步骤'}]});
  }
  if(!groups.length)return null;
- return <div className="conversation-suggestions" role="group" aria-label="快捷回复" aria-busy={disabled||undefined}><span className="suggestions-hint">点击即发送 · 输入框草稿会保留</span>{groups.map(group=><div className="suggestion-group" role="group" aria-label={group.label} key={group.label}><span className="suggestions-label">{group.label}</span>{group.replies.map(reply=><button key={reply.id} type="button" disabled={disabled} aria-label={reply.label} title={reply.label} onClick={()=>{if(!disabled)onChoose(reply.text,reply.kind);}}>{reply.label}</button>)}</div>)}</div>;
+ return <div className="conversation-suggestions" role="group" aria-label="快捷回复" aria-busy={disabled||undefined}><span className="suggestions-hint">点击即发送 · 输入框草稿会保留</span>{hasArtifactPreview&&onViewArtifactChange&&<div className="suggestion-group"><span className="suggestions-label">修改建议</span><button type="button" disabled={disabled} onClick={onViewArtifactChange}>查看修改预览</button></div>}{groups.map(group=><div className="suggestion-group" role="group" aria-label={group.label} key={group.label}><span className="suggestions-label">{group.label}</span>{group.replies.map(reply=><button key={reply.id} type="button" disabled={disabled} aria-label={reply.label} title={reply.label} onClick={()=>{if(!disabled)onChoose(reply.text,reply.kind);}}>{reply.label}</button>)}</div>)}</div>;
 }

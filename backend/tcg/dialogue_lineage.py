@@ -1,15 +1,8 @@
-"""Stage exact human evidence and explicit organizational parents for an edit.
-
-Nothing here infers business rules. Proposed parents quote the human message and
-are displayed in the same diff as the requested rows. Sources and all revisions
-become live together only when that proposal is approved.
-"""
+"""Stage exact human evidence and an independent target-only edit preview."""
 import copy
 
 from . import dependencies as deps
-from .analysis_diagrams import complete_analysis_diagrams
 from .schemas import DomainError
-from .storage import now
 
 
 def _scope(value, artifact):
@@ -60,7 +53,43 @@ def link_report(report, kind, parents, used_parent_ids=(), used_requirement_ids=
     return result
 
 
+def normalize_independent_rows(kind, items, existing, reason, *, authorized_ids=None,
+                               allow_new=False, source_id=None, force=False):
+    """Canonicalize explicit N/A edits while rejecting an AI's accidental unlink.
+
+    A manual table edit authorizes the empty cells it submits (authorized_ids=None).
+    Model callers must supply the exact selected IDs or allow_new for an explicit add.
+    Server markers from a model/client are discarded; saved markers are preserved.
+    """
+    if kind not in ('scenarios', 'cases'):
+        return copy.deepcopy(items)
+    field, empty = ('requirement_ids', []) if kind == 'scenarios' else ('scenario_id', '')
+    previous = {row['id']: row for row in existing}
+    allowed = None if authorized_ids is None else set(authorized_ids)
+    output = copy.deepcopy(items)
+    for row in output:
+        if not isinstance(row, dict):
+            continue
+        old = previous.get(row.get('id'))
+        row.pop('_independent_origin', None)
+        authorized = allowed is None or row.get('id') in allowed or (old is None and allow_new)
+        if force and authorized:
+            row[field] = copy.deepcopy(empty)
+        if row.get(field) != empty:
+            continue
+        if old and old.get(field) == empty and old.get('_independent_origin'):
+            row['_independent_origin'] = copy.deepcopy(old['_independent_origin'])
+        elif authorized:
+            row['_independent_origin'] = {'reason': reason or '用户明确设置为 N/A'}
+            if source_id:
+                row['_independent_origin']['source_id'] = source_id
+        elif old is None or old.get(field) != empty:
+            raise DomainError('修改意外移除了上游关联；仅在用户明确要求 N/A 或独立新增时才能解除关联')
+    return output
+
+
 def prepare_dialogue(store, artifact, content, *, add=False, parent_id=None):
+    """Stage exact human evidence; never create or mutate upstream artifacts."""
     if not isinstance(content, str) or not content.strip():
         raise DomainError('请在当前消息中说明需要增加或补充的业务内容')
     identity = deps.digest({'artifact_id': artifact['id'], 'revision': artifact['revision'], 'content': content})[:24]
@@ -70,86 +99,36 @@ def prepare_dialogue(store, artifact, content, *, add=False, parent_id=None):
         'project_id': artifact['project_id'], 'role': 'supplement', **chunk}
     source = {'id': sid, 'chat_id': artifact['chat_id'], 'project_id': artifact['project_id'],
         'name': '对话补充事实', 'content': content, 'chunks': [chunk]}
-    parents, originals, changes = {}, {}, []
     lineage = artifact.get('report', {}).get('lineage', {})
-
-    def resolve(kind, preferred=None):
-        if kind in parents:
-            return parents[kind]
-        key = 'analysis_artifact_id' if kind == 'analysis' else 'scenario_artifact_id'
-        aid = preferred or lineage.get(key)
-        if aid:
-            value = _scope(store.get('artifact', aid), artifact)
+    parents = []
+    for kind, key in (('analysis', 'analysis_artifact_id'), ('scenarios', 'scenario_artifact_id')):
+        if lineage.get(key):
+            value = _scope(store.get('artifact', lineage[key]), artifact)
             if value['type'] != kind:
                 raise DomainError('上游成果类型不正确')
-        else:
-            matches = [a for a in store.list('artifact', chat_id=artifact['chat_id'])
-                       if a['type'] == kind and a.get('_visible') and a['project_id'] == artifact['project_id']]
-            if len(matches) > 1:
-                raise DomainError('存在多份' + ('需求理解' if kind == 'analysis' else '场景') + '成果，请先明确要关联的成果')
-            value = matches[0] if matches else None
-        if value:
-            originals[value['id']] = value
-            parents[kind] = copy.deepcopy(value)
-        else:
-            parents[kind] = {'id': 'art_dialogue_' + kind + '_' + identity, 'type': kind,
-                'title': '对话补充需求' if kind == 'analysis' else '对话补充场景',
-                'chat_id': artifact['chat_id'], 'project_id': artifact['project_id'],
-                'revision': 0, 'items': [], 'report': {'summary': '用户对话补充的关联记录。'},
-                '_source_ids': [], '_source_roles': {}, '_profile': copy.deepcopy(artifact.get('_profile', {})),
-                '_visible': True, '_runtime': 'native', 'created_at': now()}
-        return parents[kind]
-
-    def append(kind, row):
-        parent = parents[kind]
-        before = copy.deepcopy(parent)
-        parent['items'].append(row)
-        parent['revision'] += 1
-        if kind == 'analysis':
-            complete_analysis_diagrams(parent['report'], parent['items'], previous=before, whole_response=False)
-        else:
-            parent['report'] = link_report(parent['report'], kind, [parents['analysis']], row['requirement_ids'],
-                existing_items=before['items'], new_item_ids=[row['id']])
-        changes.append({'artifact_id': parent['id'], 'base_revision': before['revision'],
-                        'before': before, 'value': copy.deepcopy(parent)})
-
+            parents.append(value)
     selected_parent = None
-    if artifact['type'] == 'cases':
-        scenario = resolve('scenarios')
-        analysis_id = scenario.get('report', {}).get('lineage', {}).get('analysis_artifact_id') or lineage.get('analysis_artifact_id')
-        if analysis_id:
-            resolve('analysis', analysis_id)
-    elif artifact['type'] == 'scenarios':
-        resolve('analysis')
-    if add and artifact['type'] in ('scenarios', 'cases'):
+    if parent_id and artifact['type'] in ('scenarios', 'cases'):
         kind = 'analysis' if artifact['type'] == 'scenarios' else 'scenarios'
-        parent = parents[kind]
-        if parent_id:
-            if parent_id not in {r['id'] for r in parent['items']}:
-                raise DomainError('指定的上游条目不存在，请提供当前需求或场景编号')
-            selected_parent = parent_id
-        else:
-            resolve('analysis')
-            rid = 'REQ-DIALOGUE-' + identity
-            marker = {'source_id': sid, 'kind': 'dialogue_supplement', 'label': '用户对话补充'}
-            append('analysis', {'id': rid, 'title': '对话补充需求', 'description': content,
-                'refs': [evidence['id']], '_dialogue_origin': marker})
-            selected_parent = rid
-            if artifact['type'] == 'cases':
-                selected_parent = 'SC-DIALOGUE-' + identity
-                append('scenarios', {'id': selected_parent, 'title': '对话补充场景', 'description': content,
-                    'priority': '', 'requirement_ids': [rid], 'refs': [evidence['id']], '_dialogue_origin': marker})
-    # An unused empty draft must not turn into a phantom parent for a plain edit.
-    kept = [p for p in parents.values() if p['revision'] > 0]
+        linked = [parent for parent in parents if parent['type'] == kind]
+        candidates = linked or [parent for parent in store.list('artifact', chat_id=artifact['chat_id'])
+            if parent['type'] == kind and parent.get('_visible') and parent['project_id'] == artifact['project_id']]
+        matches = [parent for parent in candidates if parent_id in {row['id'] for row in parent['items']}]
+        if len(matches) != 1:
+            raise DomainError('指定的上游条目不存在或不唯一，请提供当前需求或场景编号')
+        selected_parent = parent_id
+        if not linked:
+            parents.append(matches[0])
     legacy = copy.deepcopy(artifact.get('report', {}).get('_legacy_unlinked_cases', {}))
     if artifact['type'] == 'cases' and not lineage.get('scenario_artifact_id'):
-        actual = {r['id'] for p in kept if p['type'] == 'scenarios' for r in p['items']}
+        actual = {r['id'] for parent in parents if parent['type'] == 'scenarios' for r in parent['items']}
         legacy.update({r['id']: r['scenario_id'] for r in artifact['items'] if r['scenario_id'] not in actual})
-    for parent in kept:
+    originals = copy.deepcopy(parents)
+    for parent in parents:
         if parent['type'] == 'scenarios' and legacy:
             parent['_legacy_unlinked_cases'] = legacy
-    return {'source': source, 'evidence': [evidence], 'parents': kept,
-            'original_parents': list(originals.values()), 'parent_changes': changes,
+    return {'source': source, 'evidence': [evidence], 'parents': parents,
+            'original_parents': originals, 'parent_changes': [],
             'addition_parent_id': selected_parent, 'add': add, 'legacy_unlinked_cases': legacy}
 
 
@@ -165,11 +144,13 @@ def preview_changes(proposal, artifact):
 
 
 def commit_dialogue(service, proposal):
-    """One transaction makes source, implicit parents and target revision visible."""
-    from .operations import _save, native_writes
+    """Publish the source and target revision atomically; upstream stays read-only."""
+    from .operations import native_writes
     store = service.store
     bundle = proposal['dialogue']
     draft = bundle['source']
+    if bundle.get('parent_changes'):
+        raise DomainError('旧修改预览包含自动上游修改，请重新准备仅修改当前成果的预览', 409)
     with store.transaction(), native_writes():
         artifact = store.get('artifact', proposal['artifact_id'])
         if (artifact['chat_id'], artifact['project_id']) != (draft['chat_id'], draft['project_id']):
@@ -177,33 +158,8 @@ def commit_dialogue(service, proposal):
         deps.assert_manifest(store, proposal['dependencies'])
         if artifact['revision'] != proposal['base_revision']:
             raise DomainError('成果已改变，请重新查看修改预览', 409)
-        for change in bundle['parent_changes']:
-            _scope(change['value'], artifact)
-            if change['base_revision'] == 0:
-                if any(a['id'] == change['artifact_id'] for a in store.list('artifact')):
-                    raise DomainError('对话补充父节点已存在，请重新查看预览', 409)
-            elif store.get('artifact', change['artifact_id'])['revision'] != change['base_revision']:
-                raise DomainError('上游成果已改变，请重新查看修改预览', 409)
         store.add_source(draft['chat_id'], draft['name'], 'supplement', draft['content'],
                          draft['chunks'], source_id=draft['id'])
-        for change in bundle['parent_changes']:
-            value = change['value']
-            source_ids = list(dict.fromkeys(value.get('_source_ids', []) + [draft['id']]))
-            roles = {**value.get('_source_roles', {}), draft['id']: 'supplement'}
-            evidence = store.evidence(source_ids, roles)
-            current_parents = [store.get('artifact', p['id']) for p in bundle['parents']
-                               if p['type'] == 'analysis' and value['type'] == 'scenarios']
-            service._validate(value['type'], value['items'], evidence, current_parents, value.get('_profile'))
-            guard = service._manifest(source_ids, current_parents)
-            if change['base_revision']:
-                store.revise_artifact(value['id'], change['base_revision'], value['items'],
-                    reason='native_dialogue_parent', report=value['report'], source_ids=source_ids,
-                    source_roles=roles, dependencies=guard, provenance=guard)
-            else:
-                value = {**value, '_source_ids': source_ids, '_source_roles': roles,
-                         '_dependencies': guard, '_write_dependencies': guard}
-                _save(store, value, 'native_dialogue_parent',
-                      {'added': [r['id'] for r in value['items']], 'updated': [], 'deleted': []}, None, None)
         sources = list(dict.fromkeys(proposal['source_ids'] + [draft['id']]))
         roles = {**proposal['source_roles'], draft['id']: 'supplement'}
         parents = [_scope(store.get('artifact', p['id']), artifact) for p in bundle['parents']]
@@ -217,5 +173,5 @@ def commit_dialogue(service, proposal):
             reason='native_dialogue_edit', report=proposal['report'], source_ids=sources, source_roles=roles,
             dependencies=guard, provenance=guard)
         store.audit(artifact['id'], 'dialogue_supplement_applied', {'source_id': draft['id'],
-            'parent_artifact_ids': [c['artifact_id'] for c in bundle['parent_changes']]})
+            'parent_artifact_ids': []})
         return result

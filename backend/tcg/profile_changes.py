@@ -66,6 +66,8 @@ def _proposal(store, chat_id, prompt_id):
         else:
             config, _ = merge_template_config(config, suggestion['config'], suggestion['template_kinds'])
         templates.append(suggestion)
+    from .case_columns import validate_case_binding
+    validate_case_binding(store, chat, pending, config)
     changes = config_changes(current['config'], config)
     summary = '\n'.join(dict.fromkeys(str(t.get('summary', '')).strip() for t in templates if t.get('summary')))
     preview = {'prompt_id': pending['id'], 'profile_id': current['id'], 'profile_name': current['name'],
@@ -102,10 +104,14 @@ def apply_profile_change(store, chat_id, prompt_id, expected_version, selected_k
         for suggestion in templates:
             store.put('template', {**suggestion, '_applied': True, '_applied_keys': keys,
                 '_skipped_keys': skipped, '_applied_profile_version': updated['version']})
+        from .case_columns import complete_deferred_export
+        parts = complete_deferred_export(store, chat, chat['_native_template_prompt'], updated, keys)
         store.put('chat', {**chat, 'profile_id': updated['id'], '_native_template_prompt': None})
         labels = '、'.join(available[key]['label'] for key in keys)
         message = f'已应用 {len(keys)} 项 Profile 更改：{labels}。' + (
             f'其余 {len(skipped)} 项保留原配置。' if skipped else '') + '当前成果可按最新 Profile 导出，后续新任务使用此 Profile。'
+        if parts:
+            message += '已按确认后的列自动导出本次修改的用例。'
         audit = {'prompt_id': prompt_id, 'profile_id': current['id'], 'template_ids': preview['template_ids'],
             'base_version': current['version'], 'version': updated['version'],
             'selected_keys': keys, 'skipped_keys': skipped}
@@ -117,5 +123,7 @@ def apply_profile_change(store, chat_id, prompt_id, expected_version, selected_k
                 store.put('message', {'id': confirmation_id + ':' + role, 'chat_id': chat_id,
                     'project_id': chat['project_id'], 'role': role, 'content': content,
                     'created_at': created_at if role == 'user' else now(),
-                    'metadata': {'profile_confirmation': audit}})
-        return {'status': 'succeeded', 'profile': public(updated), 'message': message}
+                    'metadata': {'profile_confirmation': audit, **({'turn_response': {
+                        'status': 'succeeded', 'message': message, 'parts': parts, 'pending': []}}
+                        if role == 'assistant' and parts else {})}})
+        return {'status': 'succeeded', 'profile': public(updated), 'message': message, 'parts': parts}

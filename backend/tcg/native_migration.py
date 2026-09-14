@@ -121,7 +121,7 @@ async def migrate_legacy_runs(store, pipeline):
     """Return one outcome per upgraded or safely stopped legacy active run."""
     outcomes = []
     for original in store.runs():
-        if original.get('graph_version') == 8 or original.get('migration'):
+        if original.get('graph_version') in (8, 9) or original.get('migration'):
             continue
         run = copy.deepcopy(original)
         previous = {'from_graph_version': run.get('graph_version'), 'from_stage': run.get('stage')}

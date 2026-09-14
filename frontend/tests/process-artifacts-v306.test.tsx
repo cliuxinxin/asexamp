@@ -60,7 +60,7 @@ test('one viewer switches understanding, scenarios, draft and review without app
  assert.ok(within(viewer).getByRole('button',{name:'导出 Excel'}));
  fireEvent.click(within(viewer).getByRole('button',{name:'返回对话'}));
  assert.equal((screen.getByLabelText('聊天输入') as HTMLTextAreaElement).value,'尚未发送的补充意见');
- fireEvent.click(screen.getByRole('button',{name:'确认评审结果并完成'}));
+ fireEvent.click(screen.getByRole('button',{name:'确认评审建议并修改用例'}));
  await waitFor(()=>assert.equal(calls.filter(call=>call.path==='/chats/chat/turns').length,1));
  assert.equal(calls.find(call=>call.path==='/chats/chat/turns')!.body.reply_to,prompt.id);
 });

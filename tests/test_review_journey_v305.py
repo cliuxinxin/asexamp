@@ -39,6 +39,8 @@ def test_human_review_exposes_opinions_and_comments_require_fresh_confirmation(n
     async def model(task, context, schema, instruction):
         result = await generate(task, context, schema, instruction)
         if task == 'review_cases':
+            if context.get('review_feedback'):
+                result['items'][0]['steps'][0]['expected'] = feedback
             review_inputs.append(copy.deepcopy(context['cases']))
             result['report']['issues'] = [{'title': '预期结果需明确',
                 'detail': '请确认成功登录后应展示的页面。',
@@ -47,7 +49,7 @@ def test_human_review_exposes_opinions_and_comments_require_fresh_confirmation(n
 
     j.gateway.generate_native = model
     j.turn('根据上传需求生成测试用例，每一步等我确认。', 'start_pipeline_tool')
-    for kind in ('strategy_review', 'scenario_review', 'case_draft_review'):
+    for kind in ('strategy_review', 'scenario_review'):
         run, artifact, prompt = j.gate(kind)
         j.turn('同意，继续', 'resume_pipeline_tool', {'run_id': run['id']}, reply=prompt)
     run, reviewed, prompt = j.gate('case_result_review')
@@ -62,19 +64,12 @@ def test_human_review_exposes_opinions_and_comments_require_fresh_confirmation(n
            {'artifact_id': reviewed['id'], 'instruction': '解释步骤和预期'}, reply=prompt)
     assert j.gate('case_result_review')[2]['id'] == prompt['id']
 
-    j.turn('我的补充意见：预期写明登录成功并显示首页，先修改，不要完成。',
-           'modify_artifact_tool', {'artifact_id': reviewed['id'], 'item_id': 'TC-1',
-            'new_values': {'steps': [{'action': '输入有效账号密码并登录', 'expected': feedback}]}},
-           reply=prompt)
-    run, changed, changed_prompt = j.gate('case_draft_review')
-    assert changed['revision'] == reviewed['revision'] + 1
-    assert changed['items'][0]['steps'][0]['expected'] == feedback
-    assert 'review' not in changed_prompt
-    assert j.counts()['review_cases'] == 1
-    j.turn('确认修改后的草稿，继续评审。', 'resume_pipeline_tool',
-           {'run_id': run['id']}, reply=changed_prompt)
+    j.turn('我的补充意见：预期写明登录成功并显示首页，先更新建议，不要修改用例。',
+           'revise_review_tool', {'run_id': run['id'], 'feedback': feedback}, reply=prompt)
     run, rereviewed, fresh_prompt = j.gate('case_result_review')
-    assert review_inputs[-1][0]['steps'][0]['expected'] == feedback
+    assert rereviewed == reviewed
+    assert review_inputs[-1][0]['steps'] == reviewed['items'][0]['steps']
+    assert fresh_prompt['changes'][0]['after']['steps'][0]['expected'] == feedback
     assert fresh_prompt['id'] != prompt['id']
     assert fresh_prompt['artifact_revision'] == rereviewed['revision']
     assert run['status'] == 'waiting'
@@ -82,3 +77,6 @@ def test_human_review_exposes_opinions_and_comments_require_fresh_confirmation(n
                           'generate_cases': 1, 'review_cases': 2, 'explain_artifact': 1}
     j.turn('评审结果确认，完成。', 'resume_pipeline_tool', {'run_id': run['id']}, reply=fresh_prompt)
     assert j.completed()['id'] == run['id']
+    final = j.artifact(reviewed['id'])
+    assert final['revision'] == reviewed['revision'] + 1
+    assert final['items'][0]['steps'][0]['expected'] == feedback

@@ -54,9 +54,18 @@ class Business:
             'scenario_id': 'S1', 'type': 'Business', 'priority': 'P1', 'preconditions': '',
             'steps': [{'action': '登录', 'expected': '成功'}], 'refs': [self.ref(run)]}])
 
-    async def review(self, run, cases):
+    async def propose_review(self, run, cases, feedback=''):
+        from tcg.dependencies import manifest
+        from tcg.review_proposals import save_review_proposal
         self.calls.append(('review', cases['items'][0]['title']))
-        return self.store.revise_artifact(cases['id'], cases['revision'], cases['items'], report={'summary': '已检查'})
+        report = {'review_reports': [{'summary': '已检查', 'issues': []}]}
+        return save_review_proposal(self.store, run, cases, cases['items'], report,
+            manifest(self.store, artifact_ids=[cases['id']], source_ids=run['_source_ids']),
+            run['_source_ids'], run.get('_source_roles', {}), feedback)
+
+    def apply_review_proposal(self, run, proposal_id):
+        from tcg.native_business import NativeBusiness
+        return NativeBusiness(self.store, None).apply_review_proposal(run, proposal_id)
 
 
 def setup(tmp_path, **business_options):
@@ -88,7 +97,7 @@ async def agree(runtime, run):
 
 
 @pytest.mark.asyncio
-async def test_native_four_gates_and_edit_survive_restart(tmp_path):
+async def test_native_three_gates_and_edit_survive_restart(tmp_path):
     store, chat, first_business, runtime = setup(tmp_path)
     await runtime.start()
     run = await runtime.start_run(chat['id'], {'mode': 'hitp'})
@@ -120,11 +129,9 @@ async def test_native_four_gates_and_edit_survive_restart(tmp_path):
     recovered = await runtime.snapshot(run['id'])
     assert recovered['interrupt'] == run['interrupt']
     assert second_business.calls == []
-    draft = await agree(runtime, recovered)
-    assert draft['interrupt']['type'] == 'case_draft_review'
-    assert second_business.calls == [('cases', '暂停期间修改后的场景')]
-    reviewed = await agree(runtime, draft)
+    reviewed = await agree(runtime, recovered)
     assert reviewed['interrupt']['type'] == 'case_result_review'
+    assert second_business.calls[0] == ('cases', '暂停期间修改后的场景')
     final = await agree(runtime, reviewed)
     assert final['status'] == 'completed'
     assert [c[0] for c in first_business.calls] == ['understand', 'scenarios']
@@ -140,20 +147,20 @@ async def test_upstream_edit_rewinds_native_gate_and_preserves_confirmation_orde
     run = await settled(runtime, (await runtime.start_run(chat['id'], {'mode': 'hitp'}))['id'])
     analysis = store.get('artifact', run['interrupt']['artifact_id'])
     run = await agree(runtime, await agree(runtime, run))
-    assert run['interrupt']['type'] == 'case_draft_review'
+    assert run['interrupt']['type'] == 'case_result_review'
     items = copy.deepcopy(analysis['items'])
     items[0]['title'] = '补充白名单后的登录需求'
     async with runtime.edit_session(chat['id']):
         await runtime.on_artifact_changed(store.revise_artifact(analysis['id'], analysis['revision'], items))
     run = await runtime.snapshot(run['id'])
     assert run['interrupt']['type'] == 'strategy_review'
-    assert [c[0] for c in business.calls] == ['understand', 'scenarios', 'cases']
+    assert [c[0] for c in business.calls] == ['understand', 'scenarios', 'cases', 'review']
     run = await agree(runtime, run)
     assert run['interrupt']['type'] == 'scenario_review'
     assert business.calls[-1] == ('scenarios', '补充白名单后的登录需求')
     run = await agree(runtime, run)
-    assert run['interrupt']['type'] == 'case_draft_review'
-    assert business.calls[-1] == ('cases', '补充白名单后的登录需求场景')
+    assert run['interrupt']['type'] == 'case_result_review'
+    assert business.calls[-2] == ('cases', '补充白名单后的登录需求场景')
     await runtime.stop()
     store.close()
 
@@ -218,7 +225,7 @@ async def test_completed_task_can_reenter_the_same_flow_after_supplement_edit(tm
     await runtime.start()
     run = await settled(runtime, (await runtime.start_run(chat['id'], {'mode': 'hitp'}))['id'])
     analysis = store.get('artifact', run['interrupt']['artifact_id'])
-    for _ in range(4):
+    for _ in range(3):
         run = await agree(runtime, run)
     assert run['status'] == 'completed'
     assert len(business.calls) == 4
@@ -241,7 +248,7 @@ async def test_completed_task_can_reenter_the_same_flow_after_supplement_edit(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('kind', 'intent', 'called', 'gate'), [
     ('analysis', 'generate_scenario', 'scenarios', 'scenario_review'),
-    ('scenarios', 'generate_case', 'cases', 'case_draft_review'),
+    ('scenarios', 'generate_case', 'cases', 'case_result_review'),
     ('cases', 'review_case', 'review', 'case_result_review'),
 ])
 async def test_start_from_existing_artifact_only_executes_requested_downstream_stage(tmp_path, kind, intent, called, gate):
@@ -259,14 +266,14 @@ async def test_start_from_existing_artifact_only_executes_requested_downstream_s
     started = await runtime.start_run(chat['id'], {'mode': 'hitp', 'intent': intent, 'artifact_id': source['id']})
     current = await settled(runtime, started['id'])
     assert current['interrupt']['type'] == gate
-    assert [call[0] for call in business.calls[previous_calls:]] == [called]
+    assert [call[0] for call in business.calls[previous_calls:]] == ([called, 'review'] if called == 'cases' else [called])
     state = await runtime.graph.aget_state(runtime._config(current['id']))
     assert state.values[{'analysis': 'analysis_ref', 'scenarios': 'scenario_ref', 'cases': 'cases_ref'}[kind]] == source['id']
     assert source['id'] in current['artifact_ids']
     assert current['start_context']['artifact_id'] == source['id']
     if kind == 'cases':
         assert current['interrupt']['artifact_id'] == source['id']
-        assert store.get('artifact', source['id'])['revision'] == source['revision'] + 1
+        assert store.get('artifact', source['id'])['revision'] == source['revision']
     else:
         assert store.get('artifact', source['id'])['revision'] == source['revision']
         assert current['interrupt']['artifact_id'] != artifacts['cases' if kind == 'scenarios' else 'scenarios']['id']
@@ -385,13 +392,13 @@ async def test_native_pipeline_emits_canonical_lifecycle_once_across_snapshot_po
         await runtime.snapshot(run['id'])
         assert len([event for event in store.events(run['id']) if event['kind'] == 'progress']) == before
 
-        for _ in range(4):
+        for _ in range(3):
             run = await agree(runtime, run)
         events = [event['data'] for event in store.events(run['id']) if event['kind'] == 'progress']
         starts = [event['node'] for event in events if event['event'] == 'node.start']
         completes = [event['node'] for event in events if event['event'] == 'node.complete']
-        assert starts == completes == ['understand', 'scenarios', 'cases', 'review']
-        assert sum(event['event'] == 'run.resumed' for event in events) == 4
+        assert starts == completes == ['understand', 'scenarios', 'cases', 'review', 'apply_review']
+        assert sum(event['event'] == 'run.resumed' for event in events) == 3
         assert sum(event['event'] == 'run.completed' for event in events) == 1
         terminal_count = len(events)
         await runtime.snapshot(run['id'])

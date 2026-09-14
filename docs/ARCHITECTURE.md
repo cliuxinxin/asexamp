@@ -15,6 +15,9 @@
 | `native_views.py`、`artifact_read.py` | 当前阶段与成果的读取投影；不建立另一套流程状态机。 |
 | `documents.py`、`project_context.py`、`project_facts.py` | 文件解析、项目知识、本会话采用范围及来源。 |
 | `profile_edits.py`、`profile_changes.py`、`field_drift.py` | 模板差异建议、确认应用、用例字段与导出列同步。 |
+| `review_proposals.py`、`artifact_previews.py` | 绑定成果版本的评审/修改建议，确认前不修改正式用例；输入框上方预览入口。 |
+| `case_columns.py`、`manual_edits.py` | 用例列计划、手动修改证据、Profile 确认与延迟导出。 |
+| `ArtifactChangeDialog.tsx`、`TableItemEditor.tsx` | 字段差异预览、可编辑场景/用例表格、步骤和预期配对。 |
 | `ArtifactCard.tsx`、`AnalysisReport.tsx`、`ConversationParts.tsx` | 成果表格、业务图、来源与对话内附件。 |
 | `ProfileChangeDialog.tsx`、`MemoryDialog.tsx` | Profile 更改确认、项目知识查看与本会话开关。 |
 | `tests/`、`frontend/tests/` | 当前接口、流程及组件验证；不包含已废弃控制器的历史测试。 |
@@ -24,3 +27,7 @@
 聊天上下文通常使用当前状态、近期消息和资料目录，按需读取正文；生成节点使用当前阶段的父成果及关联证据。服务器拒绝可拆分批次的容量后才拆分，不预设本地上下文上限。
 
 `frontend/dist/` 是可直接启动所需的构建文件，`frontend/node_modules/` 是本机依赖。`.rgignore` 让默认代码搜索跳过这些生成目录和业务数据；源码、当前测试及配置仍参与搜索。旧版本设计文档、旧测试归档和已脱离入口的 UI 组件已清理，历史可从 Git 或先前发行包恢复。
+
+Human 正常顺序：理解 → 确认理解 → 场景 → 确认场景 → 用例 → 评审建议 → 确认建议 → 应用用例修改。Auto 使用相同建议和提交逻辑自动应用。显式只要草稿或暂停仍保留。评审建议通过 `review_ref` 指针持久化，聊天上下文只载入摘要与编号，详情通过工具按需读取。
+
+独立场景使用 `requirement_ids=[]`，独立用例使用空 `scenario_id`，内部保存经过授权的独立修改说明和真实输入来源。有效父关联正常保留；未知非空父 ID 仍报错。用例导出请求绑定已保存的用例版本及待确认的 Profile 建议，版本过期时不输出旧文件。

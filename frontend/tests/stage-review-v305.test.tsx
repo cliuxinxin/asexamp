@@ -68,10 +68,10 @@ test('review gate opens opinions in the conversation and keeps confirmation expl
  assert.ok(screen.getByText(/直接在输入框中补充意见/));
  assert.equal(screen.queryByRole('dialog'),null);
  assert.equal(turns.length,0);
- assert.ok(screen.getByRole('region',{name:'当前工作流'}).textContent?.includes('确认评审结果'));
+ assert.ok(screen.getByRole('region',{name:'当前工作流'}).textContent?.includes('确认评审建议'));
  const input=screen.getByLabelText('聊天输入') as HTMLTextAreaElement;
  fireEvent.change(input,{target:{value:'保留我的草稿'}});
- fireEvent.click(screen.getByRole('button',{name:'确认评审结果并完成'}));
+ fireEvent.click(screen.getByRole('button',{name:'确认评审建议并修改用例'}));
  await waitFor(()=>assert.equal(turns.length,1));
  assert.equal(turns[0].reply_kind,'confirm');assert.equal(turns[0].reply_to,gate.id);
  assert.equal(input.value,'保留我的草稿');

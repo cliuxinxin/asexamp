@@ -155,7 +155,8 @@ async def test_one_turn_cannot_approve_two_gates_or_changed_result(setup):
     tools = setup.make()
     edited = await tools['modify_artifact_tool'].ainvoke({'artifact_id': 'scenarios', 'item_id': 'S2',
                                                           'new_values': {'title': '新的场景标题'}})
-    assert edited['status'] == 'succeeded'
+    assert edited['status'] == 'needs_confirmation'
+    assert not [call for call in setup.pipeline.calls if call[0] == 'changed']
     stale = await tools['resume_pipeline_tool'].ainvoke({})
     assert stale['status'] == 'needs_input'
     assert len([c for c in setup.pipeline.calls if c[0] == 'resume']) == 1
@@ -293,8 +294,8 @@ async def test_explicit_template_ids_cannot_bypass_the_presented_pipeline_confir
     rejected = await tools['apply_profile_tool'].ainvoke({'template_ids': ids, 'profile_id': setup.profile['id']})
     assert rejected['status'] == 'needs_input'
     assert setup.store.get('profile', setup.profile['id'])['version'] == 1
-    assert (await tools['resume_pipeline_tool'].ainvoke({}))['status'] == 'succeeded'
-    assert len(setup.pipeline.calls) == 1
+    assert (await tools['resume_pipeline_tool'].ainvoke({}))['status'] == 'needs_input'
+    assert not setup.pipeline.calls
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ from .clarification import pending_questions, question_key, submitted_answers
 from .generation_repair import GenerationRepairExhausted, repair_submission
 from .native_schemas import ANSWER_SCHEMA, ESTIMATE_SCHEMA, completion_schema, rows_schema
 from .reference_repair import repair_reference_fields
-from .schemas import DomainError, validate_items
+from .schemas import DomainError, independent_item, validate_items
 from .server_capacity import ContextCapacityError
 
 
@@ -40,6 +40,15 @@ def _rows_digest(rows):
 def _global_rules(artifact):
     report = artifact.get('report', {})
     return {key: copy.deepcopy(report.get(key) or []) for key in ('in_scope', 'out_of_scope', 'assumptions')}
+
+
+def artifact_profile(artifact, default=None):
+    """Use the saved table column contract without changing its historical Profile."""
+    profile = copy.deepcopy(default if default is not None else artifact.get('_profile', {}))
+    columns = artifact.get('report', {}).get('table_columns')
+    if artifact.get('type') == 'cases' and isinstance(columns, list):
+        profile['excel_columns'] = copy.deepcopy(columns)
+    return profile
 
 
 def _case_fields(rows, profile, original=()):
@@ -173,6 +182,21 @@ class NativeBusiness:
                 'generate_cases': 'cases', 'review_cases': 'cases'}.get(task)
         if task == 'revise_artifact':
             kind = context['artifact_type']
+        if task == 'revise_artifact' and kind in ('scenarios', 'cases'):
+            from .dialogue_lineage import normalize_independent_rows
+            result['items'] = normalize_independent_rows(kind, result['items'], context.get('previous_items', []),
+                context.get('independent_reason', '用户明确设置为 N/A'),
+                authorized_ids=context.get('independent_item_ids', []),
+                allow_new=context.get('independent_addition', False),
+                source_id=context.get('independent_source_id'), force=context.get('independent_edit', False))
+        if task in ('generate_scenarios', 'generate_cases'):
+            from .dialogue_lineage import normalize_independent_rows
+            result['items'] = normalize_independent_rows(kind, result['items'], context.get('previous_items', []),
+                '已有独立条目', authorized_ids=[])
+        if task == 'review_cases':
+            from .dialogue_lineage import normalize_independent_rows
+            result['items'] = normalize_independent_rows('cases', result['items'], context['cases'],
+                '已存在的独立用例', authorized_ids=[])
         if kind:
             # Invalid business rows must not become a reusable successful leaf.
             parents = [{'type': key, 'items': context[key]} for key in ('analysis', 'scenarios') if key in context]
@@ -230,7 +254,7 @@ class NativeBusiness:
             scenario_ids | set(legacy.values()) if scenario_ids is not None and kind == 'cases' else None)
         if kind == 'cases' and scenario_ids is not None:
             for row in rows:
-                if row['scenario_id'] not in scenario_ids and (row['id'] not in legacy or legacy[row['id']] != row['scenario_id']):
+                if row['scenario_id'] not in scenario_ids and not independent_item(kind, row) and (row['id'] not in legacy or legacy[row['id']] != row['scenario_id']):
                     raise DomainError('新增或重新关联的用例必须属于当前场景；历史导入关联只保留原条目')
         if kind == 'analysis' and any(any(k in r for k in ('steps', 'scenario_id', 'preconditions')) for r in rows):
             raise DomainError('需求理解包含用例字段；当前结果尚未保存')
@@ -238,8 +262,8 @@ class NativeBusiness:
             allowed = {r['id'] for r in analysis['items']} if analysis else None
             for row in rows:
                 ids = row.get('requirement_ids')
-                if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
-                    raise DomainError('每个场景必须关联具体需求编号')
+                if not isinstance(ids, list) or not all(isinstance(i, str) and i for i in ids) or (not ids and not independent_item(kind, row)):
+                    raise DomainError('场景必须关联具体需求编号，或由用户明确设为 N/A')
                 if allowed is not None and not set(ids) <= allowed:
                     raise DomainError('场景关联了不属于当前需求理解的编号')
         if kind == 'cases':
@@ -358,10 +382,14 @@ class NativeBusiness:
         analysis = self._artifact(analysis) if analysis else parent
         parents = [parent] if kind == 'scenarios' else [analysis, parent]
         old = self._existing(run, kind)
+        if old and kind == 'cases':
+            run = {**run, '_profile': artifact_profile(old, run['_profile'])}
         legacy = (old or {}).get('report', {}).get('_legacy_unlinked_cases', {}) if kind == 'cases' else {}
         if legacy:
             parent['_legacy_unlinked_cases'] = copy.deepcopy(legacy)
-        sources, roles, evidence = self._evidence(run, parent.get('_source_ids'), parent.get('_source_roles'))
+        retained_sources = list(parent.get('_source_ids') or []) + list((old or {}).get('_source_ids') or [])
+        retained_roles = {**(old or {}).get('_source_roles', {}), **parent.get('_source_roles', {})}
+        sources, roles, evidence = self._evidence(run, retained_sources, retained_roles)
         guard = self._manifest(sources, parents)
         changed = self._affected(old, parent)
         if old and kind == 'cases':
@@ -423,6 +451,8 @@ class NativeBusiness:
         covered = {rid for row in rows for rid in relation(row)}
         if not existing_parent_ids <= covered:
             raise DomainError('下游结果没有覆盖所有输入条目；未保存不完整结果')
+        if old and kind == 'cases' and isinstance(old.get('report', {}).get('table_columns'), list):
+            report['table_columns'] = copy.deepcopy(old['report']['table_columns'])
         prefix = 'analysis' if kind == 'scenarios' else 'scenario'
         report['lineage'] = {prefix + '_artifact_id': parent['id'], prefix + '_revision': parent['revision'],
             'parent_item_hashes': _rows_digest(parent['items']), 'parent_rules_hash': deps.digest(_global_rules(parent))}
@@ -440,18 +470,25 @@ class NativeBusiness:
         return await self._downstream(run, 'scenarios', analysis)
 
     async def cases(self, run, analysis, scenarios):
+        if not self._artifact(scenarios)['items']:
+            raise DomainError('当前没有可生成用例的场景；请先添加场景')
         return await self._downstream(run, 'cases', scenarios, analysis)
 
     def _parents(self, artifact):
         lineage = artifact.get('report', {}).get('lineage', {})
         parents = [self._artifact(lineage[key]) for key in ('analysis_artifact_id', 'scenario_artifact_id') if lineage.get(key)]
         for parent in parents:
+            if (parent['chat_id'], parent['project_id']) != (artifact['chat_id'], artifact['project_id']):
+                raise DomainError('上游成果不属于当前对话', 404)
             if parent['type'] == 'scenarios':
                 parent['_legacy_unlinked_cases'] = copy.deepcopy(artifact.get('report', {}).get('_legacy_unlinked_cases', {}))
         return parents
 
-    async def review(self, run, cases):
+    async def review(self, run, cases, *, preview=False, feedback=""):
         run, cases = self._run(run), self._artifact(cases)
+        run = {**run, '_profile': artifact_profile(cases, run['_profile'])}
+        if not cases['items']:
+            raise DomainError('当前没有可评审的测试用例；请先添加或生成用例')
         request = run.get('_request', {})
         selected_ids = request.get('selected_ids') if (request.get('artifact_id') == cases['id']
                        or request.get('intent') == 'review_case') else None
@@ -461,16 +498,26 @@ class NativeBusiness:
         sources, roles, evidence = self._evidence(cases)
         parents = self._parents(cases)
         guard = self._manifest(sources, parents + [cases])
+        previous_proposal = None
+        if feedback and run.get('review_proposal_id'):
+            candidate = self.store.get('review_proposal', run['review_proposal_id'])
+            if candidate['artifact_id'] == cases['id'] and candidate['artifact_revision'] == cases['revision']:
+                previous_proposal = candidate
         def build(group):
             refs = {ref for r in group for ref in r.get('refs', [])}
             scenario_ids = {r['scenario_id'] for r in group}
             return self._context(run, [e for e in evidence if e['id'] in refs or e.get('role') == 'example'],
                 cases=group, previous_items=group,
-                selected_scope=selected_ids is not None,
+                selected_scope=selected_ids is not None, review_feedback=feedback,
+                previous_review=({
+                    'report': previous_proposal['report'],
+                    'items': [row for row in previous_proposal['items'] if row['id'] in {item['id'] for item in group}]
+                } if previous_proposal else None),
                 legacy_unlinked_cases=cases.get('report', {}).get('_legacy_unlinked_cases', {}),
                 scenarios=[r for a in parents if a['type'] == 'scenarios' for r in a['items'] if r['id'] in scenario_ids])
         results = await self._groups('review_cases', selected, build, rows_schema('cases', run['_profile']),
-            'Review supplied cases once. Return the complete reviewed rows for this batch plus report.summary '
+            'Prepare review suggestions without applying them. Follow review_feedback when supplied. '
+            'Return the proposed complete reviewed rows for this batch plus report.summary '
             'and report.issues (an empty array when no issues are found). Explain review findings, corrections '
             'and remaining questions clearly, with affected case_ids and provided evidence refs when relevant. '
             'Retain stable IDs and unchanged fields. Add missing cases only when grounded. A case may be removed '
@@ -507,7 +554,30 @@ class NativeBusiness:
         reports.append(review)
         report = {**copy.deepcopy(cases.get('report', {})), 'review_reports': reports,
                   'template_check': template_check(run['_profile'], rows), 'excluded_scenarios': review.get('excluded_scenarios', [])}
+        if preview:
+            from .review_proposals import save_review_proposal
+            return save_review_proposal(self.store, run, cases, rows, report, guard, sources, roles, feedback)
         return self._save(run, 'cases', rows, report, guard, cases, sources, roles)
+
+    async def propose_review(self, run, cases, feedback=''):
+        return await self.review(run, cases, preview=True, feedback=feedback)
+
+    def apply_review_proposal(self, run, proposal_id):
+        from .review_proposals import require_current_review
+        run = self._run(run)
+        with self.store.transaction():
+            proposal = require_current_review(self.store, run['id'], proposal_id)
+            if self._run(run)['status'] == 'cancelled':
+                raise DomainError('任务已取消', 409)
+            if proposal['status'] == 'applied':
+                return self.store.revision(proposal['artifact_id'], proposal['applied_revision'])
+            cases = self._artifact(proposal['artifact_id'])
+            result = self._save(run, 'cases', proposal['items'], proposal['report'],
+                proposal['_dependencies'], cases, proposal['_source_ids'], proposal['_source_roles'])
+            from .storage import now
+            self.store.put('review_proposal', {**proposal, 'status': 'applied',
+                           'applied_revision': result['revision'], 'applied_at': now()})
+            return result
 
     async def _complete_rows(self, holder, rows, profile, evidence, run=None, retry_unresolved=False):
         rows = materialize_fields(rows, profile)
@@ -570,7 +640,7 @@ class NativeBusiness:
         profile_record = profile if isinstance(profile, dict) and 'config' in profile else None
         if profile_record and profile_record.get('project_id') != artifact['project_id']:
             raise DomainError('Profile 不属于当前项目')
-        config = copy.deepcopy(profile_record['config'] if profile_record else profile or artifact.get('_profile', {}))
+        config = copy.deepcopy(profile_record['config'] if profile_record else profile or artifact_profile(artifact))
         selected = self._selection(artifact, ids)
         sources, roles, evidence = self._evidence(artifact)
         guard = deps.manifest(self.store, source_ids=sources,
@@ -581,9 +651,9 @@ class NativeBusiness:
         rows = [changed.get(row['id'], copy.deepcopy(row)) for row in artifact['items']]
         if rows == artifact['items']:
             return artifact
-        self._validate('cases', rows, evidence, self._parents(artifact), artifact.get('_profile'))
+        self._validate('cases', rows, evidence, self._parents(artifact), artifact_profile(artifact))
         report = copy.deepcopy(artifact.get('report', {}))
-        report['template_check'] = template_check(artifact.get('_profile', {}), rows)
+        report['template_check'] = template_check(artifact_profile(artifact), rows)
         report['template_completion'] = template_check(config, rows)
         with _writes():
             return self.store.revise_artifact(artifact['id'], artifact['revision'], rows,
@@ -595,10 +665,34 @@ class NativeBusiness:
         return [copy.deepcopy(r) for r in artifact['items'] if ids is None or r['id'] in ids]
 
     async def revise(self, artifact, ids=None, instruction='', new_values=None, source_ids=None, source_roles=None,
-                     preview=False, dialogue_content=None, add=False, parent_id=None):
+                     preview=False, dialogue_content=None, add=False, parent_id=None, independent=False, delete=False):
         artifact = self._artifact(artifact)
+        if delete:
+            if add or new_values is not None or independent or not ids:
+                raise DomainError('删除行需要明确选择条目，且不能同时新增、修改字段或解除关联')
+            selected = self._selection(artifact, ids)
+            selected_ids = {row['id'] for row in selected}
+            rows = [copy.deepcopy(row) for row in artifact['items'] if row['id'] not in selected_ids]
+            sources, roles, evidence = self._evidence(artifact, source_ids, source_roles)
+            parents = self._parents(artifact)
+            self._validate(artifact['type'], rows, evidence, parents, artifact_profile(artifact))
+            report = copy.deepcopy(artifact.get('report', {}))
+            if artifact['type'] == 'cases':
+                report['template_check'] = template_check(artifact_profile(artifact), rows)
+            if artifact['type'] == 'analysis':
+                complete_analysis_diagrams(report, rows, previous=artifact)
+            report.pop('_native_input_digest', None)
+            return {'artifact_id': artifact['id'], 'base_revision': artifact['revision'], 'items': rows,
+                    'report': report, 'source_ids': sources, 'source_roles': roles,
+                    'dependencies': self._manifest(sources, parents + [artifact])}
         selected = self._selection(artifact, ids)
         selected_ids = {r['id'] for r in selected}
+        relation_field = 'requirement_ids' if artifact['type'] == 'scenarios' else 'scenario_id'
+        relation_empty = [] if artifact['type'] == 'scenarios' else ''
+        explicit_empty = isinstance(new_values, dict) and new_values.get(relation_field, None) == relation_empty
+        independent_edit = artifact['type'] in ('scenarios', 'cases') and (independent or explicit_empty)
+        if independent and parent_id:
+            raise DomainError('独立条目不能同时指定上游编号，请选择关联或 N/A')
         sources, roles, evidence = self._evidence(artifact, source_ids, source_roles)
         parents = self._parents(artifact)
         dialogue = None
@@ -643,29 +737,36 @@ class NativeBusiness:
                 if dialogue:
                     incoming.add(dialogue['source']['id'])
                 relevant = [e for e in evidence if e['id'] in refs or e['source_id'] in incoming or e.get('role') == 'example']
-                return self._context(artifact, relevant, artifact_type=artifact['type'], items=[] if add else group,
+                return self._context({**artifact, '_profile': artifact_profile(artifact)}, relevant, artifact_type=artifact['type'], items=[] if add else group,
                     previous_items=[] if add else group, instruction=instruction,
                     existing_item_ids=[r['id'] for r in artifact['items']] if add else [],
                     existing_items=selected if add and ids is not None else [],
                     addition_parent_id=dialogue['addition_parent_id'] if dialogue else None,
                     dialogue_evidence_ids=[e['id'] for e in dialogue['evidence']] if dialogue else [],
                     legacy_unlinked_cases=dialogue.get('legacy_unlinked_cases', {}) if dialogue else artifact.get('report', {}).get('_legacy_unlinked_cases', {}),
-                    add_only=add,
+                    add_only=add, independent_addition=bool(add and not dialogue['addition_parent_id']),
+                    independent_item_ids=sorted(selected_ids) if independent_edit and not add else [],
+                    independent_edit=independent_edit and not add,
+                    independent_reason='用户明确设置为 N/A' if independent_edit else '用户独立新增，不关联上游成果',
+                    independent_source_id=dialogue['source']['id'] if dialogue else None,
                     report={} if add else _report({'report': artifact.get('report', {})}),
                     **{a['type']: a['items'] for a in context_parents})
             # An addition is one requested work item; never repeat it once per old-row capacity batch.
             inputs = [{'id': 'dialogue-addition', 'refs': []}] if add else selected
             results = await self._groups('revise_artifact', inputs, build,
-                rows_schema(artifact['type'], artifact.get('_profile')),
+                rows_schema(artifact['type'], artifact_profile(artifact)),
                 'Apply the user instruction to supplied items. Return all supplied IDs unchanged, including '
                 'unchanged rows, and preserve unrelated fields. Only add business rows when explicitly requested. '
                 'Update requirement understanding from new evidence when requested. Never confirm a workflow stage. '
                 + ('Return only the requested NEW rows, never existing_item_ids or copies of existing_items. '
-                   'existing_items is optional read-only user-selected context. For every added scenario use '
-                   'requirement_ids=[addition_parent_id]; for every added case use scenario_id=addition_parent_id. '
-                   'Cite dialogue_evidence_ids for the human request. Organizational dialogue parents contain only '
-                   'the exact human request, not invented business rules. Unspecified expected behavior must remain '
+                   'existing_items is optional read-only user-selected context. If addition_parent_id is supplied, '
+                   'use requirement_ids=[addition_parent_id] for scenarios or scenario_id=addition_parent_id for cases. '
+                   'Otherwise use requirement_ids=[] or scenario_id="" for an independent N/A row. '
+                   'Never create or revise any upstream requirement or scenario. '
+                   'Cite dialogue_evidence_ids for the human request. Unspecified expected behavior must remain '
                    'explicitly unspecified; never guess a success outcome, threshold or role. ' if add else '')
+                + ('The user explicitly requested independent N/A rows; clear only the selected rows parent links. '
+                   if independent_edit else 'Preserve all existing upstream associations unless explicitly changed by the user. ')
                 + (ANALYSIS_DIAGRAM_INSTRUCTION if artifact['type'] == 'analysis' else ''))
             diagram_response_is_whole = not add and len(results) == 1 and len(selected) == len(artifact['items'])
             revised, new_report = self._merge_results(results)
@@ -686,17 +787,24 @@ class NativeBusiness:
                 if not added:
                     raise DomainError('模型未返回新增条目，请补充具体希望增加的行为')
                 for row in added:
-                    relation = row.get('requirement_ids') if artifact['type'] == 'scenarios' else [row.get('scenario_id')]
-                    if artifact['type'] in ('scenarios', 'cases') and relation != [dialogue['addition_parent_id']]:
-                        raise DomainError('新增条目未关联指定的上游条目；原成果已保留')
+                    relation = row.get('requirement_ids') if artifact['type'] == 'scenarios' else row.get('scenario_id')
+                    expected_relation = ([dialogue['addition_parent_id']] if dialogue['addition_parent_id'] else []) if artifact['type'] == 'scenarios' else (dialogue['addition_parent_id'] or '')
+                    if artifact['type'] in ('scenarios', 'cases') and relation != expected_relation:
+                        raise DomainError('新增条目未使用指定关联；未指定上游时请使用 N/A 空关联')
                     row['refs'] = list(dict.fromkeys(row.get('refs', []) + [e['id'] for e in dialogue['evidence']]))
                     row['_dialogue_origin'] = {'source_id': dialogue['source']['id'],
                                               'kind': 'dialogue_supplement', 'label': '用户对话补充'}
                 revised = [copy.deepcopy(r) for r in selected] + added
             revised = [{**original.get(r['id'], {}), **r} for r in revised]
             if artifact['type'] == 'cases':
-                revised = _case_fields(revised, artifact.get('_profile', {}), selected)
+                revised = _case_fields(revised, artifact_profile(artifact), selected)
             report = {**copy.deepcopy(artifact.get('report', {})), **new_report}
+        from .dialogue_lineage import normalize_independent_rows
+        revised = normalize_independent_rows(artifact['type'], revised, artifact['items'],
+            '用户明确设置为 N/A' if independent_edit else '用户独立新增，不关联上游成果',
+            authorized_ids=selected_ids if independent_edit and not add else [],
+            allow_new=bool(add and dialogue and not dialogue['addition_parent_id']),
+            source_id=dialogue['source']['id'] if dialogue else None, force=independent_edit and not add)
         changes = {r['id']: r for r in revised}
         rows = [changes.pop(r['id'], copy.deepcopy(r)) for r in artifact['items']] + list(changes.values())
         if dialogue and not add:
@@ -706,13 +814,13 @@ class NativeBusiness:
                     row['refs'] = list(dict.fromkeys(row.get('refs', []) + [e['id'] for e in dialogue['evidence']]))
                     row['_dialogue_origin'] = {'source_id': dialogue['source']['id'],
                         'kind': 'dialogue_supplement', 'label': '用户对话补充'}
-        self._validate(artifact['type'], rows, evidence, parents, artifact.get('_profile'))
+        self._validate(artifact['type'], rows, evidence, parents, artifact_profile(artifact))
         self._suggestions(report, evidence)
         if artifact['type'] == 'analysis':
             complete_analysis_diagrams(report, rows, previous=artifact,
                 whole_response=diagram_response_is_whole or rows == artifact['items'])
         if artifact['type'] == 'cases':
-            report['template_check'] = template_check(artifact.get('_profile', {}), rows)
+            report['template_check'] = template_check(artifact_profile(artifact), rows)
         report.pop('_native_input_digest', None)
         if dialogue:
             from .dialogue_lineage import link_report
@@ -742,7 +850,7 @@ class NativeBusiness:
             return commit_dialogue(self, proposal)
         artifact = self._artifact(proposal['artifact_id'])
         sources, roles, evidence = self._evidence(artifact, proposal['source_ids'], proposal['source_roles'])
-        self._validate(artifact['type'], proposal['items'], evidence, self._parents(artifact), artifact.get('_profile'))
+        self._validate(artifact['type'], proposal['items'], evidence, self._parents(artifact), artifact_profile(artifact))
         with _writes():
             return self.store.revise_artifact(artifact['id'], proposal['base_revision'], proposal['items'],
                 reason='native_tool_edit', report=proposal['report'], source_ids=sources, source_roles=roles,

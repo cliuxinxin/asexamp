@@ -82,7 +82,7 @@ test('clarification suggestions are text only and disappear when answered',()=>{
 });
 
 test('change details remain readable while proposal application uses chat',async()=>{
- fixture({proposal:true});await ready();const preview=await screen.findByLabelText('待应用修改');assert.ok(within(preview).getByText('可在聊天中说明是否采用或如何调整。'));assert.equal((within(preview).getByText('查看修改明细').closest('details') as HTMLDetailsElement).open,false);assert.equal(within(preview).queryByRole('button'),null);assert.equal(document.querySelectorAll('textarea').length,1);
+ fixture({proposal:true});await ready();assert.equal(screen.queryByLabelText('待应用修改'),null);assert.equal(document.querySelectorAll('textarea').length,1);
 });
 
 

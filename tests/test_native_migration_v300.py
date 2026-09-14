@@ -76,7 +76,7 @@ async def test_legacy_gate_migrates_to_real_interrupt_without_generating_or_chan
     assert migrated['interrupt']['artifact_revision'] == original['interrupt']['artifact_revision']
     assert migrated['interrupt']['id'] != 'old-id'
     stored = store.run(original['id'])
-    assert stored['graph_version'] == 8 and stored['runtime'] == 'native'
+    assert stored['graph_version'] == 9 and stored['runtime'] == 'native'
     assert stored['_profile'] == original['_profile']
     assert stored['_source_ids'] == original['_source_ids']
     assert stored['artifact_ids'] == original['artifact_ids']
@@ -89,9 +89,9 @@ async def test_legacy_gate_migrates_to_real_interrupt_without_generating_or_chan
     assert await runtime.snapshot(original['id']) == migrated
     if gate == 'scenario_review' and mode == 'hitp':
         continued = await agree(runtime, migrated)
-        assert continued['interrupt']['type'] == 'case_draft_review'
-        assert business.calls[-1][0] == 'cases'
-        assert len(business.calls) == len(original_calls) + 1
+        assert continued['interrupt']['type'] == 'case_result_review'
+        assert [call[0] for call in business.calls[-2:]] == ['cases', 'review']
+        assert len(business.calls) == len(original_calls) + 2
     await runtime.stop()
     store.close()
 

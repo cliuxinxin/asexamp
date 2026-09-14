@@ -1,4 +1,4 @@
-"""Dialogue evidence and organizational lineage commit together after approval."""
+"""Dialogue evidence and target-only revisions commit together after approval."""
 import copy
 
 import pytest
@@ -25,20 +25,20 @@ def adding_model(service, model):
         kind = context['artifact_type']
         new = {'id': 'NEW-' + kind, 'title': '并发登录', 'refs': context['dialogue_evidence_ids']}
         if kind == 'cases':
-            new.update(scenario_id=context['addition_parent_id'], type='Business', priority='P1',
+            new.update(scenario_id=context['addition_parent_id'] or '', type='Business', priority='P1',
                 preconditions='登录功能可用', purpose='并发登录验证',
                 steps=[{'action': '并发登录', 'expected': '预期行为待确认'}])
         else:
             new.update(description='按用户要求验证并发登录')
             if kind == 'scenarios':
-                new.update(priority='P1', requirement_ids=[context['addition_parent_id']])
+                new.update(priority='P1', requirement_ids=[context['addition_parent_id']] if context['addition_parent_id'] else [])
         return {'items': rows + [new], 'report': {'summary': '新增预览'}}
 
     model.generate_native = respond
 
 
 @pytest.mark.asyncio
-async def test_scenario_add_stages_exact_message_and_applies_requirement_in_one_revision(setup):
+async def test_scenario_add_stages_exact_message_and_preserves_requirement_revision(setup):
     store, run, service, model = setup
     analysis, scenarios, cases = await generated(setup)
     adding_model(service, model)
@@ -48,13 +48,13 @@ async def test_scenario_add_stages_exact_message_and_applies_requirement_in_one_
         dialogue_content=message, add=True)
     assert store.list('source') == before_sources
     assert store.get('artifact', analysis['id'])['revision'] == 1
-    assert proposal['dialogue']['parent_changes'][0]['value']['items'][-1]['description'] == message
+    assert proposal['dialogue']['parent_changes'] == []
     assert proposal['items'][:-1] == scenarios['items']
     applied = service.apply_revision_preview(proposal)
     requirement = store.get('artifact', analysis['id'])
-    assert requirement['revision'] == 2
-    assert requirement['items'][:-1] == analysis['items']
-    assert applied['items'][-1]['requirement_ids'] == [requirement['items'][-1]['id']]
+    assert requirement == analysis
+    assert applied['items'][-1]['requirement_ids'] == []
+    assert applied['items'][-1]['_independent_origin']['source_id'] == proposal['dialogue']['source']['id']
     source = store.get('source', proposal['dialogue']['source']['id'])
     assert source['_text'] == message
     assert source['role'] == 'supplement'
@@ -83,7 +83,7 @@ async def test_case_add_reuses_explicit_parent_and_preserves_selected_and_other_
 
 
 @pytest.mark.asyncio
-async def test_orphan_import_gets_visible_real_parents_only_after_apply(setup):
+async def test_orphan_import_keeps_existing_rows_and_adds_independent_case(setup):
     store, run, service, model = setup
     # Imported cases may have no linked upstream artifacts at all.
     source = store.get('source', run['_source_ids'][0])
@@ -96,24 +96,22 @@ async def test_orphan_import_gets_visible_real_parents_only_after_apply(setup):
     with native_writes():
         _save(store, artifact, 'imported', {}, None, None)
     adding_model(service, model)
-    # Existing unlinked imported rows are legal; only newly requested additions get new parents.
+    # Imported empty associations remain legal; new independent cases create no phantom parents.
     proposal = await service.revise(artifact, instruction='新增用例', dialogue_content='直接增加并发登录用例', add=True)
     diffs = preview_changes(proposal, artifact)
-    assert [d['expected_revision'] for d in diffs] == [0, 0, 1]
-    assert all(d['before_items'] == [] for d in diffs[:2])
+    assert [d['expected_revision'] for d in diffs] == [1]
     updated = service.apply_revision_preview(proposal)
     parents = [store.get('artifact', c['artifact_id']) for c in proposal['dialogue']['parent_changes']]
-    assert [p['type'] for p in parents] == ['analysis', 'scenarios']
-    assert all(p['_visible'] and p['revision'] == 1 for p in parents)
-    assert parents[1]['items'][0]['requirement_ids'] == [parents[0]['items'][0]['id']]
-    assert updated['items'][-1]['scenario_id'] == parents[1]['items'][0]['id']
+    assert parents == []
+    assert updated['items'][-1]['scenario_id'] == ''
+    assert updated['items'][-1]['_independent_origin']['reason']
     assert updated['items'][0] == case
     reviewed = await service.review(run, updated)
     assert reviewed['items'][0]['scenario_id'] == ''
     evidence = store.evidence(updated['_source_ids'], updated['_source_roles'])
-    forged = {**case, 'id': 'NEW-UNLINKED'}
-    with pytest.raises(DomainError, match='新增或重新关联'):
-        service._validate('cases', [forged], evidence, service._parents(reviewed), reviewed['_profile'])
+    forged = {**case, 'scenario_id': 'invented'}
+    with pytest.raises(DomainError, match='无法核实'):
+        store.revise_artifact(reviewed['id'], reviewed['revision'], [forged] + reviewed['items'][1:])
 
 
 @pytest.mark.asyncio

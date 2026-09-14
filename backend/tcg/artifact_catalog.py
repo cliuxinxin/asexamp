@@ -24,6 +24,9 @@ def process_artifacts(store, chat_id):
     for artifact in artifacts.values():
         add(artifact, artifact['revision'], 'saved', artifact.get('updated_at') or artifact.get('created_at', ''))
     for event in store.list('pipeline_result', chat_id=chat_id):
+        # Suggestions point to the unchanged case revision; they are not a new artifact.
+        if event.get('phase') == 'review_proposed':
+            continue
         artifact = artifacts.get(event.get('artifact_id'))
         if artifact:
             add(artifact, event.get('revision'), event.get('phase', 'saved'), event.get('created_at', ''), event.get('run_id'))

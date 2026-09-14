@@ -115,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='3.0.9', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.10', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -174,7 +174,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '3.0.9', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.10', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -386,7 +386,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '3.0.9', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.10', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -514,13 +514,9 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         store = app.state.store
         artifact = visible_artifact(artifact_id)
         async with app.state.engine.edit_session(artifact['chat_id']):
-            report = body.report
-            if report is not None:
-                report = {**report}
-                report.pop('lineage', None)
-                if artifact.get('report', {}).get('lineage'):
-                    report['lineage'] = artifact['report']['lineage']
-            updated = store.revise_artifact(artifact_id, body.expected_revision, body.items, report=report)
+            from .manual_edits import save_table_edit
+            updated = save_table_edit(store, app.state.business, artifact_id, body.expected_revision,
+                body.items, report=body.report, column_changes=body.column_changes, profile_id=body.profile_id)
             await app.state.engine.on_artifact_changed(updated)
             return public(updated)
 
