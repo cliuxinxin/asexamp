@@ -5,7 +5,7 @@ import type {Artifact,Json} from './types';
 
 export type ScopeFilter='all'|'missing'|'unlinked'|'independent'|'pending'|'issues'|'changed'|'excluded';
 export type ParentRow={artifact_id:string;revision:number;item:Json;evidence?:Json[]};
-export type RowContext={scenario?:ParentRow;requirements:ParentRow[];missing:boolean;independent?:string;pending:Json[];stale:boolean;excluded?:string;assumption:boolean;issues:Json[];changed:boolean;needsReview:boolean;downstream:string[]};
+export type RowContext={scenario?:ParentRow;scenarioSkipped?:boolean;requirements:ParentRow[];missing:boolean;independent?:string;pending:Json[];stale:boolean;excluded?:string;assumption:boolean;issues:Json[];changed:boolean;needsReview:boolean;downstream:string[]};
 
 // A card owns one request per immutable version. Row expansion and selection never fetch.
 export function useArtifactLineage(artifact:Artifact|undefined,enabled:boolean){
@@ -33,6 +33,7 @@ function exactParent(parent:Json|undefined,id:string|undefined,revision:number|u
 
 export function rowContext(artifact:Artifact,item:Json,workspace?:Json):RowContext{
  const saved=workspace?.lineage_rows?.find((row:Json)=>row.item_id===item.id);
+ const scenarioSkipped=saved?.scenario_skipped===true;
  const independent=saved?.status==='independent'?(saved.reason||item._independent_origin?.reason||'用户指定独立条目'):undefined;
  let scenario=saved?.scenario??undefined;
  let requirements:ParentRow[]=saved?.requirements??[];
@@ -55,7 +56,7 @@ export function rowContext(artifact:Artifact,item:Json,workspace?:Json):RowConte
  const diff=workspace?.revision_diff??{};
  const changed=[...(diff.added??[]),...(diff.updated??[])].includes(item.id);
  const needsReview=workspace?.review?.changed_item_ids?.includes(item.id)??false;
- return {scenario,requirements,independent,missing:!independent&&(saved?.status==='missing_parent'||(artifact.type==='cases'?!scenario:artifact.type==='scenarios'?requirements.length===0:!coverageRow?.scenario_ids?.length)),pending,stale:!!stale,excluded,assumption:item.assumption===true||item.status==='assumption',issues,changed,needsReview,downstream:coverageRow?.[artifact.type==='analysis'?'scenario_ids':'case_ids']??[]};
+ return {scenario,scenarioSkipped,requirements,independent,missing:!independent&&(saved?.status==='missing_parent'||(artifact.type==='cases'?(scenarioSkipped?requirements.length===0:!scenario):artifact.type==='scenarios'?requirements.length===0:!coverageRow?.scenario_ids?.length)),pending,stale:!!stale,excluded,assumption:item.assumption===true||item.status==='assumption',issues,changed,needsReview,downstream:coverageRow?.[artifact.type==='analysis'?'scenario_ids':'case_ids']??[]};
 }
 
 export function matchesScope(context:RowContext,filter:ScopeFilter,kind:string){
@@ -104,6 +105,7 @@ export function ArtifactLineage({context,kind,loading,error}:{context:RowContext
  if(loading)return <span className="muted small-text">{error?'关联暂不可读取':'读取关联…'}</span>;
  return <div className="artifact-row-lineage">
   {kind==='cases'&&context.scenario&&<ParentContent parent={context.scenario} label="主场景"/>}
+  {kind==='cases'&&context.scenarioSkipped&&<span className="artifact-row-status">场景：N/A（已跳过）</span>}
   {context.requirements.map(parent=><ParentContent key={parent.artifact_id+':'+parent.revision+':'+parent.item.id} parent={parent} label="需求"/>)}
   {context.missing&&<span className="artifact-row-status">{context.scenario||context.requirements.length?'关联不完整':'尚未关联'}</span>}
   {context.independent&&<details className="artifact-row-status independent"><summary>{kind==='cases'&&!context.scenario?'场景 / 需求：N/A':'需求：N/A'}</summary><p>{context.independent}</p></details>}

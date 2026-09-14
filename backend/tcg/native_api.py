@@ -1,4 +1,5 @@
 """Compatibility routes around native tools and read-only project data."""
+import asyncio
 import base64
 import json
 from urllib.parse import quote
@@ -13,6 +14,18 @@ from .storage import public, uid
 
 
 def register_routes(app):
+    from .table_review import register_table_review_routes
+    register_table_review_routes(app)
+
+    @app.get('/api/chats/{chat_id}/plans/{plan_id}')
+    def execution_plan(chat_id: str, plan_id: str):
+        return app.state.conversation.supervisor.get(chat_id, plan_id)
+
+    @app.get('/api/projects/{project_id}/traceability')
+    def traceability(project_id: str, chat_id: str | None = None):
+        from .traceability import project_traceability
+        return project_traceability(app.state.store, project_id, chat_id)
+
     @app.get('/api/runs/{run_id}/review-proposals/{proposal_id}')
     def review_proposal(run_id: str, proposal_id: str):
         from .review_proposals import read_review_proposal
@@ -42,10 +55,19 @@ def register_routes(app):
         selected_keys: list[str] = Field(min_length=1, max_length=100)
 
     @app.post('/api/chats/{chat_id}/profile-change/apply')
-    def apply_profile_change(chat_id: str, body: ProfileChangeApproval):
+    async def apply_profile_change(chat_id: str, body: ProfileChangeApproval):
         from .profile_changes import apply_profile_change as apply_change
-        return apply_change(app.state.store, chat_id, body.prompt_id, body.expected_version,
-                            body.selected_keys, write_messages=True)
+        async with app.state.conversation._chat_locks.setdefault(chat_id, asyncio.Lock()):
+            result = apply_change(app.state.store, chat_id, body.prompt_id, body.expected_version,
+                                  body.selected_keys, write_messages=True)
+            from .storage import now
+            turn = {'id': uid('planreply_'), 'client_message_id': '', 'project_id': app.state.store.get('chat', chat_id)['project_id'],
+                'chat_id': chat_id, 'created_at': now(), 'status': 'succeeded', 'message': result['message'],
+                'parts': result.get('parts', []), 'pending': [], 'actions': [], '_runtime': 'native'}
+            receipt = app.state.store.get('native_approval_receipt', 'approval:' + body.prompt_id)
+            continued = await app.state.conversation.supervisor.after_control(chat_id, {'id': body.prompt_id}, turn, applied={**result, 'skipped_keys': receipt.get('skipped_keys', [])})
+            result['parts'] = continued['parts']
+            return result
 
     @app.get('/api/chats/{chat_id}/field-drift')
     def field_drift(chat_id: str, artifact_id: str | None = None, revision: int | None = None,

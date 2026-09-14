@@ -109,6 +109,11 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             value = store.get('artifact', chosen)
             if value.get('chat_id') != chat['id'] or value.get('project_id') != chat['project_id']:
                 raise DomainError('成果不属于当前对话', 404)
+            if body.get('_scope_artifact_id') and chosen != body['_scope_artifact_id']:
+                raise DomainError('本计划只能操作原请求选中的成果', 409)
+            expected = body.get('_expected_revisions', {}).get(chosen)
+            if expected is not None and value['revision'] != expected:
+                raise DomainError('计划引用的成果版本已改变，请查看当前版本后重新提出要求', 409)
             if not kind or value['type'] == kind:
                 return value
             if artifact_id:
@@ -351,6 +356,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         """
         if not instruction and new_content is None and new_values is None and not delete and not independent:
             raise DomainError('请说明需要修改的内容')
+        if body.get('_supervised'):
+            preview = True
         if new_content is not None:
             instruction = instruction + '\n用户要求的新内容：' + new_content
         async with edit_session():
@@ -378,7 +385,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                         parent_id = next(iter(allowed_parents))
             dialogue_kwargs = {}
             if add or use_dialogue_evidence:
-                dialogue_kwargs = {'dialogue_content': body.get('content', ''), 'add': add, 'parent_id': parent_id}
+                dialogue_kwargs = {'dialogue_content': body.get('_user_request', body.get('content', '')), 'add': add, 'parent_id': parent_id}
                 preview = True
             updated = await business.revise(value, ids=ids, instruction=instruction,
                                             new_values=new_values, preview=preview, **({'independent': True} if independent else {}),
@@ -430,13 +437,19 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                         raise DomainError('Profile 已改变，请重新查看用例列修改预览', 409)
                 with store.transaction():
                     updated = await _await(business.apply_revision_preview(proposal))
-                    store.put('native_revision_proposal', {**proposal, '_applied': True})
+                    store.put('native_revision_proposal', {**proposal, '_applied': True,
+                        '_applied_artifact_id': updated['id'], '_applied_revision': updated['revision']})
                     latest = store.get('chat', chat['id'])
                     store.put('chat', {**latest, '_native_artifact_prompt': None})
                     followup = None
                     if proposal.get('column_change'):
                         from .case_columns import stage_column_profile
                         followup = stage_column_profile(store, updated, proposal['column_change'])
+                    receipt = {'id': 'approval:' + reply_token, 'chat_id': chat['id'],
+                        'project_id': chat['project_id'], 'status': 'succeeded',
+                        'parts': [{'type': 'artifact', 'artifact_id': updated['id'], 'revision': updated['revision']}],
+                        **({'pending': copy.deepcopy(followup['pending'])} if followup and followup.get('pending') else {})}
+                    store.put('native_approval_receipt', receipt)
                 await _await(pipeline.on_artifact_changed(updated))
         if followup:
             parts = [{'type': 'artifact', 'artifact_id': updated['id'], 'revision': updated['revision']}]
@@ -453,7 +466,11 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             pending = current.get('_native_artifact_prompt')
             if not pending or pending.get('id') != reply_token:
                 raise DomainError('修改预览提示已改变，请查看当前提示', 409)
+            proposal = store.get('native_revision_proposal', pending['proposal_id'])
+            store.put('native_revision_proposal', {**proposal, '_rejected': True})
             store.put('chat', {**current, '_native_artifact_prompt': None})
+            store.put('native_approval_receipt', {'id': 'approval:' + reply_token,
+                'chat_id': chat['id'], 'project_id': chat['project_id'], 'status': 'cancelled', 'parts': []})
         return _result('已取消修改预览，成果保持原版本。')
 
     @tool
@@ -501,7 +518,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     @emit
     async def start_pipeline_tool(requirements: str = '', intent: str = 'generate_case',
                                     stop_after: str = 'review', mode: str | None = None,
-                                    artifact_id: str | None = None) -> dict:
+                                    artifact_id: str | None = None, skip_scenarios: bool = False) -> dict:
         """Start the background test-design pipeline. Honor the user's requested stopping stage.
 
         intent is review_requirement, generate_scenario, generate_case or review_case;
@@ -509,6 +526,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         Omit stop_after unless the user explicitly requests an earlier stopping point.
         cases means DRAFTS ONLY without AI review; do not choose it merely because the user says
         "generate test cases". Other stops are analysis, scenarios and review.
+        Set skip_scenarios=true ONLY when the user explicitly asks to skip scenario generation and
+        generate cases directly from requirements. Keep understanding and clarification first.
         mode is auto or hitp (Human); Human pauses for approvals, it does not skip AI review.
         Set artifact_id explicitly to continue from saved understanding/scenarios or review saved cases.
         Omit artifact_id for fresh generation from requirements, regardless of the currently viewed card.
@@ -536,7 +555,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             if ids:
                 request['selected_ids'] = ids
         request.update(content=requirements or body.get('content', ''), intent=intent,
-                       mode=requested_mode, stop_after=stop_after)
+                       mode=requested_mode, stop_after=stop_after, skip_scenarios=skip_scenarios)
         # A narrow explicit task cannot silently grow into later stages.
         if intent == 'review_requirement':
             request['stop_after'] = 'analysis'
@@ -566,17 +585,27 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
 
     @tool
     @emit
-    async def resume_pipeline_tool(run_id: str | None = None, action: str = 'approved') -> dict:
+    async def resume_pipeline_tool(run_id: str | None = None, action: str = 'approved',
+                                   draft_only: bool = False) -> dict:
         """Approve exactly the frozen, currently presented pipeline confirmation.
 
         Use only when the user agrees to that result. Never call after making a modification in the
         same turn merely to approve the new version. Questions and estimates do not need this tool.
+        At understanding approval, explicit "skip scenarios, generate cases directly" uses action=skip_to_cases.
+        draft_only=true is only for an explicit request to stop at drafts without AI review.
+        action=rejected rejects current review suggestions without changing the saved cases.
         """
-        if action == 'rejected':
+        if action == 'rejected' and prompt.get('kind') != 'case_result_review':
             return _result('当前结果尚未确认，请直接说明需要修改的内容。', status='needs_input')
-        if action != 'approved':
-            raise DomainError('确认动作为 approved 或 rejected')
-        return await resume_once(run_id, action)
+        if action not in ('approved', 'skip_to_cases', 'rejected'):
+            raise DomainError('确认动作为 approved、skip_to_cases 或 rejected')
+        result = await resume_once(run_id, action, {'draft_only': draft_only})
+        if action == 'rejected':
+            result['message'] = '已拒绝这份评审建议，保留当前用例。'
+            result['resolution'] = 'rejected'
+        elif action == 'skip_to_cases':
+            result['message'] = '已按你的要求跳过场景，直接根据已确认需求生成用例。'
+        return result
 
     @tool
     @emit
@@ -592,6 +621,14 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         if prompt.get('kind') != 'clarification':
             raise DomainError('当前不是澄清问题，请说明要补充的需求内容')
         questions = prompt.get('questions', [])
+        command = body.get('command') or {}
+        if command.get('name') == 'clarification.answer':
+            from .clarification import bound_button_answer
+            if body.get('reply_kind') != 'clarification' or reply_token != prompt.get('id'):
+                raise DomainError('澄清问题已更新，请查看当前问题后重新选择。', 409)
+            answers = bound_button_answer(command, questions)
+            adopt_suggestions = False
+            run_id = prompt.get('run_id')
         identities = {str(row[key]).strip(): row['id'] for row in questions for key in ('id', 'question') if row.get(key)}
         values = {}
         for key, value in (answers or {}).items():
@@ -677,6 +714,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         request and produces Excel immediately after the required approvals, without another instruction.
         Never approve either preview yourself. Column operations apply to the whole case table.
         """
+        if body.get('_supervised'):
+            export_after_approval = False
         if not upsert_columns and not remove_columns and not hide_columns and column_order is None:
             raise DomainError('请说明要新增、删除、隐藏或修改的用例列')
         async with edit_session():
@@ -707,14 +746,32 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
 
     @tool
     @emit
-    async def revise_review_tool(feedback: str, run_id: str | None = None) -> dict:
+    async def revise_review_tool(feedback: str, run_id: str | None = None,
+                                 item_ids: list[str] | None = None) -> dict:
         """Refine pending AI review recommendations without applying them to cases or approving the gate.
 
         Use when the human supplies additional review opinions and wants to inspect revised suggestions.
         A background review produces a new confirmation prompt. Existing case rows remain unchanged.
+        Browser-selected rows bound the feedback scope. Only those rows are sent for AI revision;
+        other rows and review issues from the current pending proposal remain unchanged.
         """
         run = own_run(run_id)
-        value = await _await(pipeline.revise_review(run['id'], feedback))
+        if prompt.get('kind') != 'case_result_review' or prompt.get('run_id') != run['id']:
+            raise DomainError('请先打开当前等待确认的评审建议后补充意见', 409)
+        if not reply_token or reply_token != prompt.get('id'):
+            raise DomainError('评审建议已改变，请重新打开当前建议', 409)
+        if body.get('artifact_id') and body['artifact_id'] != prompt.get('artifact_id'):
+            raise DomainError('所选用例不属于当前评审建议', 409)
+        if body.get('artifact_revision') is not None and body['artifact_revision'] != prompt.get('artifact_revision'):
+            raise DomainError('所选用例版本已改变，请重新打开评审建议', 409)
+        selected = body.get('selected_ids')
+        ids = copy.deepcopy(item_ids if item_ids is not None else selected)
+        if selected is not None and ids is not None and not set(ids) <= set(selected):
+            raise DomainError('评审意见只能作用于本轮选中的用例', 409)
+        value = await _await(pipeline.revise_review(run['id'], feedback, selected_ids=ids,
+            expected_prompt_id=reply_token, artifact_id=prompt.get('artifact_id'),
+            artifact_revision=prompt.get('artifact_revision'),
+            proposal_id=prompt.get('proposal_id') or prompt.get('review_proposal_id')))
         return _result('已提交补充评审意见，正在重新生成建议；用例尚未修改，完成后请确认新评审建议。',
                        run_id=value['id'], run=public(value))
 
@@ -809,7 +866,12 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                 raise DomainError('当前模板提示已改变，请查看新的提示', 409)
             from .case_columns import cancel_deferred_export
             cancel_deferred_export(store, pending)
+            for template_id in pending.get('template_ids', []):
+                template = store.get('template', template_id)
+                store.put('template', {**template, '_rejected': True})
             store.put('chat', {**current, '_native_template_prompt': None})
+            store.put('native_approval_receipt', {'id': 'approval:' + reply_token,
+                'chat_id': chat['id'], 'project_id': chat['project_id'], 'status': 'cancelled', 'parts': []})
         return _result('已取消模板建议，Profile 保持原配置。')
 
     @tool
@@ -845,10 +907,45 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                                      item_ids: list[str] | None = None,
                                      profile_id: str | None = None) -> dict:
         """Export saved scenarios or cases to downloadable Excel files using their separate template columns."""
+        import json
+
+        step_id = body.get('_plan_step_id')
+        receipt_id = 'receipt:' + step_id if step_id else None
+        request = {'artifact_ids': artifact_ids, 'item_ids': item_ids, 'profile_id': profile_id,
+            'scope': {key: copy.deepcopy(body[key]) for key in ('artifact_id', 'selected_ids', 'profile_id',
+                '_scope_artifact_id', '_export_artifact_ids', '_expected_revisions', '_expected_profile') if key in body}}
+        fingerprint = hashlib.sha256(json.dumps(request, ensure_ascii=False,
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+        def completed_export():
+            if not receipt_id:
+                return None
+            try:
+                saved = store.get('execution_step_receipt', receipt_id)
+            except DomainError as exc:
+                if exc.status != 404:
+                    raise
+                return None
+            if (saved.get('chat_id') != chat['id'] or saved.get('project_id') != chat['project_id'] or
+                    saved.get('tool_name') != 'export_artifact_tool' or
+                    saved.get('request_fingerprint') != fingerprint):
+                raise DomainError('本计划步骤已用于另一项导出，不能改变其目标、选择或模板', 409)
+            return _result(saved['message'], copy.deepcopy(saved['parts']), status=saved['status'])
+
+        completed = completed_export()
+        if completed:
+            # A committed file is immutable; replay returns that receipt, even if the head changed later.
+            return completed
         ids = artifact_ids or [target()['id']]
+        if body.get('_export_artifact_ids') and ids != body['_export_artifact_ids']:
+            raise DomainError('本计划导出必须使用刚刚确认的成果', 409)
         snapshots = [copy.deepcopy(target(aid)) for aid in ids]
         chosen = profile(profile_id) if (profile_id or body.get('profile_id') or
             store.get('chat', chat['id']).get('profile_id')) else None
+        expected_profile = body.get('_expected_profile')
+        if expected_profile and (not chosen or chosen['id'] != expected_profile['id'] or
+                chosen['version'] != expected_profile['version']):
+            raise DomainError('本计划绑定的 Profile 已改变，尚未导出；请查看当前模板后重新提出要求', 409)
         # A chained model call cannot export the pre-edit rows while the user's preview awaits approval.
         pending_chat = store.get('chat', chat['id'])
         revision_prompt = pending_chat.get('_native_artifact_prompt')
@@ -885,19 +982,50 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             if chosen:
                 value['_profile'] = chosen['config']
             content = export_artifact(value, selected=selected)
-            record = {'id': uid('exp_'), 'chat_id': chat['id'], 'project_id': chat['project_id'],
+            export_id = ('exp_' + hashlib.sha256((step_id + '\0' + value['id']).encode()).hexdigest()
+                         if step_id else uid('exp_'))
+            record = {'id': export_id, 'chat_id': chat['id'], 'project_id': chat['project_id'],
                 'created_at': now(), 'name': 'tcg_' + value['type'] + '_v' + str(value['revision']) + '.xlsx',
                 'artifact_id': value['id'], 'revision': value['revision'],
                 'profile_id': chosen['id'] if chosen else None,
                 'profile_version': chosen['version'] if chosen else None,
                 '_bytes': base64.b64encode(content).decode(), 'sha256': hashlib.sha256(content).hexdigest()}
             records.append(record)
-        with store.transaction():
-            for record in records:
-                store.put('frozen_export', record)
         files = [{k: r[k] for k in ('name', 'artifact_id', 'revision', 'profile_id', 'profile_version')}
                  | {'url': '/api/exports/' + r['id']} for r in records]
-        return _result('已导出 Excel。', [{'type': 'files', 'files': files}])
+        result = _result('已导出 Excel。', [{'type': 'files', 'files': files}])
+        with store.transaction():
+            completed = completed_export()
+            if completed:
+                return completed
+            # Recheck heads at the same commit boundary as the bytes and durable step receipt.
+            for value in snapshots:
+                current = store.get('artifact', value['id'])
+                expected = body.get('_expected_revisions', {}).get(value['id'], value['revision'])
+                if (current['chat_id'] != chat['id'] or current['project_id'] != chat['project_id'] or
+                        current['revision'] != value['revision'] or current['revision'] != expected):
+                    raise DomainError('导出期间成果已改变，尚未保存文件；请基于当前版本重新提出要求', 409)
+            if chosen:
+                current_profile = store.get('profile', chosen['id'])
+                if (current_profile['project_id'] != chat['project_id'] or
+                        current_profile['version'] != chosen['version'] or
+                        expected_profile and (current_profile['id'] != expected_profile['id'] or
+                            current_profile['version'] != expected_profile['version'])):
+                    raise DomainError('导出期间 Profile 已改变，尚未保存文件；请查看当前模板后重试', 409)
+            current_chat = store.get('chat', chat['id'])
+            current_revision_prompt = current_chat.get('_native_artifact_prompt') or {}
+            current_template_prompt = current_chat.get('_native_template_prompt') or {}
+            if (current_revision_prompt.get('artifact_id') in ids or
+                    current_template_prompt.get('case_binding', {}).get('artifact_id') in ids):
+                raise DomainError('导出期间出现新的修改预览，请先确认当前修改，尚未保存文件', 409)
+            for record in records:
+                store.put('frozen_export', record)
+            if receipt_id:
+                store.put('execution_step_receipt', {'id': receipt_id, 'step_id': step_id,
+                    'chat_id': chat['id'], 'project_id': chat['project_id'], 'created_at': now(),
+                    'tool_name': 'export_artifact_tool', 'request_fingerprint': fingerprint,
+                    **copy.deepcopy(result)})
+        return result
 
     reads = [list_context_tool, list_artifacts_tool, list_sources_tool, read_artifact_tool, read_review_proposal_tool, read_knowledge_tool, read_profile_tool,
              estimate_workload_tool, analyze_artifact_tool]
@@ -905,8 +1033,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     # Typed conversation retains the full registry and native tool selection.
     reply_kind = body.get('reply_kind')
     if reply_kind in ('question', 'clarification', 'confirm'):
-        confirm_tools = ([apply_artifact_preview_tool] if prompt.get('kind') == 'artifact_proposal' else
-            [apply_profile_tool] if prompt.get('kind') == 'profile' else [resume_pipeline_tool])
+        confirm_tools = ([apply_artifact_preview_tool, discard_artifact_preview_tool] if prompt.get('kind') == 'artifact_proposal' else
+            [apply_profile_tool, discard_template_tool] if prompt.get('kind') == 'profile' else [resume_pipeline_tool])
         return reads + {'question': [], 'clarification': [answer_clarification_tool],
                         'confirm': confirm_tools}[reply_kind]
     return [*reads, modify_artifact_tool, apply_artifact_preview_tool, discard_artifact_preview_tool,

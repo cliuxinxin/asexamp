@@ -1,21 +1,19 @@
-import {useEffect,useState} from 'react';
 import {ArtifactCard} from './ArtifactCard';
-import {ChangePreview} from './ChangePreview';
+import {InlineChangeCard} from './InlineChangeCard';
 import {ChatEstimate} from './ChatEstimate';
 import {WorkspaceCoverage} from './WorkspaceCoverage';
 import {ClarificationDraftEditor} from './ClarificationDraftEditor';
-import {useConversationCommand} from './conversation';
-import {api,errText} from './api';
-import {ErrorBox} from './ui';
 import {KnowledgeUsage} from './KnowledgeUsage';
 import {GenerationCandidate} from './GenerationCandidate';
-import type {Artifact,GenerationCandidatePart,Json,TurnResponse} from './types';
+import {ExecutionPlan} from './ExecutionPlan';
+import type {Artifact,ConversationPrompt,GenerationCandidatePart,Json,TurnResponse} from './types';
 
-export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,onOpen,onChanged,onOpenKnowledge,compact=false,displayedTexts=[]}:{chatOnly?:boolean;response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;onOpenKnowledge?:()=>void;compact?:boolean;displayedTexts?:string[]}){
+export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,onOpen,onChanged,onOpenKnowledge,compact=false,displayedTexts=[],currentPrompt,onTurnResolved,onRevise,disabled=false,onBusyChange}:{chatOnly?:boolean;response:TurnResponse;refreshKey?:string;onTarget:(artifact:Artifact,ids:string[])=>void;onOpen?:(artifact:Artifact)=>void;onChanged:()=>void;onOpenKnowledge?:()=>void;compact?:boolean;displayedTexts?:string[];currentPrompt?:ConversationPrompt|null;onTurnResolved?:(response:TurnResponse)=>void|Promise<void>;onRevise?:()=>void;disabled?:boolean;onBusyChange?:(busy:boolean)=>void}){
  return <div className="conversation-parts">{(response.parts??[]).map((part,index)=>{
   const key=response.id+':'+index;
   const value=part as Json;
   switch(value.type){
+   case 'execution_plan':return <ExecutionPlan key={key} chatId={value.chat_id??value.plan?.chat_id} planId={value.plan_id} snapshot={value.plan} summary={value.summary} refreshKey={refreshKey}/>;
    case 'generation_candidate':return <GenerationCandidate key={key} part={part as GenerationCandidatePart}/>;
    case 'project_knowledge':return <KnowledgeUsage key={key} facts={Array.isArray(value.facts)?value.facts:[]} onOpenKnowledge={onOpenKnowledge} summaryShown={displayedTexts.includes(response.message.trim())}/>;
    case 'assistant_note':return typeof value.text==='string'&&value.text.trim()&&!displayedTexts.includes(value.text.trim())?<p key={key} className="preserve">{value.text}</p>:null;
@@ -24,7 +22,7 @@ export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,o
    case 'estimate':return compact?<details key={key} className="receipt-details"><summary>查看用例数量估算</summary><ChatEstimate estimate={value.data as any}/></details>:<ChatEstimate key={key} estimate={value.data as any}/>;
    case 'artifact':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} revision={value.revision} readOnly refreshKey={refreshKey} onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
    case 'case_details':return <ArtifactCard key={key} compact={compact} id={value.artifact_id} snapshot={{id:value.artifact_id,type:'cases',title:value.title??'用例步骤与预期',revision:value.revision,items:value.items,view_item_ids:value.items.map((item:Json)=>String(item.id))}} readOnly initialDetailsOpen onTarget={onTarget} onOpen={onOpen} onChanged={onChanged}/>;
-   case 'diff':return compact||chatOnly?<ArchivedDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged}/>:<ConversationDiff key={key} proposalId={value.proposal_id} changes={value.changes} onChanged={onChanged}/>;
+   case 'diff':{const active=!!currentPrompt&&[currentPrompt.proposal_id,currentPrompt.review_proposal_id].includes(value.proposal_id);return <InlineChangeCard key={key} proposalId={value.proposal_id} changes={value.changes} prompt={active?currentPrompt:undefined} readOnly={!active} disabled={disabled} onChanged={onChanged} onTurnResolved={onTurnResolved} onRevise={onRevise} onBusyChange={onBusyChange}/>;}
    case 'coverage':return <WorkspaceCoverage key={key} artifactId="" revision={0} initialData={value.data} initialOpen={!compact}/>;
    case 'source_impact':return compact?<details key={key} className="receipt-details"><summary>资料影响 · {value.data.summary||'查看分析结果'}</summary><SourceImpact data={value.data}/></details>:<SourceImpact key={key} data={value.data}/>;
    case 'files':return <div key={key} className="turn-files" aria-label="导出文件">{value.files.map((file:Json,i:number)=>/^\/(?!\/)|^https?:\/\//.test(file.url)?<a key={i} className="text-accent" href={file.url} download={file.name}>{file.name}</a>:<span key={i}>{file.name}（下载地址不可用）</span>)}</div>;
@@ -35,11 +33,6 @@ export function ConversationParts({chatOnly=false,response,refreshKey,onTarget,o
 
 function PendingItems({items}:{items:Json[]}){
  return <>{items.map((item,index)=><div key={item.id??index}><p>{item.message??item.question??item.title??'请明确本次操作的对象。'}</p>{Array.isArray(item.candidates)&&item.candidates.length>0&&<ol>{item.candidates.map((candidate:Json,candidateIndex:number)=><li key={candidate.id??candidateIndex}>{candidate.title??candidate.name??'未命名成果'} · {candidate.id}{candidate.revision!==undefined?` · v${candidate.revision}`:''}</li>)}</ol>}</div>)}</>;
-}
-
-function ArchivedDiff({proposalId,changes,onChanged}:{proposalId:string;changes:Json[];onChanged:()=>void}){
- const [open,setOpen]=useState(false);
- return <details className="receipt-details" onToggle={event=>setOpen(event.currentTarget.open)}><summary>修改预览 · 查看当时的差异</summary>{open&&<ConversationDiff proposalId={proposalId} changes={changes} onChanged={onChanged} readOnly/>}</details>;
 }
 
 function SourceImpact({data}:{data:Json}){
@@ -69,11 +62,4 @@ function SourceImpact({data}:{data:Json}){
   <p className={partial?'coverage-gap':'muted small-text'}>{partial?'检查范围不完整，请缩小资料或需求后重试。':`检查范围完整：已覆盖 ${coverage.requirement_count??0} 条需求和 ${coverage.evidence_count??0} 个资料片段。`}</p>
   {(broad||uncertain)&&<p className="coverage-gap">保存更新前请明确采用全部需求范围；本次结果本身不会写入正文或修改成果。</p>}
  </section>;
-}
-
-function ConversationDiff({proposalId,changes,onChanged,readOnly=false}:{proposalId:string;changes:Json[];onChanged:()=>void;readOnly?:boolean}){
- const [originals,setOriginals]=useState<Record<string,Artifact>>({});const [error,setError]=useState('');const [working,setWorking]=useState(false);const [resolution,setResolution]=useState('');const command=useConversationCommand();
- useEffect(()=>{let alive=true;Promise.all(changes.filter(change=>!change.before_items).map(async change=>[change.artifact_id,await api<Artifact>('/artifacts/'+encodeURIComponent(change.artifact_id)+'/revisions/'+change.expected_revision)] as const)).then(entries=>{if(alive)setOriginals(Object.fromEntries(entries));}).catch(e=>{if(alive)setError(errText(e));});return()=>{alive=false;};},[changes]);
- async function resolve(name:string){setWorking(true);setError('');try{const result=await command({name,arguments:{proposal_id:proposalId,...(changes[0]?{artifact_id:changes[0].artifact_id,expected_revision:changes[0].expected_revision}:{})}},name==='artifact.apply'?'应用这项预览修改':'取消这项预览修改');if(result.status==='succeeded'){setResolution(result.message);onChanged();}else setError(result.message);}catch(e){setError(errText(e));}finally{setWorking(false);}}
- return <section className="action-preview" aria-label="变更预览">{changes.map((change,index)=><ChangePreview key={index} change={change} before={originals[change.artifact_id]}/>)}<ErrorBox message={error}/>{resolution?<p role="status">{resolution}</p>:!readOnly&&proposalId&&<div className="actions"><button className="primary" disabled={working} onClick={()=>void resolve('artifact.apply')}>应用此修改</button><button disabled={working} onClick={()=>void resolve('artifact.discard')}>取消此修改</button></div>}</section>;
 }

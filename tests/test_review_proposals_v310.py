@@ -185,8 +185,8 @@ async def test_cancel_review_keeps_generated_cases_and_explicit_drafts_only_does
         limited = await runtime.start_run(other['id'], {'mode': 'hitp', 'stop_after': 'cases', 'source_ids': [source['id']]})
         limited = await settled(runtime, limited['id'])
         limited = await agree(runtime, await agree(runtime, limited))
-        assert limited['interrupt']['type'] == 'case_draft_review'
-        assert (await agree(runtime, limited))['status'] == 'completed'
+        assert limited['status'] == 'completed'
+        assert limited.get('interrupt') is None
         assert len([t for t, _ in model.calls if t == 'review_cases']) == count
     finally:
         await runtime.stop()

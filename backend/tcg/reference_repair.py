@@ -4,16 +4,10 @@ import copy
 from jsonschema import Draft202012Validator
 
 from .native_schemas import TEXT, object_schema
+from .prompt_loader import load_prompt
 from .schemas import DomainError
 
 
-REFERENCE_INSTRUCTION = (
-    'Repair evidence references only for the supplied items. Their business fields are immutable. '
-    'Choose exact IDs only from evidence, and for every selected ref quote a contiguous passage from '
-    'that evidence text supporting the item. Explain the connection in reason. A parent link alone '
-    'does not prove the case behavior. Never borrow a ref merely to pass validation. '
-    'If current evidence cannot support the item, return refs=[] and support=[] with the reason; '
-    'do not invent evidence, change the item, or omit it. Return each supplied ID exactly once.')
 
 
 def submission_kind(task, context):
@@ -105,7 +99,7 @@ async def repair_reference_fields(call, task, context, original, save_candidate=
             call_id=getattr(original, 'call_id', None), item_ids=ids, affected_count=len(ids),
             preserved_count=len(rows) - len(ids))
     try:
-        repaired = await call('repair_evidence_refs', repair_context, schema, REFERENCE_INSTRUCTION)
+        repaired = await call('repair_evidence_refs', repair_context, schema, load_prompt('evidence.repair'))
     except DomainError as exc:
         exc.item_ids = ids
         raise

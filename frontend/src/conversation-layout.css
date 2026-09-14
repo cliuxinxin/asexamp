@@ -227,6 +227,14 @@ body{background:var(--canvas);}
 .v29 .conversation-prompt ol{padding-left:24px;margin:10px 0;}
 .v29 .conversation-prompt li+li{margin-top:12px;}
 .v29 .conversation-questions strong{font-weight:550;}
+.v29 .clarification-question{padding:12px 0;}
+.v29 .clarification-options{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;}
+.v29 .clarification-option{flex:1 1 220px;min-width:0;padding:12px;border:1px solid var(--border,#e8dfe1);border-radius:10px;background:var(--surface,#fff);}
+.v29 .clarification-option button,.v29 .clarification-adopt{border:1px solid #e0bcc4;border-radius:8px;padding:7px 12px;background:#fff8fa;color:#9e203e;text-align:left;white-space:normal;}
+.v29 .clarification-option button:hover:not(:disabled),.v29 .clarification-adopt:hover:not(:disabled){background:#fbe8ed;border-color:#c74f6c;}
+.v29 .clarification-option button:focus-visible,.v29 .clarification-adopt:focus-visible{outline:2px solid #bb3555;outline-offset:3px;}
+.v29 .clarification-option p{margin-bottom:0;overflow-wrap:anywhere;}
+.v29 .clarification-options button:disabled,.v29 .clarification-adopt:disabled{opacity:.55;cursor:wait;}
 .v29 .conversation-review{margin:12px 0;border:1px solid var(--line);border-radius:8px;}
 .v29 .conversation-review table{min-width:520px;}
 .v29 .conversation-review td{vertical-align:top;overflow-wrap:anywhere;}

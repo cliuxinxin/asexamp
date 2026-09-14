@@ -125,3 +125,11 @@ test('saved review text accepts a textual modification scope as well as field ar
  fixture(artifact,linked());render(<ArtifactCard id={artifact.id} snapshot={artifact} simplified onTarget={()=>{}} onChanged={()=>{}}/>);
  const row=screen.getByRole('checkbox',{name:'选择 C-1',exact:true}).closest('tr')!;assert.ok(within(row).getByText('第二步的预期结果'));
 });
+
+test('direct requirement cases show skipped scenarios without false missing lineage',async()=>{
+ const artifact={...cases,items:[{...caseItem,scenario_id:'',requirement_ids:['R-1']}],report:{lineage:{analysis_artifact_id:'analysis',analysis_revision:2,generation_mode:'direct_requirements'}}};
+ fixture(artifact,{lineage_rows:[{item_id:'C-1',scenario:null,scenario_skipped:true,requirements:[requirementParent],status:'linked',stale:false}]});
+ render(<ArtifactCard id={artifact.id} snapshot={artifact} simplified onTarget={()=>{}} onChanged={()=>{}}/>);
+ await screen.findByText('场景：N/A（已跳过）');assert.ok(screen.getByText('R-1'));
+ assert.equal(screen.queryByText('尚未关联'),null);assert.ok(screen.getByRole('button',{name:'未关联 0'}));
+});

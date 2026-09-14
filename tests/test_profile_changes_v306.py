@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from tcg.native_api import register_routes
+from tcg.native_chat import NativeChatAgent
 from tcg.documents import parse_text
 from tcg.profile_changes import apply_profile_change, preview_profile_change
 from tcg.schemas import DomainError
@@ -101,6 +102,7 @@ async def test_http_preview_and_manual_confirmation_persist_chat_history(proposa
     p = proposal
     app = FastAPI()
     app.state.store = p.store
+    app.state.conversation = NativeChatAgent(p.store, object(), object(), object())
     @app.exception_handler(DomainError)
     async def domain_error(request, exc):
         return JSONResponse({'detail': exc.message}, status_code=exc.status)

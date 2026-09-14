@@ -1,7 +1,7 @@
 import {FileText} from 'lucide-react';
 import type {ConversationPrompt,Run} from './types';
 
-const stages:Record<string,string>={intake:'理解任务',understand:'理解需求',understand_requirements:'理解需求',apply_clarification:'更新需求理解',analysis:'分析需求',requirement_review:'确认需求',strategy_review:'确认需求理解',scenario_generation:'生成场景',generate_scenarios:'生成场景',scenarios:'生成场景',scenario_review:'确认场景',case_generation:'生成用例',generate_cases:'生成用例',cases:'生成用例',case_draft_review:'确认用例',case_result_review:'确认评审建议',case_review:'评审用例',review_cases:'评审用例',review:'评审用例',clarification:'补充信息',completed:'已完成'};
+const stages:Record<string,string>={intake:'理解任务',understand:'理解需求',understand_requirements:'理解需求',apply_clarification:'更新需求理解',analysis:'分析需求',requirement_review:'确认需求',strategy_review:'确认需求理解',scenario_generation:'生成场景',generate_scenarios:'生成场景',scenarios:'生成场景',scenario_review:'确认场景',case_generation:'生成用例',generate_cases:'生成用例',cases:'生成用例',direct_cases:'直接根据需求生成用例',case_draft_review:'确认用例',case_result_review:'确认评审建议',case_review:'评审用例',review_cases:'评审用例',review:'评审用例',clarification:'补充信息',completed:'已完成'};
 export const workflowStageLabel=(stage:string)=>stages[stage]??'当前阶段';
 
 export function WorkflowSummary({run,prompt,hasResult,onOpen}:{run?:Run;prompt?:ConversationPrompt|null;hasResult:boolean;onOpen:()=>void}){

@@ -19,7 +19,7 @@ const json=(value:unknown)=>new Response(JSON.stringify(value),{status:200,heade
 const review={summary:'已补充锁定后的错误提示，仍需确认锁定时长。',issues:[{title:'锁定时长待确认',detail:'需求未明确自动解锁时间，请补充实际规则。',case_ids:['TC-2'],refs:['source#P2']}],scope:{reviewed_count:3,total_count:3},notes:['已保留人工填写的执行结果。']};
 function fixture(prompt:any,status='waiting'){
  const turns:any[]=[];
- const state:any={chat:{id:'chat',project_id:'project',title:'登录测试'},sources:[],messages:[{id:'assistant',role:'assistant',content:'已保存当前成果。',metadata:{}}],runs:[{id:'run',chat_id:'chat',intent:'generate_case',mode:'hitp',stage:prompt.kind==='busy'?'case_review':prompt.kind,status,artifact_ids:[],updated_at:'2026-09-13T00:00:00Z'}],conversation_prompt:prompt};
+ const state:any={chat:{id:'chat',project_id:'project',title:'登录测试'},sources:[],messages:[{id:'assistant',role:'assistant',content:'已保存当前成果。',metadata:prompt.review_proposal_id?{run_id:'run',review_proposal_id:prompt.review_proposal_id}:{}}],runs:[{id:'run',chat_id:'chat',intent:'generate_case',mode:'hitp',stage:prompt.kind==='busy'?'case_review':prompt.kind,status,artifact_ids:[],updated_at:'2026-09-13T00:00:00Z'}],conversation_prompt:prompt};
  globalThis.fetch=(async(input:any,init:any={})=>{
   const path=String(input).replace(/^\/api/,'');
   if(path==='/projects')return json([{id:'project',name:'登录项目'}]);
@@ -27,6 +27,7 @@ function fixture(prompt:any,status='waiting'){
   if(path==='/projects/project/profiles')return json([{id:'profile',name:'Default',version:1,config:{}}]);
   if(path==='/projects/project/chats')return json([state.chat]);
   if(path==='/chats/chat')return json(state);
+  if(path==='/runs/run/review-proposals/review')return json({id:'review',artifact_id:'cases',expected_revision:2,report:review,changes:[{op:'update',id:'TC-2',before:{id:'TC-2',title:'登录锁定',steps:[{action:'登录失败',expected:'显示提示'}]},after:{id:'TC-2',title:'登录锁定',steps:[{action:'连续登录失败',expected:'显示锁定提示'}]},fields:['steps']}]});
   if(path==='/chats/chat/turns'){turns.push(JSON.parse(init.body));return json({id:'turn',status:'succeeded',message:'已收到意见。',parts:[],pending:[],actions:[]});}
   if(path.endsWith('/workspace-state'))return json({});
   return json([]);
@@ -34,7 +35,7 @@ function fixture(prompt:any,status='waiting'){
  return {turns,state};
 }
 async function ready(){render(<App/>);await screen.findByRole('region',{name:'当前工作流'});}
-const gate={id:'prompt:review:2',kind:'case_result_review',run_id:'run',artifact_id:'cases',artifact_revision:2,title:'请确认评审后的测试用例',message:'确认后完成本轮测试设计。',review};
+const gate={id:'prompt:review:2',kind:'case_result_review',run_id:'run',artifact_id:'cases',artifact_revision:2,review_proposal_id:'review',title:'请确认评审后的测试用例',message:'确认后完成本轮测试设计。',review};
 
 test('processing has one stage indicator above the composer and no duplicate reply card',async()=>{
  fixture({id:'busy',kind:'busy',busy:true,title:'正在处理当前步骤',message:'后台正在执行任务。'},'running');await ready();
@@ -46,7 +47,7 @@ test('processing has one stage indicator above the composer and no duplicate rep
 });
 
 test('plain confirmation remains above the input without a duplicate stage card',async()=>{
- fixture({...gate,kind:'scenario_review',title:'请确认当前测试场景',review:undefined});await ready();
+ fixture({...gate,kind:'scenario_review',title:'请确认当前测试场景',review:undefined,review_proposal_id:undefined});await ready();
  assert.ok(screen.queryByRole('region',{name:'当前对话提示'})===null);
  assert.equal(screen.queryByText('请确认当前测试场景'),null);
  const reply=screen.getByRole('button',{name:'确认场景并继续'});
@@ -58,6 +59,9 @@ test('plain confirmation remains above the input without a duplicate stage card'
 
 test('review gate opens opinions in the conversation and keeps confirmation explicit',async()=>{
  const {turns}=fixture(gate);await ready();
+ await screen.findByRole('table',{name:'TC-2 修改对比'});
+ const card=screen.getByRole('region',{name:'评审建议预览'});
+ assert.ok(card.closest('article.message.assistant'));
  const table=screen.getByRole('table',{name:'AI 评审意见'});
  assert.ok(within(table).getByText('锁定时长待确认'));
  assert.ok(within(table).getByText('需求未明确自动解锁时间，请补充实际规则。'));
@@ -71,7 +75,7 @@ test('review gate opens opinions in the conversation and keeps confirmation expl
  assert.ok(screen.getByRole('region',{name:'当前工作流'}).textContent?.includes('确认评审建议'));
  const input=screen.getByLabelText('聊天输入') as HTMLTextAreaElement;
  fireEvent.change(input,{target:{value:'保留我的草稿'}});
- fireEvent.click(screen.getByRole('button',{name:'确认评审建议并修改用例'}));
+ fireEvent.click(screen.getByRole('button',{name:'接受评审建议'}));
  await waitFor(()=>assert.equal(turns.length,1));
  assert.equal(turns[0].reply_kind,'confirm');assert.equal(turns[0].reply_to,gate.id);
  assert.equal(input.value,'保留我的草稿');
@@ -79,6 +83,7 @@ test('review gate opens opinions in the conversation and keeps confirmation expl
 
 test('additional review feedback is an ordinary message bound to the current review',async()=>{
  const {turns}=fixture(gate);await ready();
+ await screen.findByRole('table',{name:'TC-2 修改对比'});
  fireEvent.change(screen.getByLabelText('聊天输入'),{target:{value:'锁定时长改为 20 分钟，请更新相关用例。'}});
  fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
  await waitFor(()=>assert.equal(turns.length,1));

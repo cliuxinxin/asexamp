@@ -68,7 +68,7 @@ test('a lost HTTP response stays in its original conversation and later saved me
  await screen.findByText('服务器已记录失败');assert.equal(screen.queryByText('连接中断'),null);assert.equal(document.querySelectorAll('.message.user').length,1);assert.equal(document.querySelectorAll('.message.assistant').length,1);
 });
 
-test('clarification replies are outside the composer, send one answer and preserve an existing draft',async()=>{
+test('clarification replies stay beside their questions, send one answer and preserve an existing draft',async()=>{
  const {calls}=fixture({prompt:clarification,onTurn:(body,state)=>{
   state.conversation_prompt={...clarification,id:'gate:clarification:2',questions:[clarification.questions[1]]};
   return json({id:'turn',status:'succeeded',message:'已记录第一题答案',parts:[],pending:[],actions:[]});
@@ -80,10 +80,13 @@ test('clarification replies are outside the composer, send one answer and preser
  assert.ok(choices.compareDocumentPosition(input)&dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
  assert.ok(within(choices).getByRole('group',{name:'澄清答复'}));
  assert.equal(within(choices).queryByRole('group',{name:'流程确认'}),null);
- fireEvent.click(within(choices).getByRole('button',{name:'采用 Q1 建议：锁定 15 分钟后解锁'}));
+ assert.equal(within(choices).queryByRole('button',{name:/采用 Q1 建议/}),null);
+ const question=screen.getByRole('group',{name:'Q1 连续失败后多久解锁？'});
+ assert.ok(question.closest('.message.assistant'));
+ fireEvent.click(within(question).getByRole('button',{name:'采用 Q1 建议：锁定 15 分钟后解锁'}));
  await waitFor(()=>assert.equal(calls.filter(call=>call.path.endsWith('/turns')).length,1));
  const body=calls.find(call=>call.path.endsWith('/turns')).body;
- assert.equal(body.reply_to,clarification.id);assert.equal(body.command,undefined);assert.equal(body.reply_kind,'clarification');
+ assert.equal(body.reply_to,clarification.id);assert.deepEqual(body.command,{name:'clarification.answer',arguments:{answers:{Q1:'锁定 15 分钟后解锁'}}});assert.equal(body.reply_kind,'clarification');
  assert.match(body.content,/Q1（连续失败后多久解锁？）：锁定 15 分钟后解锁/);
  assert.match(body.content,/仅提交以下澄清答案/);assert.doesNotMatch(body.content,/Q2/);
  await waitFor(()=>assert.equal(screen.queryByRole('button',{name:/采用 Q1 建议/}),null));
@@ -160,8 +163,9 @@ test('a local failure follows its already saved user even when the client clock 
  assert.deepEqual(messages.map(message=>message.role),['user','assistant']);assert.equal(messages[0].id,input.id);assert.equal(messages[1].content,'连接中断');
 });
 
-test('busy replies disable individual quick sends',()=>{
+test('busy replies disable the optional aggregate quick send',()=>{
  const replies:string[]=[];const view=render(<ConversationSuggestions prompt={clarification} disabled onChoose={text=>replies.push(text)}/>);
- const button=screen.getByRole('button',{name:/采用 Q1 建议/}) as HTMLButtonElement;assert.equal(button.disabled,true);fireEvent.click(button);assert.deepEqual(replies,[]);
- view.rerender(<ConversationSuggestions prompt={clarification} onChoose={text=>replies.push(text)}/>);fireEvent.click(screen.getByRole('button',{name:/采用 Q1 建议/}));assert.equal(replies.length,1);
+ const button=screen.getByRole('button',{name:'采用全部建议并更新理解'}) as HTMLButtonElement;assert.equal(button.disabled,true);fireEvent.click(button);assert.deepEqual(replies,[]);
+ assert.equal(screen.queryByRole('button',{name:/采用 Q1 建议/}),null);
+ view.rerender(<ConversationSuggestions prompt={clarification} onChoose={text=>replies.push(text)}/>);fireEvent.click(screen.getByRole('button',{name:'采用全部建议并更新理解'}));assert.equal(replies.length,1);
 });

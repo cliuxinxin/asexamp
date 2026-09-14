@@ -3,17 +3,6 @@ import copy
 import re
 
 
-ANALYSIS_DIAGRAM_INSTRUCTION = (
-    'Include exactly three complementary current requirement diagrams in report.diagrams: '
-    '业务流程图 using flowchart TD, 领域思维导图 using mindmap, and 状态转换图 using stateDiagram-v2. '
-    'Show business actions/branches, domain concepts/rules, and entity states/transitions respectively. '
-    'Use the current requirement facts and evidence only, never a test-generation workflow. '
-    'Do not infer execution order from row order or invent states, transitions, actors or conditions. '
-    'If transition or ordering facts are unavailable, explicitly mark the missing information in that view. '
-    'Each diagram has a title and one plain Mermaid string; no fences, HTML, directives or style commands. '
-    'Keep each view concise, use safe node IDs and quote text labels. '
-    'When understanding changes, refresh all three views; do not copy outdated diagram text. '
-)
 
 _VIEWS = (('flowchart', '业务流程图'), ('mindmap', '领域思维导图'), ('stateDiagram-v2', '状态转换图'))
 
@@ -69,7 +58,7 @@ def complete_analysis_diagrams(report, rows, *, previous=None, whole_response=Tr
     Missing diagrams must not reject valid requirements or create another model
     retry loop. Local views explicitly mark any relationships unavailable in the
     typed requirements. Models normally provide the business semantics in the
-    original understand/revise call through ANALYSIS_DIAGRAM_INSTRUCTION.
+    original understand/revise call through the analysis.diagrams prompt.
     """
     supplied = report.get('diagrams', [])
     supplied = supplied if isinstance(supplied, list) else []

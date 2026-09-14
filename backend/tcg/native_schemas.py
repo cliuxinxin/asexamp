@@ -10,7 +10,12 @@ def object_schema(properties, required=(), *, extra=False):
 
 def report_schema(kind=None):
     suggestion = object_schema({'question': TEXT, 'answer': TEXT, 'basis': TEXT,
-        'refs': STRINGS, 'confidence': {'type': 'string', 'enum': ['supported', 'assumption']}},
+        'refs': STRINGS, 'confidence': {'type': 'string', 'enum': ['supported', 'assumption']},
+        'options': {'type': 'array', 'minItems': 2, 'items': object_schema({
+            'id': TEXT, 'label': TEXT, 'answer': TEXT}, ['id', 'label', 'answer']),
+            'description': 'Optional genuinely mutually exclusive answers. Each label is concise and '
+                'each answer states the full business consequence. Omit for open-ended questions; '
+                'unselected options are not confirmed requirements.'}},
         ['question', 'answer', 'basis', 'refs', 'confidence'])
     schema = object_schema({'summary': TEXT, 'questions': STRINGS,
         'question_suggestions': {'type': 'array', 'items': suggestion},
@@ -41,7 +46,7 @@ def rows_schema(kind, profile=None):
         props.update(priority=TEXT, requirement_ids=STRINGS)
         required.extend(['priority', 'requirement_ids'])
     if kind == 'cases':
-        props.update(scenario_id=TEXT, type=TEXT, priority=TEXT, preconditions=TEXT,
+        props.update(scenario_id=TEXT, requirement_ids=STRINGS, type=TEXT, priority=TEXT, preconditions=TEXT,
             steps={'type': 'array', 'minItems': 1, 'items': object_schema(
                 {'action': TEXT, 'expected': TEXT}, ['action', 'expected'])})
         required.extend(['scenario_id', 'type', 'priority', 'preconditions', 'steps'])

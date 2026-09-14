@@ -128,12 +128,15 @@ async def current_prompt(store, pipeline, chat):
             artifact = store.revision(gate['artifact_id'], gate['artifact_revision'])
             result['review'] = review_opinions(artifact)
     if gate['type'] == 'clarification':
+        from .clarification import question_options
         suggestions = {q.get('question'): q for q in gate.get('question_suggestions', [])}
         result['questions'] = []
         for entry in gate.get('questions', []):
             question = entry if isinstance(entry, str) else entry.get('question', '')
             detail = entry if isinstance(entry, dict) else suggestions.get(question, {})
-            result['questions'].append({**{key: value for key, value in detail.items() if key != 'answer'},
+            options = question_options(detail.get('options'))
+            result['questions'].append({**{key: value for key, value in detail.items() if key not in ('answer', 'options')},
+                **({'options': options} if options else {}),
                 'id': detail.get('id') or 'q_' + hashlib.sha256(question.encode()).hexdigest()[:12],
                 'question': question, 'suggestion': detail.get('suggestion') or detail.get('answer') or
                     '暂按现有明确需求设计，缺失规则保留待确认。'})

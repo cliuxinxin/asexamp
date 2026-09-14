@@ -21,9 +21,9 @@ export function ConversationSuggestions({prompt,disabled=false,onChoose,onViewPr
   text:answerPrefix+'\n'+question.id+'（'+question.question+'）：'+question.suggestion,kind:'clarification',
  })):[];
  const groups:{label:string;replies:Reply[]}[]=[];
- if(questions.length){
+ if(questions.length>1&&!unanswered.some(question=>(question.options?.length??0)>1)){
   const all=questions.length>1?[{id:'questions:all',label:questions.length===unanswered.length?'采用全部建议并更新理解':'采用现有 '+questions.length+' 条建议并更新理解',text:answerPrefix+'\n'+questions.map(question=>question.text.slice(answerPrefix.length+1)).join('\n'),kind:'clarification' as const}]:[];
-  groups.push({label:'澄清答复',replies:[...all,...questions]});
+  groups.push({label:'澄清答复',replies:all});
  }
  const review=reviewReplies[prompt.kind];
  if(review&&!unanswered.length)groups.push({label:'流程确认',replies:[{id:'gate:'+prompt.kind,label:review.label,text:review.text,kind:'confirm'}]});

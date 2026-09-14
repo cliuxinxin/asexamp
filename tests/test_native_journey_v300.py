@@ -27,6 +27,7 @@ SHARED_RULE = '已确认：账号连续五次失败时锁定10分钟，期满自
 
 class NativeJourneyChatModel(BaseChatModel):
     gateway: Any = Field(exclude=True)
+    tool_names: frozenset[str] = frozenset()
 
     @property
     def _llm_type(self):
@@ -36,18 +37,46 @@ class NativeJourneyChatModel(BaseChatModel):
         names = {tool.name if hasattr(tool, 'name') else tool['function']['name']
                  for tool in tools}
         self.gateway.bound_tools.append(names)
-        return self
+        return self.model_copy(update={"tool_names": frozenset(names)})
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if 'submit_execution_plan' in self.tool_names:
+            self.gateway.planner_inputs.append(copy.deepcopy(messages))
+            assert self.gateway.next_call is not None
+            name, arguments = self.gateway.next_call
+            capabilities = {
+                'start_pipeline_tool': 'pipeline_start', 'control_pipeline_tool': 'pipeline_control',
+                'resume_pipeline_tool': 'pipeline_control', 'modify_artifact_tool': 'artifact_edit',
+                'update_from_sources_tool': 'artifact_edit', 'modify_case_columns_tool': 'case_columns',
+                'estimate_workload_tool': 'estimate', 'analyze_artifact_tool': 'answer',
+                'read_artifact_tool': 'answer', 'list_context_tool': 'answer',
+                'add_knowledge_tool': 'knowledge', 'answer_clarification_tool': 'clarification',
+                'modify_profile_tool': 'profile_edit', 'learn_template_tool': 'template_learn',
+                'revise_review_tool': 'review_edit', 'save_samples_tool': 'samples',
+                'complete_template_fields_tool': 'template_fill', 'export_artifact_tool': 'export',
+                'apply_artifact_preview_tool': 'current_control', 'apply_profile_tool': 'current_control',
+                'discard_artifact_preview_tool': 'current_control', 'discard_template_tool': 'current_control'}
+            steps = [{'capability': capabilities[name],
+                'instruction': '按用户本次原话处理当前请求，不扩大范围。'}]
+            if name == 'modify_case_columns_tool' and arguments.get('export_after_approval'):
+                steps.append({'capability': 'export', 'instruction': '导出刚才修改并确认后的用例 Excel。'})
+                self.gateway.deferred_exports.append({'artifact_id': arguments['artifact_id']})
+            plan = {'title': '处理本次请求', 'steps': steps}
+            message = AIMessage(content='', tool_calls=[{'name': 'submit_execution_plan', 'args': plan,
+                'id': 'planner-' + str(len(self.gateway.planner_inputs)), 'type': 'tool_call'}])
+            return ChatResult(generations=[ChatGeneration(message=message)])
         self.gateway.chat_inputs.append(copy.deepcopy(messages))
         if isinstance(messages[-1], ToolMessage):
             self.gateway.tool_results.append(copy.deepcopy(messages[-1]))
             message = AIMessage(content='已处理当前请求，请查看当前成果和下一步提示。')
         else:
-            assert self.gateway.next_call is not None, 'Unexpected model decision without a scripted user turn.'
-            name, arguments = self.gateway.next_call
-            self.gateway.next_call = None
-            assert any(name in names for names in self.gateway.bound_tools), name
+            if 'export_artifact_tool' in self.tool_names and self.gateway.deferred_exports:
+                name, arguments = 'export_artifact_tool', self.gateway.deferred_exports.pop(0)
+            else:
+                assert self.gateway.next_call is not None, 'Unexpected model decision without a scripted user turn.'
+                name, arguments = self.gateway.next_call
+                self.gateway.next_call = None
+            assert name in self.tool_names, (name, self.tool_names)
             self.gateway.tool_calls.append((name, copy.deepcopy(arguments)))
             message = AIMessage(content='', tool_calls=[{'name': name, 'args': arguments,
                 'id': 'native-call-' + str(len(self.gateway.tool_calls)), 'type': 'tool_call'}])
@@ -63,6 +92,9 @@ class NativeJourneyGateway:
         self.bound_tools = []
         self.tool_calls = []
         self.tool_results = []
+        self.planner_inputs = []
+        self.direct_controls = []
+        self.deferred_exports = []
         self.chat_inputs = []
         self.generations = []
         self.model = NativeJourneyChatModel(gateway=self)
@@ -150,7 +182,15 @@ class NativeJourney:
         assert isinstance(turn['id'], str) and turn['client_message_id'] == body['client_message_id']
         assert isinstance(turn['message'], str)
         assert all(isinstance(turn[key], list) for key in ('parts', 'pending', 'actions'))
-        assert self.gateway.next_call is None, 'The user turn must be interpreted by the bound chat model.'
+        if self.gateway.next_call is not None:
+            invoked = any(action['name'] == tool_name and action['status'] == status
+                          for action in turn['actions'])
+            stale_control = status == 'needs_input' and reply and any(
+                action['name'] == 'current_control' and action['status'] == 'needs_input'
+                and action['result'].get('error_status') == 409 for action in turn['actions'])
+            assert invoked or stale_control, turn
+            self.gateway.direct_controls.append(self.gateway.next_call)
+            self.gateway.next_call = None
         return turn
 
     def gate(self, kind):
@@ -277,8 +317,8 @@ def test_native_chat_tools_drive_each_human_gate_and_resume_reads_current_artifa
     assert snapshot['conversation_prompt'] is None
     assert j.counts() == {'understand_requirements': 1, 'generate_scenarios': 1,
                           'generate_cases': 1, 'review_cases': 1, 'estimate_workload': 1}
-    assert len(j.gateway.tool_calls) == len(j.requests)
-    assert len(j.gateway.tool_results) == len(j.requests)
+    assert len(j.gateway.tool_calls) + len(j.gateway.direct_controls) == len(j.requests)
+    assert len(j.gateway.tool_results) + len(j.gateway.direct_controls) == len(j.requests)
     assert all(not {'command', 'intent', 'intent_hint', 'artifact_id', 'selected_ids'} & body.keys()
                for body in j.requests)
 

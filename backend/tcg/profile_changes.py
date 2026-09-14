@@ -115,6 +115,10 @@ def apply_profile_change(store, chat_id, prompt_id, expected_version, selected_k
         audit = {'prompt_id': prompt_id, 'profile_id': current['id'], 'template_ids': preview['template_ids'],
             'base_version': current['version'], 'version': updated['version'],
             'selected_keys': keys, 'skipped_keys': skipped}
+        store.put('native_approval_receipt', {'id': 'approval:' + prompt_id, 'chat_id': chat_id,
+            'project_id': chat['project_id'], 'status': 'succeeded',
+            'profile': {'id': updated['id'], 'version': updated['version']},
+            'parts': copy.deepcopy(parts), 'skipped_keys': skipped})
         store.audit(chat_id, 'profile_template_confirmed', audit)
         if write_messages:
             confirmation_id = uid('profile_confirmation_')

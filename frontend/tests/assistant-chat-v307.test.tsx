@@ -114,6 +114,7 @@ test('an operations-only archived preview keeps before rows intact while showing
  await screen.findByText('新增 1 · 更新 1 · 删除 1');
  const comparison=screen.getByRole('table',{name:'S1 修改对比'});
  assert.match(comparison.querySelector('td')?.textContent??'',/原场景/);
- assert.ok(screen.getByText('S2 · 删除场景 · 删除'));assert.ok(screen.getByText('S3 · 新增场景 · 新增'));
+ assert.ok(screen.getByText('S2 · 删除场景 · 删除'));
+ fireEvent.click(screen.getByRole('button',{name:'再查看 1 条修改'}));assert.ok(screen.getByText('S3 · 新增场景 · 新增'));
  assert.deepEqual(before,[{id:'S1',title:'原场景'},{id:'S2',title:'删除场景'}]);
 });

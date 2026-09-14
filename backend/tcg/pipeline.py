@@ -43,7 +43,7 @@ MESSAGES = {
     'case_draft_review': '请检查用例步骤、预期和关联场景。回复“同意”开始评审，也可以直接微调。',
     'case_result_review': '用例尚未按评审修改。请查看评审建议与修改预览；回复“同意”后应用建议，也可以直接补充评审意见。',
 }
-ENTRY_PREDECESSORS = {'scenarios': 'understanding_gate', 'cases': 'scenario_gate', 'review': 'case_draft_gate'}
+ENTRY_PREDECESSORS = {'direct_cases': 'understanding_gate', 'scenarios': 'understanding_gate', 'cases': 'scenario_gate', 'review': 'case_draft_gate'}
 
 
 class PipelineRuntime:
@@ -97,7 +97,7 @@ class PipelineRuntime:
         graph = StateGraph(PipelineState)
         for name in ('understand', 'clarification_gate', 'apply_clarification',
                      'understanding_gate', 'scenarios', 'scenario_gate', 'cases',
-                     'case_draft_gate', 'review', 'review_result_gate', 'apply_review', 'finish'):
+                     'direct_cases', 'case_draft_gate', 'review', 'review_result_gate', 'apply_review', 'finish'):
             graph.add_node(name, getattr(self, '_node_' + name))
         graph.add_edge(START, 'understand')
         graph.add_edge('understand', 'clarification_gate')
@@ -105,13 +105,16 @@ class PipelineRuntime:
                                     'apply_clarification' if s['phase'] == 'clarification_answered' else 'understanding_gate')
         graph.add_conditional_edges('apply_clarification', lambda s:
             'clarification_gate' if self._questions(self._artifact(s, 'analysis_ref')) else 'understanding_gate')
-        graph.add_conditional_edges('understanding_gate', lambda s: self._after(s, 'analysis', 'scenarios'))
+        graph.add_conditional_edges('understanding_gate', self._after_understanding,
+            {'finish': 'finish', 'scenarios': 'scenarios', 'skip_to_cases': 'direct_cases'})
         graph.add_edge('scenarios', 'scenario_gate')
         graph.add_conditional_edges('scenario_gate', lambda s: self._after(s, 'scenarios', 'cases'))
         graph.add_edge('cases', 'case_draft_gate')
+        graph.add_edge('direct_cases', 'case_draft_gate')
         graph.add_conditional_edges('case_draft_gate', lambda s: self._after(s, 'cases', 'review'))
         graph.add_edge('review', 'review_result_gate')
-        graph.add_edge('review_result_gate', 'apply_review')
+        graph.add_conditional_edges('review_result_gate', lambda s:
+            'finish' if s.get('phase') == 'review_rejected' else 'apply_review')
         graph.add_edge('apply_review', 'finish')
         graph.add_edge('finish', END)
         self.graph = graph.compile(checkpointer=saver)
@@ -166,6 +169,12 @@ class PipelineRuntime:
                      ('scenarios', 'generate_case'): 'cases',
                      ('cases', 'review_case'): 'review'}
         stage = supported.get((current['type'], request['intent']))
+        if request.get('skip_scenarios'):
+            if current['type'] != 'analysis':
+                raise DomainError('跳过场景需要从需求理解开始，请指定需求成果')
+            if self._questions(current):
+                raise DomainError('请先回答当前需求中的澄清问题，再跳过场景生成用例', 409)
+            stage = 'direct_cases'
         if not stage:
             raise DomainError('这份成果不能用于所请求的生成起点；请说明要从需求生成场景、从场景生成用例，还是评审已有用例')
         selected = request.get('selected_ids')
@@ -176,7 +185,7 @@ class PipelineRuntime:
             if stage != 'review' and set(selected) != all_ids:
                 raise DomainError('从已有需求或场景继续生成目前需要完整成果；请先明确生成范围，系统不会扩大所选条目')
         stop_after = request.get('stop_after')
-        positions = {'analysis': 0, 'scenarios': 1, 'cases': 2, 'review': 3}
+        positions = {'analysis': 0, 'scenarios': 1, 'cases': 2, 'direct_cases': 2, 'review': 3}
         if stop_after in positions and positions[stop_after] < positions[stage]:
             raise DomainError('停止位置早于所请求的工作，请明确要继续到哪个阶段')
         key = {'analysis': 'analysis_ref', 'scenarios': 'scenario_ref', 'cases': 'cases_ref'}[current['type']]
@@ -204,6 +213,9 @@ class PipelineRuntime:
                    'mode': request.get('mode', 'hitp'),
                    'content': request.get('content', request.get('requirements', '生成测试用例'))}
         request.pop('_pipeline_start', None)
+        if request.get('skip_scenarios') and (request['intent'] != 'generate_case' or
+                request.get('stop_after', 'review') not in ('cases', 'review')):
+            raise DomainError('跳过场景仅适用于生成测试用例或用例草稿')
         entry = self._existing_entry(chat_id, request)
         if entry:
             request['_pipeline_start'] = entry
@@ -215,7 +227,7 @@ class PipelineRuntime:
             inherited = [self.store.get('artifact', aid) for aid in dict.fromkeys(entry['refs'].values())] if entry else []
             inherited_sources = [sid for value in inherited for sid in value.get('_source_ids', [])]
             inherited_roles = {sid: role for value in inherited for sid, role in value.get('_source_roles', {}).items()}
-            run = self.store.update_run(run['id'], runtime='native', graph_version=9,
+            run = self.store.update_run(run['id'], runtime='native', graph_version=10, skip_scenarios=bool(request.get('skip_scenarios')),
                 stop_after=stop_after, pause_after_step=bool(request.get('_knowledge_rebuild')),
                 artifact_ids=[a['id'] for a in inherited],
                 _source_ids=list(dict.fromkeys(run['_source_ids'] + inherited_sources)),
@@ -352,11 +364,11 @@ class PipelineRuntime:
             value['prompt_id'] += ':' + value['proposal_id']
         return value
 
-    async def resume(self, run_id, action='approved', expected_prompt_id=None, payload=None):
+    async def resume(self, run_id, action='approved', expected_prompt_id=None, payload=None, *, prepare_resume=None):
         async with self._mutation_session(self.store.run(run_id)['chat_id']):
-            return await self._resume(run_id, action, expected_prompt_id, payload)
+            return await self._resume(run_id, action, expected_prompt_id, payload, prepare_resume)
 
-    async def _resume(self, run_id, action, expected_prompt_id, payload):
+    async def _resume(self, run_id, action, expected_prompt_id, payload, prepare_resume=None):
         async with self._lock(run_id):
             if run_id in self.tasks and not self.tasks[run_id].done():
                 raise DomainError('当前步骤仍在执行，请等待完成', 409)
@@ -370,11 +382,19 @@ class PipelineRuntime:
                 self.store.update_run(run_id, status='cancelled', stage='cancelled', interrupt=None, interrupt_id=None)
                 self._record('run.cancelled', run_id, node=waiting.get('type'))
                 return public(self.store.run(run_id))
-            if action not in ('approved', 'approve', 'continue', 'clarified', 'clarify'):
+            if action not in ('approved', 'approve', 'continue', 'clarified', 'clarify', 'skip_to_cases', 'rejected'):
                 raise DomainError('请说明修改意见，或明确同意当前内容')
+            if action == 'skip_to_cases' and waiting['type'] != 'strategy_review':
+                raise DomainError('只有确认需求理解时可以跳过场景；请先完成当前澄清或处理当前成果', 409)
+            if action == 'rejected' and waiting['type'] != 'case_result_review':
+                raise DomainError('当前结果尚未确认，请说明需要修改的内容', 409)
+            if action == 'rejected' and not waiting.get('proposal_id'):
+                raise DomainError('历史评审已写入用例，无法拒绝为建议；请修改当前用例或确认结束', 409)
+            if (payload or {}).get('draft_only') and waiting['type'] not in ('strategy_review', 'scenario_review', 'case_draft_review'):
+                raise DomainError('当前阶段不能切换为仅生成草稿', 409)
             if run.get('knowledge_rebuild_required'):
-                if action in ('clarified', 'clarify'):
-                    raise DomainError('知识库选择已更改，请先同意重新理解需求，再回答新的澄清问题。', 409)
+                if action in ('clarified', 'clarify', 'skip_to_cases', 'rejected'):
+                    raise DomainError('知识库选择已更改，请先重新理解需求，再处理当前确认或跳过场景。', 409)
                 return await self._restart_for_knowledge(self.store.run(run_id))
             clarification = action in ('clarified', 'clarify')
             if waiting['type'] == 'clarification':
@@ -389,8 +409,11 @@ class PipelineRuntime:
             if waiting['type'] == 'case_result_review' and waiting.get('proposal_id'):
                 from .review_proposals import require_current_review
                 require_current_review(self.store, run_id, waiting['proposal_id'])
-            response = {**(payload or {}), 'action': 'approved'}
-            self.store.update_run(run_id, status='queued', stage='resuming', interrupt=None, interrupt_id=None)
+            response = {**(payload or {}), 'action': action if action in ('skip_to_cases', 'rejected') else 'approved'}
+            with self.store.transaction():
+                if prepare_resume is not None:
+                    prepare_resume()
+                self.store.update_run(run_id, status='queued', stage='resuming', interrupt=None, interrupt_id=None)
             self._record('run.resumed', run_id, node=waiting.get('type'))
             self._schedule(run_id, Command(resume={waiting['id']: response}))
             return public(self.store.run(run_id))
@@ -408,7 +431,8 @@ class PipelineRuntime:
         request.update(_fresh_after_supplement=True, _knowledge_rebuild=True,
             content=request.get('content', '') + '\n根据当前项目知识库选择，重新理解需求，不继承旧成果中的业务假设。',
             intent='generate_case' if run['intent'] == 'review_case' else run['intent'],
-            mode=run['mode'], stop_after=run.get('stop_after', 'review'))
+            mode=run['mode'], stop_after=run.get('stop_after', 'review'),
+            skip_scenarios=bool(run.get('skip_scenarios')))
         with self.store.transaction():
             self.store.update_run(run['id'], status='cancelled', stage='cancelled',
                 interrupt=None, interrupt_id=None, superseded_reason='project_knowledge_changed')
@@ -417,7 +441,8 @@ class PipelineRuntime:
         self._schedule(result['id'], self._initial(self.store.run(result['id'])))
         return result
 
-    async def revise_review(self, run_id, feedback):
+    async def revise_review(self, run_id, feedback, *, selected_ids=None, expected_prompt_id=None,
+                            artifact_id=None, artifact_revision=None, proposal_id=None):
         """Regenerate only a frozen review proposal; never approve or mutate cases."""
         if not isinstance(feedback, str) or not feedback.strip():
             raise DomainError('请说明需要调整的评审意见')
@@ -426,11 +451,33 @@ class PipelineRuntime:
             run = await self.snapshot(run_id)
             if run['status'] != 'waiting' or (run.get('interrupt') or {}).get('type') != 'case_result_review':
                 raise DomainError('当前没有等待确认的评审建议', 409)
+            gate = run['interrupt']
+            current_prompt_id = gate.get('prompt_id') or gate.get('id')
+            if expected_prompt_id is not None and current_prompt_id != expected_prompt_id:
+                raise DomainError('评审提示已改变，请重新打开当前建议', 409)
+            for supplied, current in ((artifact_id, gate.get('artifact_id')),
+                                      (artifact_revision, gate.get('artifact_revision')),
+                                      (proposal_id, gate.get('proposal_id'))):
+                if supplied is not None and supplied != current:
+                    raise DomainError('评审目标或版本已改变，请重新打开当前建议', 409)
+            from .review_proposals import require_current_review
+            proposal = require_current_review(self.store, run_id, gate.get('proposal_id'))
+            if proposal['status'] != 'pending':
+                raise DomainError('这份评审建议已处理，请查看当前结果', 409)
+            cases = self.store.get('artifact', proposal['artifact_id'])
+            available = {row['id'] for row in proposal['items']} | {row['id'] for row in cases['items']}
+            if selected_ids is not None and (not isinstance(selected_ids, list) or not selected_ids
+                    or any(not isinstance(item_id, str) for item_id in selected_ids)
+                    or len(set(selected_ids)) != len(selected_ids) or not set(selected_ids) <= available):
+                raise DomainError('所选条目不属于当前评审建议，请重新选择用例', 409)
+            scope = {'proposal_id': proposal['id'], 'artifact_id': cases['id'],
+                'artifact_revision': cases['revision'], 'prompt_id': current_prompt_id,
+                'selected_ids': copy.deepcopy(selected_ids)}
             state = await self.graph.aget_state(self._config(run_id))
             values = {**state.values, 'review_ref': '', 'phase': 'review'}
             await self.graph.aupdate_state(self._config(run_id), values, as_node='case_draft_gate')
             self.store.update_run(run_id, status='queued', stage='review', interrupt=None, interrupt_id=None,
-                                  review_feedback=feedback.strip(), pause_after_step=True)
+                                  review_feedback=feedback.strip(), _review_feedback_scope=scope, pause_after_step=True)
             self._schedule(run_id, None)
             return public(self.store.run(run_id))
 
@@ -554,6 +601,12 @@ class PipelineRuntime:
             await self.graph.ainvoke(None, self._config(run_id))
             return await self.snapshot(run_id)
 
+    def _after_understanding(self, state):
+        run = self.store.run(state['run_id'])
+        if run.get('stop_after') == 'analysis':
+            return 'finish'
+        return 'skip_to_cases' if run.get('skip_scenarios') else 'scenarios'
+
     def _after(self, state, phase, next_node):
         run = self.store.run(state['run_id'])
         return 'finish' if run.get('stop_after') == phase else next_node
@@ -650,14 +703,28 @@ class PipelineRuntime:
         kind, key, title, next_stage = GATES[name]
         run = self._run(state, kind)
         artifact = self._artifact(state, key)
+        message = MESSAGES[kind]
+        if name == 'understanding_gate' and run.get('skip_scenarios'):
+            next_stage = 'cases'
+            message = '请检查需求理解。确认后会跳过场景，直接生成用例' + ('草稿，不进行 AI 评审。' if run.get('stop_after') == 'cases' else '并提出 AI 评审建议。')
         if run['mode'] in ('hitp', 'human') or run.get('pause_after_step') or (
                 name == 'understanding_gate' and run.get('_request', {}).get('_knowledge_rebuild')):
             response = interrupt({'type': kind, 'artifact_id': artifact['id'], 'title': title,
-                                  'message': MESSAGES[kind], 'next_stage': next_stage,
+                                  'message': message, 'next_stage': next_stage,
                                   'confirm_label': '同意，继续', 'stop_after': run.get('stop_after')})
-            if response.get('action') != 'approved':
+            action = response.get('action')
+            if action != 'approved' and not (name == 'understanding_gate' and action == 'skip_to_cases'):
                 raise DomainError('请明确确认当前内容')
-            self.store.update_run(run['id'], pause_after_step=False)
+            changes = {'pause_after_step': False}
+            if action == 'skip_to_cases':
+                if self._questions(artifact):
+                    raise DomainError('请先回答澄清问题，再跳过场景生成用例', 409)
+                changes.update(skip_scenarios=True, stop_after='cases' if (response.get('draft_only') or run.get('stop_after') == 'cases') else 'review')
+            elif response.get('draft_only'):
+                changes['stop_after'] = 'cases'
+            if response.get('draft_only'):
+                changes['explicit_draft_only'] = True
+            self.store.update_run(run['id'], **changes)
         return {'phase': kind, 'current_artifact_id': artifact['id']}
 
     async def _node_understanding_gate(self, state):
@@ -668,7 +735,10 @@ class PipelineRuntime:
 
     async def _node_case_draft_gate(self, state):
         run = self.store.run(state['run_id'])
-        # Preserve explicit stop/pause and already saved legacy checkpoints.
+        # A newly requested draft is a finished deliverable, not another approval.
+        if (run.get('graph_version', 0) >= 10 or run.get('explicit_draft_only')) and run.get('stop_after') == 'cases':
+            return {'phase': 'cases_generated'}
+        # Preserve already saved legacy checkpoints and an explicit runtime pause.
         if run.get('graph_version', 0) < 9 or run.get('stop_after') == 'cases' or run.get('pause_after_step'):
             return await self._gate(state, 'case_draft_gate')
         return {'phase': 'cases_generated'}
@@ -680,12 +750,20 @@ class PipelineRuntime:
             return await self._gate(state, 'review_result_gate')
         from .review_proposals import require_current_review
         run = self._run(state, 'case_result_review')
+        saved = self.store.get('review_proposal', state['review_ref'])
+        if saved.get('status') == 'rejected' and saved.get('run_id') == run['id']:
+            return {'phase': 'review_rejected', 'current_artifact_id': saved['artifact_id']}
         proposal = require_current_review(self.store, run['id'], state['review_ref'])
         if run['mode'] in ('hitp', 'human') or run.get('pause_after_step'):
             response = interrupt({'type': 'case_result_review', 'artifact_id': proposal['artifact_id'],
                 'artifact_revision': proposal['artifact_revision'], 'proposal_id': proposal['id'],
                 'title': '确认评审建议', 'message': MESSAGES['case_result_review'],
                 'next_stage': 'apply_review', 'confirm_label': '确认评审建议并修改用例'})
+            if response.get('action') == 'rejected':
+                self.store.put('review_proposal', {**proposal, 'status': 'rejected', 'rejected_at': now()})
+                self.store.update_run(run['id'], pause_after_step=False)
+                self._record('review.rejected', run['id'], proposal_id=proposal['id'])
+                return {'phase': 'review_rejected', 'current_artifact_id': proposal['artifact_id']}
             if response.get('action') != 'approved':
                 raise DomainError('请明确确认当前评审建议')
             self.store.update_run(run['id'], pause_after_step=False)
@@ -700,6 +778,11 @@ class PipelineRuntime:
         run = self._run(state, 'cases')
         artifact = await self.business.cases(run, self._artifact(state, 'analysis_ref'), self._artifact(state, 'scenario_ref'))
         return self._save_reference(state, artifact, 'cases_ref', 'cases_generated')
+
+    async def _node_direct_cases(self, state):
+        run = self._run(state, 'cases')
+        artifact = await self.business.direct_cases(run, self._artifact(state, 'analysis_ref'))
+        return {**self._save_reference(state, artifact, 'cases_ref', 'cases_generated'), 'scenario_ref': ''}
 
     async def _node_review(self, state):
         run = self._run(state, 'review')

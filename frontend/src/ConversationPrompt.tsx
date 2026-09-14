@@ -1,17 +1,19 @@
 import {EvidenceRefs} from './EvidenceRefs';
+import {ClarificationQuestions,type ClarificationAnswer} from './ClarificationQuestions';
+export {clarificationReplyText} from './ClarificationQuestions';
 import type {ConversationPrompt as Prompt} from './types';
 
 const confirmationGates=new Set(['workflow_gate','strategy_review','scenario_review','case_draft_review','case_result_review']);
 
 // WorkflowSummary owns the stage; this area only shows material to answer or review.
-export function ConversationPrompt({prompt,waiting=false,errorInConversation=false}:{prompt?:Prompt|null;waiting?:boolean;errorInConversation?:boolean}){
+export function ConversationPrompt({prompt,waiting=false,errorInConversation=false,active=true,onAnswer}:{prompt?:Prompt|null;waiting?:boolean;errorInConversation?:boolean;active?:boolean;onAnswer?:ClarificationAnswer}){
  if(!prompt||prompt.busy||prompt.kind==='busy'||prompt.kind==='profile'||prompt.kind==='artifact_proposal')return null;
  if(errorInConversation&&['failed','cancelled'].includes(prompt.kind))return null;
  const review=prompt.kind==='case_result_review'?prompt.review:undefined;
  const hasQuestions=!!prompt.questions?.length;
  const hasChoices=!!prompt.choices?.length;
  if(confirmationGates.has(prompt.kind)&&!review&&!hasQuestions&&!hasChoices)return null;
- return <section className="conversation-prompt" aria-label="当前对话提示" data-prompt-id={prompt.id} aria-busy={prompt.busy||waiting||undefined}>
+ return <article className="message assistant"><div className="message-body"><section className="conversation-prompt" aria-label="当前对话提示" data-prompt-id={prompt.id} aria-busy={prompt.busy||waiting||undefined}>
   {review?<>
    <h3>AI 评审意见</h3>
    {review.summary&&<p className="preserve">{review.summary}</p>}
@@ -20,7 +22,7 @@ export function ConversationPrompt({prompt,waiting=false,errorInConversation=fal
    {!!review.notes?.length&&<ul>{review.notes.map((note,index)=><li className="preserve" key={index}>{note}</li>)}</ul>}
    <p className="review-feedback-hint">可以确认评审建议后修改用例，也可以直接在输入框中补充意见；未确认前保留当前用例。</p>
   </>:<><h3>{prompt.title}</h3><p className="preserve">{prompt.message}</p></>}
-  {!!prompt.questions?.length&&<ol className="conversation-questions">{prompt.questions.map(question=><li key={question.id}><strong>{question.question}</strong>{question.answer?<p>已确认：{question.answer}</p>:question.suggestion&&<p className="muted">建议假设：{question.suggestion}</p>}</li>)}</ol>}
+  {!!prompt.questions?.length&&<ClarificationQuestions key={prompt.id} questions={prompt.questions} waiting={waiting} active={active&&prompt.kind==='clarification'} onAnswer={onAnswer}/>}
   {!!prompt.choices?.length&&<ol>{prompt.choices.map(choice=><li key={choice.id}>{choice.title}</li>)}</ol>}
- </section>;
+ </section></div></article>;
 }

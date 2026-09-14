@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 from .schemas import DEFAULT_PROFILE, DomainError, scenario_template_columns
+from .table_projection import case_table_projection, cell_safe
 
 MAX_UPLOAD = 100 * 1024 * 1024
 MAX_TEXT = 2_000_000
@@ -151,14 +152,6 @@ def parse_document(name, data, max_upload=MAX_UPLOAD, parser='native'):
         raise DomainError(f'无法解析文件（{type(exc).__name__}）；请检查文件完整性或转换为 TXT/CSV') from None
 
 
-def cell_safe(value):
-    text = str(value) if value is not None else ''
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
-    if text.lstrip().startswith(('=', '+', '-', '@')) or text.startswith(('\t', '\r', '\n')):
-        text = "'" + text
-    return text
-
-
 def _export_items(artifact, selected):
     items = artifact['items']
     if selected is not None:
@@ -188,47 +181,22 @@ def _workbook_bytes(workbook, widths):
 
 
 def export_cases(artifact, layout='case', selected=None):
-    if artifact['type'] != 'cases':
-        raise DomainError('仅 Case Artifact 支持 Excel 导出')
-    if layout not in ('case', 'step'):
-        raise DomainError('layout 必须为 case 或 step')
+    projection = case_table_projection(artifact, layout, selected)
     items = _export_items(artifact, selected)
     from openpyxl import Workbook
     workbook = Workbook()
     sheet = workbook.active
     title = artifact.get('_profile', {}).get('sheet_name', 'Test Cases')
     sheet.title = re.sub(r'[\\/*?:\[\]]', '_', title)[:31] or 'Test Cases'
-    profile = artifact.get('_profile', {})
-    defaults = [{'field':k,'header':h} for k,h in [('id','Case ID'),('title','Title'),('type','Type'),('priority','Priority'),('preconditions','Preconditions'),('steps','Steps'),('expected','Expected Result')]]
-    columns = profile.get('excel_columns') or defaults
-    from .case_fields import field_value, template_check, template_columns
-    forbidden = {'refs','source_ids','source_hash','evidence','report','profile','run_id','requirement_ids'}
-    if not isinstance(columns,list) or not columns or any(not isinstance(c,dict) or not isinstance(c.get('field'),str) or not isinstance(c.get('header'),str) or c['field'].startswith('_') or c['field'] in forbidden for c in columns):
-        raise DomainError('Excel 列映射无效；只允许 Case 字段，不导出来源或内部记录。')
-    profile={**profile,'excel_columns':columns}
+    from .case_fields import template_check
+    profile = {**artifact.get('_profile', {}), 'excel_columns': projection['columns']}
     check=template_check(profile,items)
     if check['missing']:
         labels='、'.join(dict.fromkeys(g['header'] for g in check['missing']))
         raise DomainError(f"所选模板缺少 {len(check['missing'])} 项必填内容：{labels[:250]}。请先补全模板字段；缺少业务依据时请按提示补充，不需要重新生成需求理解。",422)
-    columns=template_columns(profile)
-    sheet.append([cell_safe(c['header']) for c in columns])
-    for item in items:
-        steps = item['steps']
-        row_steps = [[step] for step in steps] if layout == 'step' else [steps]
-        for row_index, selected_steps in enumerate(row_steps,1):
-            values = []
-            for column in columns:
-                field = column['field']
-                if field in ('steps','expected'):
-                    part = 'action' if field == 'steps' else 'expected'
-                    value = '\n'.join(f'{row_index if layout == "step" else i}. {step[part]}' for i,step in enumerate(selected_steps,1))
-                else:
-                    value = field_value(item,column)
-                    if isinstance(value,(dict,list)):
-                        import json
-                        value = json.dumps(value,ensure_ascii=False)
-                values.append(cell_safe(value))
-            sheet.append(values)
+    sheet.append([column['header'] for column in projection['columns']])
+    for row in projection['rows']:
+        sheet.append(row['cells'])
     return _workbook_bytes(workbook, {'A': 20, 'B': 42, 'C': 18, 'D': 12, 'E': 38, 'F': 64, 'G': 64})
 
 

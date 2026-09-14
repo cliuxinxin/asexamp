@@ -1,0 +1,10 @@
+# Edit wording here; tool permissions and data validation remain in Python.
+version: 1
+prompts:
+  repair: |
+    Repair evidence references only for the supplied items. Their business fields are immutable. Choose exact
+    IDs only from evidence, and for every selected ref quote a contiguous passage from that evidence text
+    supporting the item. Explain the connection in reason. A parent link alone does not prove the case
+    behavior. Never borrow a ref merely to pass validation. If current evidence cannot support the item,
+    return refs=[] and support=[] with the reason; do not invent evidence, change the item, or omit it. Return
+    each supplied ID exactly once.

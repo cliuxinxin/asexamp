@@ -10,7 +10,8 @@ export type Coverage = {requirements_total:number;requirements_covered:number;br
 export type AgentState = {depth?:Depth;rationale?:string;plan?:{id:string;title:string;status:string}[];insights?:{id:string;summary:string;refs:string[];kind:string}[];summary?:string;coverage?:Coverage;pending_instructions?:number};
 export type Recovery = {category:string;title:string;detail:string;suggestions:string[];preserved:string[];retryable:boolean};
 export type RunProgress = {phase:string;completed:number;total:number;label:string};
-export type QuestionSuggestion = {question:string;answer:string;basis:string;refs:string[];confidence:'supported'|'assumption'};
+export type QuestionOption = {id:string;label:string;answer:string};
+export type QuestionSuggestion = {question:string;answer:string;basis:string;refs:string[];confidence:'supported'|'assumption';options?:QuestionOption[]};
 export type RunInterrupt = {type:string;questions?:string[];question_suggestions?:QuestionSuggestion[];artifact_id?:string;artifact_revision?:number;sources?:Array<{id:string;name:string;role:string}>;message?:string;suggested_text?:string;recommended_depth?:string;items?:Json[];title?:string;confirm_label?:string;next_stage?:string;phase?:string;reason?:string;stop_after?:string};
 export type Run = {id:string;repair_progress?:{task:string;retry_count:number;max_retries:number;message:string;call_id?:string};chat_id?:string;interrupt_id?:string;control_version?:number;artifact_revision?:number;status:string;intent:string;mode:string;stage:string;stop_after?:string;pause_contract?:number;error?:string;created_at?:string;updated_at:string;diagnostic?:Json|null;artifact_ids:string[];experience?:'legacy'|'agent'|'reliable';progress?:RunProgress;graph_version?:number;draft_artifact_id?:string;edit_in_progress?:boolean;generation_plan?:{input_groups:number;reason:string;context_tokens:number;output_reserve:number;token_estimate:number};agent?:AgentState;recovery?:Recovery;interrupt?:RunInterrupt};
 export type MemoryEntry = {id:string;content:string;kind:'preference'|'business';active:boolean};
@@ -19,7 +20,8 @@ export type SharedClarification = KnowledgeFact&{id:string;name:string;text:stri
 export type SharedProjectContext = {clarifications:SharedClarification[];samples:{profile_id:string;profile_name:string;count:number;version:number}[];preference_version?:number;chat_id?:string;message?:string;requires_rebuild?:boolean};
 export type SourceProvenance = {source_id:string;classification:string;refs:string[];name?:string;source_version?:number;origin_chat_title?:string;origin_created_at?:string};
 export type ConversationReview = {summary:string;issues:{title:string;detail?:string;case_ids?:string[];refs?:string[]}[];scope?:{reviewed_count?:number;total_count?:number};notes?:string[]};
-export type ConversationPrompt = {id:string;kind:string;title:string;message:string;run_id?:string;artifact_id?:string;artifact_revision?:number;busy?:boolean;stage?:string;category?:string;candidate_id?:string;proposal_id?:string;review_proposal_id?:string;changes?:Json[];missing_input_ids?:string[];questions?:{id:string;question:string;suggestion?:string;answer?:string}[];choices?:{id:string;title:string}[];review?:ConversationReview};
+export type ConversationQuestion = {id:string;question:string;suggestion?:string;answer?:string;options?:QuestionOption[]};
+export type ConversationPrompt = {id:string;kind:string;title:string;message:string;run_id?:string;artifact_id?:string;artifact_revision?:number;busy?:boolean;stage?:string;category?:string;candidate_id?:string;proposal_id?:string;review_proposal_id?:string;changes?:Json[];missing_input_ids?:string[];questions?:ConversationQuestion[];choices?:{id:string;title:string}[];review?:ConversationReview};
 export type Snapshot = {chat:Chat;messages:Message[];sources:Source[];runs:Run[];memory?:Json;conversation_prompt?:ConversationPrompt|null};
 // view_item_ids is a local presentation scope for partial read-tool results, never persisted.
 export type Artifact = {id:string;project_id?:string;chat_id?:string;type:string;title:string;revision:number;items:Json[];report?:Json;view_item_ids?:string[]};
@@ -35,6 +37,7 @@ export type GenerationCandidatePart={type:'generation_candidate';candidate_id:st
 export type GenerationCandidateData={id:string;run_id:string;stage:string;kind:string;items:unknown[];report?:unknown;issues:unknown[];attempts:number;max_retries:number;request_count?:number;created_at:string;raw_result?:unknown;history?:unknown[];selected_attempt?:number;completed_batches?:unknown[]};
 export type TurnPart=
  |GenerationCandidatePart
+ |{type:'execution_plan';plan_id:string;chat_id:string;summary?:string;plan?:{id:string;chat_id?:string;status:string;title:string;steps:{id:string;title:string;status:string;message?:string}[];waiting_prompt_id?:string}}
  |{type:'assistant_note';text:string}
  |{type:'project_knowledge';count:number;facts:KnowledgeFact[];run_id?:string}
  |{type:'answer';text:string;refs?:string[]}

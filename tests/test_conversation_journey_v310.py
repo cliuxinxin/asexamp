@@ -15,8 +15,12 @@ def confirm(j, prompt, tool, *, status='succeeded'):
     assert response.status_code == 200, response.text
     result = response.json()
     assert result['status'] == status, result
-    assert j.gateway.next_call is None
-    assert tool in j.gateway.bound_tools[-1]
+    if j.gateway.next_call is not None:
+        assert any(action['name'] == tool and action['status'] == status for action in result['actions'])
+        j.gateway.direct_controls.append(j.gateway.next_call)
+        j.gateway.next_call = None
+    else:
+        assert tool in j.gateway.bound_tools[-1]
     return result
 
 
@@ -61,7 +65,7 @@ def test_preview_independent_scenario_review_then_case_columns_and_profile_expor
     applied = j.client.post('/api/chats/' + j.chat['id'] + '/profile-change/apply', json={
         'prompt_id': prompt['id'], 'expected_version': profile['version'], 'selected_keys': ['excel_columns']})
     assert applied.status_code == 200, applied.text
-    files = applied.json()['parts'][0]['files']
+    files = next(part['files'] for part in applied.json()['parts'] if part['type'] == 'files')
     assert len(files) == 1
     download = j.client.get(files[0]['url'])
     assert download.status_code == 200

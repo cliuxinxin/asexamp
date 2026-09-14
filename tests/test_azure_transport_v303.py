@@ -201,7 +201,7 @@ async def test_azure_env_drives_chat_and_pipeline_through_http(tmp_path, monkeyp
                 else:
                     pytest.fail('Azure pipeline did not complete')
                 assert gates == ([] if mode == 'auto' else [
-                    'strategy_review', 'scenario_review', 'case_draft_review', 'case_result_review'])
+                    'strategy_review', 'scenario_review', 'case_result_review'])
                 assert tasks == ['understand_requirements', 'generate_scenarios', 'generate_cases', 'review_cases']
                 artifact = (await client.get('/api/artifacts/' + run['current_artifact_id'])).json()
                 assert artifact['items'][0]['steps'][0]['expected'] == '登录成功'

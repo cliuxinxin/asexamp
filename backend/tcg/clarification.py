@@ -9,6 +9,44 @@ def question_key(value):
     return ' '.join(value.split()) if isinstance(value, str) else ''
 
 
+def question_options(value):
+    """Keep explicit complete alternatives; never infer a yes/no business answer."""
+    if not isinstance(value, list) or len(value) < 2:
+        return []
+    result = []
+    for option in value:
+        if not isinstance(option, dict) or any(
+                not isinstance(option.get(key), str) or not option[key].strip()
+                for key in ('id', 'label', 'answer')):
+            return []
+        result.append({key: option[key].strip() for key in ('id', 'label', 'answer')})
+    # A malformed alternative must not leave a one-sided choice on screen.
+    if any(len({option[key] for option in result}) != len(result) for key in ('id', 'label', 'answer')):
+        return []
+    return result
+
+
+def bound_button_answer(command, questions):
+    """Validate the literal displayed answer chosen by the user, not model arguments."""
+    arguments = command.get('arguments')
+    answers = arguments.get('answers') if isinstance(arguments, dict) else None
+    if not isinstance(answers, dict) or len(answers) != 1:
+        raise DomainError('请选择当前问题的一项答案；每次选择只提交一题。')
+    key, answer = next(iter(answers.items()))
+    if not isinstance(key, str) or not isinstance(answer, str):
+        raise DomainError('澄清选项已改变，请查看当前问题后重新选择。', 409)
+    matches = [question for question in questions if key in (question.get('id'), question.get('question'))]
+    if len(matches) != 1:
+        raise DomainError('澄清选项已改变，请查看当前问题后重新选择。', 409)
+    question = matches[0]
+    presented = [option['answer'] for option in question_options(question.get('options'))]
+    if not presented:
+        presented = [question.get(name) for name in ('suggestion', 'suggested_answer', 'suggested_assumption')]
+    if not answer.strip() or answer not in presented:
+        raise DomainError('这不是当前展示的建议答案。请重新选择，或在输入框中说明自己的答案。', 409)
+    return {question['id']: answer}
+
+
 def pending_questions(report):
     """A present canonical questions field, including [], supersedes legacy aliases."""
     report = report or {}

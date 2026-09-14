@@ -176,7 +176,7 @@ def profile_config(config):
             raise DomainError('steps / expected 必须从用例步骤自动汇总')
         if source=='default' and ('default_value' not in column or column['default_value'] is None):
             raise DomainError('固定默认值列需要填写 default_value（允许空字符串、0 和 false）')
-        if column['field'].startswith('_') or column['field'] in {'refs','source_ids','source_hash','evidence','report','profile','run_id','requirement_ids'}:
+        if column['field'].startswith('_') or column['field'] in {'refs','source_ids','source_hash','evidence','report','profile','run_id'}:
             raise DomainError('Excel 列只能映射用例字段，不能映射来源或内部记录')
     scenario_template_columns(result.get('scenario_excel_columns'))
     from .case_fields import template_columns

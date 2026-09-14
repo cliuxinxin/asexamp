@@ -1,5 +1,6 @@
-import {useEffect,useMemo,useRef,useState} from 'react';
+import {useContext,useEffect,useMemo,useRef,useState} from 'react';
 import {Check,ChevronDown,ChevronUp,Download,FileText,History,MessageSquare,PenLine,Plus} from 'lucide-react';
+import {TableReviewContext} from './tableReviewContext';
 import {AnalysisReport} from './AnalysisReport';
 import {SourceBadges} from './SourceBadges';
 import {ExportFieldDrift} from './FieldDrift';
@@ -17,6 +18,7 @@ import {Dialog,ErrorBox,Spinner,TextValue} from './ui';
 import type {Artifact,Json,Source,SourceProvenance} from './types';
 
 export function ArtifactCard({chatOnly=false,id,refreshKey,onTarget,onChanged,compact=false,onOpen,initialDetailsOpen=false,initialSelectedIds=[],snapshot,revision,readOnly=false,simplified=false,reviewMode=false,onEditingChange,onSelectionChange,onProfileProposal}:{onProfileProposal?:(promptId:string)=>void;chatOnly?:boolean;initialSelectedIds?:string[];onSelectionChange?:(artifact:Artifact,selected:string[],viewOrder:string[])=>void;onEditingChange?:(editing:boolean)=>void;reviewMode?:boolean;simplified?:boolean;snapshot?:Artifact;revision?:number;readOnly?:boolean;id:string;refreshKey?:string;onTarget:(artifact:Artifact,selected:string[],viewOrder?:string[])=>void;onChanged:()=>void;compact?:boolean;onOpen?:(artifact:Artifact)=>void;initialDetailsOpen?:boolean}){
+ const tableReview=useContext(TableReviewContext);
  const [fieldProposal,setFieldProposal]=useState<string>();
  const selectionCallback=useRef(onSelectionChange);selectionCallback.current=onSelectionChange;
  const [data,setData]=useState<Artifact|undefined>(snapshot);const [error,setError]=useState('');const [loading,setLoading]=useState(false);
@@ -63,7 +65,7 @@ export function ArtifactCard({chatOnly=false,id,refreshKey,onTarget,onChanged,co
  if(data.type==='answer')return null;
  if(compact)return <button className="artifact-preview" aria-label={'打开成果 · '+data.title+' · v'+data.revision} onClick={()=>onOpen?.(data)}><span className="artifact-preview-icon"><FileText size={22}/></span><span><strong>{data.title}</strong><small>{data.items.length} 条 · v{data.revision} · {readOnly?'查看此版本':'查看详情、编辑和导出'}</small></span><ChevronDown size={17} className="artifact-preview-arrow"/></button>;
  return <section className="artifact" aria-label={data.title}>
-  <div className="artifact-head"><div><h3>{data.title}</h3><span className="muted small-text">{data.items.length} 条 · v{data.revision}</span></div><div className="actions">{readOnly&&onOpen&&<button onClick={async()=>{try{onOpen(await api<Artifact>('/artifacts/'+id));}catch(e){setError(errText(e));}}}>打开最新版本</button>}{!readOnly&&<button disabled={loading} onClick={editItems}><PenLine size={16}/>编辑</button>}{!simplified&&<button onClick={showHistory}><History size={16}/>历史版本</button>}{['cases','scenarios'].includes(data.type)&&<button className="text-accent" onClick={()=>{setError('');setScope(selected.length?'selected':'all');exportChoiceTouched.current=false;exportSelectedProfile.current='';setExportProfile('');setExporting(true);}}><Download size={16}/>导出 Excel</button>}</div></div>
+  <div className="artifact-head"><div><h3>{data.title}</h3><span className="muted small-text">{data.items.length} 条 · v{data.revision}</span></div><div className="actions">{readOnly&&onOpen&&<button onClick={async()=>{try{onOpen(await api<Artifact>('/artifacts/'+id));}catch(e){setError(errText(e));}}}>打开最新版本</button>}{data.type==='cases'&&tableReview.open&&<button disabled={loading||editor} onClick={()=>tableReview.open?.({artifactId:data.id,revision:data.revision,readOnly})}>全屏表格评审</button>}{!readOnly&&<button disabled={loading} onClick={editItems}><PenLine size={16}/>编辑</button>}{!simplified&&<button onClick={showHistory}><History size={16}/>历史版本</button>}{['cases','scenarios'].includes(data.type)&&<button className="text-accent" onClick={()=>{setError('');setScope(selected.length?'selected':'all');exportChoiceTouched.current=false;exportSelectedProfile.current='';setExportProfile('');setExporting(true);}}><Download size={16}/>导出 Excel</button>}</div></div>
   <ErrorBox message={error}/>
   {!simplified&&data.report?.template_usage&&<TemplateUsage usage={data.report.template_usage}/>}
   {!chatOnly&&!readOnly&&!simplified&&<ArtifactActions artifact={data} selected={selected} onChanged={onChanged} syncRequest={syncRequest} onSaved={artifacts=>{const current=artifacts.find(item=>item.id===id);if(current){setData(current);if(current.type==='scenarios')setScenarioSaved(true);}}}/>}

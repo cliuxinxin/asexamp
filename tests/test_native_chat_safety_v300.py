@@ -16,15 +16,26 @@ from tcg.storage import Store
 class ScriptedChatModel(BaseChatModel):
     script: list[Any] = Field(exclude=True)
     calls: list[Any] = Field(default_factory=list, exclude=True)
+    planning: bool = False
 
     @property
     def _llm_type(self):
         return 'native-chat-safety'
 
     def bind_tools(self, tools, **kwargs):
-        return self
+        names = {value.name if hasattr(value, 'name') else value['function']['name'] for value in tools}
+        return self.model_copy(update={'planning': 'submit_execution_plan' in names})
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if self.planning:
+            first = self.script[0]
+            name = first.tool_calls[0]['name'] if isinstance(first, AIMessage) and first.tool_calls else ''
+            capability = {'add_knowledge_tool': 'knowledge', 'modify_profile_tool': 'profile_edit',
+                'read_profile_tool': 'answer', 'list_context_tool': 'answer'}.get(name, 'answer')
+            proposal = AIMessage(content='', tool_calls=[call('plan', 'submit_execution_plan', {
+                'title': '处理用户要求', 'steps': [{'capability': capability,
+                    'instruction': '按本次用户原文处理指定对象，不扩大范围。'}]})])
+            return ChatResult(generations=[ChatGeneration(message=proposal)])
         self.calls.append(copy.deepcopy(messages))
         next_result = self.script.pop(0)
         if isinstance(next_result, Exception):

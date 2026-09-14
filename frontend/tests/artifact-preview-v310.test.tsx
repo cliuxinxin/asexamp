@@ -11,15 +11,16 @@ dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
 const React=await import('react');
 const {render,fireEvent,screen,waitFor,cleanup,within,act}=await import('@testing-library/react');
 const {App}=await import('../src/App');
-const {ArtifactChangeDialog}=await import('../src/ArtifactChangeDialog');
+const {InlineChangeCard}=await import('../src/InlineChangeCard');
 const originalFetch=globalThis.fetch;
 afterEach(async()=>{await act(async()=>{});cleanup();globalThis.fetch=originalFetch;});
 const json=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
 const prompt={id:'revision:p1:2',kind:'artifact_proposal',title:'确认修改预览',message:'场景修改预览已准备好。',proposal_id:'p1',artifact_id:'scenes',artifact_revision:2};
 const proposal={id:'p1',prompt_id:prompt.id,summary:'仅修改登录场景',changes:[{artifact_id:'scenes',type:'scenarios',title:'登录场景',expected_revision:2,before_items:[{id:'S1',title:'普通登录',requirement_ids:['R1']}],items:[{id:'S1',title:'并发登录',requirement_ids:[]}]}]};
-function fixture(options:{stale?:boolean;needsInput?:boolean}={}){
+function receipt(id:string,proposalId:string,changes=proposal.changes){return {id,role:'assistant',content:'请查看本次修改。',metadata:{turn_response:{id:'turn:'+id,status:'needs_confirmation',message:'请查看本次修改。',parts:[{type:'diff',proposal_id:proposalId,changes}],pending:[],actions:[]}}};}
+function fixture(options:{stale?:boolean;needsInput?:boolean;history?:boolean}={}){
  const writes:any[]=[];const reads:string[]=[];
- const state:any={chat:{id:'chat',project_id:'project',title:'登录测试'},sources:[],messages:[{id:'assistant',role:'assistant',content:proposal.summary,metadata:{}}],runs:[],conversation_prompt:prompt};
+ const state:any={chat:{id:'chat',project_id:'project',title:'登录测试'},sources:[],messages:[...(options.history?[receipt('history','old')]:[]),receipt('assistant','p1')],runs:[],conversation_prompt:prompt};
  globalThis.fetch=(async(input:any,init:any={})=>{
   const path=String(input).replace(/^\/api/,'');
   if(path==='/projects')return json([{id:'project',name:'项目'}]);
@@ -39,51 +40,60 @@ function fixture(options:{stale?:boolean;needsInput?:boolean}={}){
  return {writes,reads,state};
 }
 
-test('artifact changes open above the composer as highlighted rows and never consume its draft',async()=>{
+test('artifact changes render inside their assistant message without a modal and preserve the composer draft',async()=>{
  const request=fixture();render(<App/>);
- const button=await screen.findByRole('button',{name:'查看修改预览'});
+ const card=await screen.findByRole('region',{name:'建议修改预览'});
+ await within(card).findByRole('table',{name:'S1 修改对比'});
  const input=screen.getByLabelText('聊天输入') as HTMLTextAreaElement;
  fireEvent.change(input,{target:{value:'还有一句问题'}});
- assert.ok(button.compareDocumentPosition(input)&Node.DOCUMENT_POSITION_FOLLOWING);
- assert.equal(button.closest('.composer'),null);
- assert.equal(screen.queryByLabelText('待应用修改'),null);
- assert.equal(request.writes.length,0);
- fireEvent.click(button);
- const dialog=await screen.findByRole('dialog',{name:'查看修改预览'});
- await within(dialog).findByRole('table',{name:'S1 修改对比'});
- assert.ok(dialog.querySelector('ins'));assert.ok(dialog.querySelector('del'));
- assert.ok(within(dialog).getByText('N/A'));
- fireEvent.click(within(dialog).getByRole('button',{name:'返回对话修改'}));
- assert.equal(screen.queryByRole('dialog'),null);assert.equal(input.value,'还有一句问题');
+ assert.ok(card.closest('article.message.assistant'));
+ assert.ok(card.closest('.message-body'));
+ assert.ok(card.compareDocumentPosition(input)&Node.DOCUMENT_POSITION_FOLLOWING);
+ assert.equal(card.closest('.composer-wrap'),null);
+ assert.equal(screen.queryByRole('button',{name:'查看修改预览'}),null);
+ assert.equal(screen.queryByRole('dialog'),null);
+ assert.ok(card.querySelector('ins'));assert.ok(card.querySelector('del'));
+ assert.ok(within(card).getByText('N/A'));
+ fireEvent.click(within(card).getByRole('button',{name:'补充修改意见'}));
+ assert.equal(document.activeElement,input);assert.equal(input.value,'还有一句问题');
  assert.equal(request.writes.length,0);
 });
 
-test('applying a preview anchors the actual prompt and removes the suggestion',async()=>{
+test('accepting an inline preview anchors the actual prompt and leaves a read-only historical receipt',async()=>{
  const request=fixture();render(<App/>);
- fireEvent.click(await screen.findByRole('button',{name:'查看修改预览'}));
- fireEvent.click(await screen.findByRole('button',{name:'确认应用修改'}));
+ await screen.findByRole('table',{name:'S1 修改对比'});
+ const input=screen.getByLabelText('聊天输入') as HTMLTextAreaElement;
+ fireEvent.change(input,{target:{value:'下一步的问题草稿'}});
+ fireEvent.click(screen.getByRole('button',{name:'接受修改'}));
  await waitFor(()=>assert.equal(request.writes.length,1));
  assert.equal(request.writes[0].reply_to,prompt.id);
+ assert.equal(request.writes[0].reply_kind,'confirm');
  assert.equal(request.writes[0].command.name,'artifact.apply');
  assert.equal(request.writes[0].command.arguments.proposal_id,'p1');
- await waitFor(()=>assert.equal(screen.queryByRole('dialog'),null));
- assert.equal(screen.queryByRole('button',{name:'查看修改预览'}),null);
+ assert.equal(request.writes[0].command.arguments.expected_revision,2);
+ await waitFor(()=>assert.equal(screen.queryByRole('button',{name:'接受修改'}),null));
+ assert.equal(screen.queryByRole('dialog'),null);
+ assert.ok(screen.getByText('修改预览 · 查看当时的差异'));
+ assert.equal(input.value,'下一步的问题草稿');
 });
 
-test('discard is a scoped chat command and stale rejection keeps the preview open',async()=>{
+test('reject is a scoped chat command and a stale response preserves its inline diff until navigation',async()=>{
  const request=fixture({stale:true});render(<App/>);
- fireEvent.click(await screen.findByRole('button',{name:'查看修改预览'}));
- fireEvent.click(await screen.findByRole('button',{name:'取消这项修改'}));
+ await screen.findByRole('table',{name:'S1 修改对比'});
+ fireEvent.click(screen.getByRole('button',{name:'拒绝修改'}));
  await screen.findByRole('alert');
  assert.equal(request.writes[0].reply_to,prompt.id);
+ assert.equal(request.writes[0].reply_kind,'confirm');
  assert.equal(request.writes[0].command.name,'artifact.discard');
- assert.ok(screen.getByRole('dialog',{name:'查看修改预览'}));
+ assert.ok(screen.getByRole('region',{name:'建议修改预览'}));
+ assert.ok(screen.getByRole('table',{name:'S1 修改对比'}));
+ assert.ok(screen.getByRole('button',{name:'刷新当前提示'}));
  fireEvent.click(screen.getByRole('button',{name:/其他会话/}));
- await waitFor(()=>assert.equal(screen.queryByRole('dialog'),null));
+ await waitFor(()=>assert.equal(screen.queryByRole('region',{name:'建议修改预览'}),null));
  assert.equal(request.writes.length,1);
 });
 
-test('review preview shows proposed case steps and confirms the pipeline only after inspection',async()=>{
+test('inline review shows proposed case steps and confirms the pipeline only after explicit acceptance',async()=>{
  const turns:any[]=[];let resolved=false;
  const before={id:'TC1',title:'登录',steps:[{action:'点击登录',expected:'成功'}]};
  const after={...before,steps:[{action:'输入有效账号，再点击登录',expected:'显示用户首页'}]};
@@ -94,21 +104,41 @@ test('review preview shows proposed case steps and confirms the pipeline only af
   if(path==='/chats/chat/turns'){turns.push(JSON.parse(init.body));return json({id:'turn',status:'succeeded',message:'开始应用评审修改',parts:[],pending:[],actions:[]});}
   throw new Error('Unexpected '+path);
  }) as typeof fetch;
- render(<ArtifactChangeDialog chatId="chat" prompt={gate} proposalId="review_1" onClose={()=>{}} onRevise={()=>{}} onResolved={()=>{resolved=true;}}/>);
+ render(<InlineChangeCard chatId="chat" prompt={gate} proposalId="review_1" onChanged={()=>{}} onTurnResolved={()=>{resolved=true;}}/>);
  await screen.findByRole('table',{name:'TC1 修改对比'});
  assert.ok(screen.getByText('输入有效账号，再点击登录'));assert.ok(screen.getByText('显示用户首页'));
- assert.equal(turns.length,0);assert.equal(screen.queryByRole('button',{name:'取消这项修改'}),null);
- fireEvent.click(screen.getByRole('button',{name:'确认评审建议并修改用例'}));
+ assert.equal(screen.queryByRole('dialog'),null);assert.equal(turns.length,0);
+ fireEvent.click(screen.getByRole('button',{name:'接受评审建议'}));
  await waitFor(()=>assert.ok(resolved));
- assert.equal(turns[0].reply_to,gate.id);assert.equal(turns[0].command.name,'workflow.resume');assert.equal(turns[0].command.arguments.action,'approved');
+ assert.equal(turns[0].reply_to,gate.id);assert.equal(turns[0].reply_kind,'confirm');
+ assert.equal(turns[0].command.name,'workflow.resume');assert.equal(turns[0].command.arguments.action,'approved');
 });
 
-test('a needs-input response keeps the preview and shows its correction message',async()=>{
+test('a needs-input response keeps the inline diff and composer draft while showing its correction message',async()=>{
  const request=fixture({needsInput:true});render(<App/>);
- fireEvent.click(await screen.findByRole('button',{name:'查看修改预览'}));
- fireEvent.click(await screen.findByRole('button',{name:'确认应用修改'}));
+ await screen.findByRole('table',{name:'S1 修改对比'});
+ const input=screen.getByLabelText('聊天输入') as HTMLTextAreaElement;
+ fireEvent.change(input,{target:{value:'请稍后解释关联规则'}});
+ fireEvent.click(screen.getByRole('button',{name:'接受修改'}));
  await screen.findByRole('alert');
  assert.equal(request.writes.length,1);
- assert.ok(screen.getByRole('dialog',{name:'查看修改预览'}));
+ assert.ok(screen.getByRole('region',{name:'建议修改预览'}));
+ assert.ok(screen.getByRole('table',{name:'S1 修改对比'}));
  assert.match(screen.getByRole('alert').textContent??'',/修改预览已改变/);
+ assert.equal(input.value,'请稍后解释关联规则');
+});
+
+test('historical diffs can be inspected but only the currently pending message has accept or reject actions',async()=>{
+ const request=fixture({history:true});render(<App/>);
+ await screen.findByRole('table',{name:'S1 修改对比'});
+ const historical=screen.getByText('修改预览 · 查看当时的差异').closest('details')!;
+ fireEvent.click(within(historical).getByText('修改预览 · 查看当时的差异'));
+ // jsdom does not always dispatch toggle when details.open changes through a click.
+ historical.open=true;fireEvent(historical,new Event('toggle'));
+ await within(historical).findByRole('table',{name:'S1 修改对比'});
+ assert.equal(within(historical).queryByRole('button',{name:'接受修改'}),null);
+ assert.equal(within(historical).queryByRole('button',{name:'拒绝修改'}),null);
+ assert.equal(screen.getAllByRole('button',{name:'接受修改'}).length,1);
+ assert.equal(screen.getAllByRole('button',{name:'拒绝修改'}).length,1);
+ assert.equal(request.writes.length,0);
 });

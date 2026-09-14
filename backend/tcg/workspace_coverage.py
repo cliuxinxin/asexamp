@@ -147,11 +147,27 @@ def lineage_rows(store, artifact):
     for row in artifact['items']:
         linked = {'item_id': row['id'], 'scenario': None, 'requirements': [], 'status': 'linked'}
         current, current_row = artifact, row
-        if independent_item(artifact['type'], row):
+        direct = (artifact['type'] == 'cases' and row.get('scenario_id') == ''
+                  and lineage(artifact).get('generation_mode') == 'direct_requirements'
+                  and (row.get('_independent_origin') or {}).get('mode') == 'direct_requirements')
+        if direct:
+            linked.update(scenario_skipped=True, reason='用户选择跳过场景，直接根据需求生成用例')
+            ids = row.get('requirement_ids', [])
+            if not ids:
+                linked['status'] = 'missing_parent'
+            for rid in ids:
+                analysis = _parent_snapshot(store, artifact, 'analysis', rid, row['id'])
+                requirement = next((r for r in analysis['items'] if r['id'] == rid), None) if analysis else None
+                if requirement:
+                    linked['requirements'].append({'artifact_id': analysis['id'], 'revision': analysis['revision'],
+                        'item': copy.deepcopy(requirement), 'evidence': _row_evidence(store, analysis, requirement)})
+                else:
+                    linked['status'] = 'missing_parent'
+        elif independent_item(artifact['type'], row):
             linked.update(status='independent', reason=row['_independent_origin']['reason'], stale=False)
             result.append(linked)
             continue
-        if artifact['type'] == 'cases':
+        if artifact['type'] == 'cases' and not direct:
             current = _parent_snapshot(store, artifact, 'scenarios', row.get('scenario_id'), row['id'])
             current_row = next((r for r in current['items'] if r['id'] == row.get('scenario_id')), None) if current else None
             if current_row:
