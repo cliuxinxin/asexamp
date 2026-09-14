@@ -119,9 +119,12 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             raise DomainError('请指定需要操作的任务 ID')
         return rows[0]
 
+    from .conversation_facts import sources_allowed, ensure_artifact_allowed
+
     def sources(source_ids):
         if not source_ids or len(set(source_ids)) != len(source_ids):
             raise DomainError('请选择不重复的资料 ID')
+        source_ids = sources_allowed(store, chat['id'], source_ids, strict=True)
         values = [store.get('source', sid) for sid in source_ids]
         for source in values:
             shared = source.get('_project_shared') and source.get('status') == 'confirmed'
@@ -178,7 +181,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         return _result('当前对话的成果与资料目录。', artifacts=[
             {k: a.get(k) for k in ('id', 'type', 'title', 'revision')} for a in artifacts()],
             sources=[{k: s.get(k) for k in ('id', 'name', 'role', 'characters')}
-                     for s in store.list('source', chat_id=chat['id']) if s.get('_active')],
+                     for s in store.list('source', chat_id=chat['id']) if s.get('_active')
+                     and sources_allowed(store, chat['id'], [s['id']])],
             prompt=prompt)
 
     @tool
@@ -197,6 +201,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         from .project_context import shared_sources
         values = {s['id']: s for s in store.list('source', chat_id=chat['id']) if s.get('_active')}
         values.update({s['id']: s for s in shared_sources(store, chat['project_id'])})
+        allowed = set(sources_allowed(store, chat['id'], list(values)))
+        values = {sid: source for sid, source in values.items() if sid in allowed}
         return _result('当前资料目录。', sources=[{k: s.get(k) for k in
             ('id', 'name', 'role', 'characters', 'status')} for s in values.values()])
 
@@ -239,6 +245,7 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
                                       artifact_id: str | None = None) -> dict:
         """Estimate case counts from saved scenarios; never generate cases or approve the pipeline."""
         value = target(artifact_id, 'scenarios')
+        ensure_artifact_allowed(store, value)
         estimate = await business.estimate(value, ids=selection(value, scenario_ids))
         estimate.setdefault('title', value['title'])
         return _result(estimate.get('summary', '已估算用例数量，当前确认点保持不变。'),
@@ -463,7 +470,8 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
         async with approval(kinds, run_id=run['id']):
             result = await pipeline.resume(run['id'], action=action,
                 expected_prompt_id=reply_token, payload=payload)
-        return _result('已提交当前节点的回复；下一确认点需要你另行回复。', run_id=run['id'],
+        return _result('已提交当前节点的回复；下一确认点需要你另行回复。',
+                       run_id=result.get('id', run['id']) if isinstance(result, dict) else run['id'],
                        run=public(result) if isinstance(result, dict) else None)
 
     @tool

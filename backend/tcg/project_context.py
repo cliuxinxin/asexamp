@@ -70,11 +70,13 @@ def validate_sample_cases(value):
     return value
 
 
-def shared_sources(store, project_id, scope=None):
+def shared_sources(store, project_id, scope=None, chat_id=None):
     from .project_facts import normalize_scope, scope_matches
     scope = normalize_scope(scope)
+    from .conversation_facts import excluded_source_ids
+    excluded = excluded_source_ids(store, chat_id) if chat_id else set()
     return [source for source in store.list('source', project_id=project_id)
-            if source.get('_project_shared') and source.get('_active')
+            if source.get('_project_shared') and source.get('_active') and source['id'] not in excluded
             and source['role'] == 'clarification' and source.get('status', 'confirmed') == 'confirmed'
             and not source.get('_task_only') and scope_matches(source.get('scope', {}), scope)]
 
@@ -121,6 +123,7 @@ def share_clarification(store, source_id, project_id, *, scope=None, fact_key=No
         details.setdefault('confirmed_by', '当前用户')
         details.setdefault('confirmed_at', confirmed_at)
         details.setdefault('origin', 'clarification_submission')
+        details.setdefault('origin_chat_title', store.get('chat', source['chat_id'])['title'])
         source = store.put('source', {**source, 'status': 'confirmed', 'scope': scope,
             'fact_key': fact_key.strip(), 'claims': claims, 'provenance': details, 'supersedes': supersedes,
             '_project_shared': True, '_shared_at': confirmed_at})
@@ -131,11 +134,16 @@ def share_clarification(store, source_id, project_id, *, scope=None, fact_key=No
         return source
 
 
-def shared_context(store, project_id, scope=None):
-    from .project_facts import fact_record, scope_matches
+def shared_context(store, project_id, scope=None, chat_id=None):
+    from .project_facts import scope_matches
+    from .conversation_facts import fact_projection
     store.get('project', project_id)
-    return {'clarifications': [fact_record(s) for s in shared_sources(store, project_id, scope)],
-        'fact_history': [fact_record(s) for s in store.list('source', project_id=project_id)
+    chat = store.get('chat', chat_id) if chat_id else {}
+    if chat and chat['project_id'] != project_id:
+        raise DomainError('对话不属于当前项目', 404)
+    return {'chat_id': chat_id, 'preference_version': chat.get('_project_knowledge_version', 1),
+        'clarifications': [fact_projection(store, s, chat_id) for s in shared_sources(store, project_id, scope)],
+        'fact_history': [fact_projection(store, s, chat_id) for s in store.list('source', project_id=project_id)
                          if s['role'] == 'clarification' and (s.get('status') == 'superseded' or s.get('_superseded_by'))
                          and scope_matches(s.get('scope', {}), scope)],
         'samples': [{'profile_id': p['id'], 'profile_name': p['name'], 'version': p['version'],

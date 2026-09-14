@@ -58,7 +58,8 @@ def _report(value):
     # Linkage and process metadata are exclusively server-owned.
     for key in list(report):
         if key.startswith('_') or key in ('lineage', 'template_check', 'review_reports',
-                                         'source_coverage', 'template_completion', 'clarification_followups'):
+                                         'source_coverage', 'template_completion', 'clarification_followups',
+                                         'source_provenance', 'shared_facts_used'):
             report.pop(key)
     return report
 
@@ -82,7 +83,11 @@ class NativeBusiness:
         return matches[-1] if matches else None
 
     def _evidence(self, holder, source_ids=None, source_roles=None):
+        from .conversation_facts import sources_allowed, ensure_artifact_allowed
+        if holder.get('type') in ('analysis', 'scenarios', 'cases'):
+            ensure_artifact_allowed(self.store, holder)
         sources = list(dict.fromkeys(list(holder.get('_source_ids') or []) + list(source_ids or [])))
+        sources = sources_allowed(self.store, holder['chat_id'], sources, strict=True)
         roles = {**holder.get('_source_roles', {}), **(source_roles or {})}
         for sid in sources:
             source = self.store.get('source', sid)
@@ -112,6 +117,9 @@ class NativeBusiness:
         The complete result remains unpublished until all leaves validate.
         """
         context = build(rows)
+        if run:
+            from .conversation_facts import record_context_usage
+            record_context_usage(self.store, run, context.get('evidence', []))
         key = 'native:model:' + deps.digest({'task': task, 'context': context, 'schema': schema,
                                             'instruction': instruction})
         if run:
@@ -287,6 +295,8 @@ class NativeBusiness:
 
     def _save(self, run, kind, rows, report, guard, old=None, sources=None, roles=None):
         sources = sources if sources is not None else run['_source_ids']
+        from .conversation_facts import report_provenance
+        report = report_provenance(self.store, run['chat_id'], report, rows, guard.get('sources', []))
         with _writes(), self.store.transaction():
             deps.assert_manifest(self.store, guard)
             current = self._run(run)
@@ -723,6 +733,8 @@ class NativeBusiness:
                 existing_items=artifact['items'], new_item_ids=added_ids)
             if dialogue.get('legacy_unlinked_cases'):
                 report['_legacy_unlinked_cases'] = copy.deepcopy(dialogue['legacy_unlinked_cases'])
+        from .conversation_facts import report_provenance
+        report = report_provenance(self.store, artifact['chat_id'], report, rows, guard.get('sources', []))
         proposal = {'artifact_id': artifact['id'], 'base_revision': artifact['revision'],
             'items': rows, 'report': report, 'source_ids': sources, 'source_roles': roles,
             'dependencies': guard}
@@ -799,6 +811,8 @@ class NativeBusiness:
 
     async def estimate(self, artifact, ids=None):
         artifact = self._artifact(artifact)
+        from .conversation_facts import ensure_artifact_allowed
+        ensure_artifact_allowed(self.store, artifact)
         if artifact['type'] != 'scenarios':
             raise DomainError('请指定场景成果进行用例数量估算')
         selected = self._selection(artifact, ids)
@@ -818,7 +832,20 @@ class NativeBusiness:
     async def analyze(self, artifact, instruction, ids=None):
         artifact = self._artifact(artifact)
         selected = self._selection(artifact, ids)
-        _, _, evidence = self._evidence(artifact)
+        # Explaining saved content is read-only. Use its captured evidence even
+        # after project eligibility changes; never reintroduce it into a run.
+        guard = artifact.get('_write_dependencies') or artifact.get('_dependencies') or {}
+        references = guard.get('sources', [])
+        if references and all(isinstance(ref, dict) and ref.get('version') for ref in references):
+            evidence = [entry for ref in references for entry in self.store.evidence_version(
+                ref['id'], ref['version'], artifact.get('_source_roles', {}).get(ref['id']))]
+        else:
+            _, _, evidence = self._evidence(artifact)
+        chat = self.store.get('chat', artifact['chat_id'])
+        historical_rules = (artifact.get('report', {}).get('_knowledge_preference_version', 1)
+                            != chat.get('_project_knowledge_version', 1))
+        if historical_rules:
+            instruction += '\nThis is a historical artifact explanation. Its rules are not current project eligibility; do not propose them as active requirements or new generation inputs.'
         def build(group):
             refs = {ref for row in group for ref in row.get('refs', [])}
             return self._context(artifact, [e for e in evidence if e['id'] in refs],
@@ -830,4 +857,7 @@ class NativeBusiness:
         refs = list(dict.fromkeys(ref for result in results for ref in result.get('refs', [])))
         if not set(refs) <= allowed:
             raise DomainError('回答引用了未提供的依据')
-        return {'answer': '\n\n'.join(r['answer'] for r in results), 'refs': refs}
+        answer = '\n\n'.join(r['answer'] for r in results)
+        if historical_rules:
+            answer = '以下说明基于该成果保存时的历史内容，不表示其中规则仍适用于本次生成。\n' + answer
+        return {'answer': answer, 'refs': refs}

@@ -29,6 +29,26 @@ def register_routes(app):
         return apply_change(app.state.store, chat_id, body.prompt_id, body.expected_version,
                             body.selected_keys, write_messages=True)
 
+    @app.get('/api/chats/{chat_id}/field-drift')
+    def field_drift(chat_id: str, artifact_id: str | None = None, revision: int | None = None,
+                    profile_id: str | None = None):
+        from .field_drift import chat_field_drift
+        return chat_field_drift(app.state.store, chat_id, artifact_id, revision, profile_id)
+
+    class FieldSyncProposal(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        artifact_id: str = Field(min_length=1, max_length=300)
+        revision: int = Field(ge=1)
+        head_revision: int = Field(ge=1)
+        profile_id: str = Field(min_length=1, max_length=300)
+        profile_version: int = Field(ge=1)
+        fields: list[str] = Field(min_length=1, max_length=200)
+
+    @app.post('/api/chats/{chat_id}/field-drift/propose')
+    def propose_field_sync(chat_id: str, body: FieldSyncProposal):
+        from .field_drift import propose_field_sync as propose
+        return propose(app.state.store, chat_id, **body.model_dump())
+
     @app.get('/api/chats/{chat_id}/workspace-state')
     async def workspace(chat_id: str, artifact_id: str | None = None):
         return await workspace_state(app.state.store, app.state.engine, chat_id, artifact_id)
@@ -44,12 +64,23 @@ def register_routes(app):
             headers={'Content-Disposition': "attachment; filename=tcg-export.xlsx; filename*=UTF-8''" + quote(name)})
 
     @app.get('/api/projects/{project_id}/shared-context')
-    def get_shared(project_id: str):
-        return shared_context(app.state.store, project_id)
+    def get_shared(project_id: str, chat_id: str | None = None):
+        return shared_context(app.state.store, project_id, chat_id=chat_id)
 
     @app.delete('/api/projects/{project_id}/shared-context/{source_id}')
     def remove_shared(project_id: str, source_id: str):
         return unshare_clarification(app.state.store, project_id, source_id)
+
+    class ProjectKnowledgeSelection(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        enabled: bool
+        expected_version: int = Field(ge=1)
+
+    @app.patch('/api/chats/{chat_id}/project-knowledge/{source_id}')
+    async def select_project_knowledge(chat_id: str, source_id: str, body: ProjectKnowledgeSelection):
+        from .conversation_facts import set_fact_enabled
+        async with app.state.engine.edit_session(chat_id):
+            return set_fact_enabled(app.state.store, chat_id, source_id, body.enabled, body.expected_version)
 
     class Samples(BaseModel):
         profile_id: str

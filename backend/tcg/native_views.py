@@ -123,11 +123,19 @@ async def current_prompt(store, pipeline, chat):
 async def chat_context(store, pipeline, chat, body, prompt):
     artifacts = sorted((a for a in store.list('artifact', chat_id=chat['id']) if a.get('_visible')),
                        key=lambda a: (a.get('created_at', ''), a['id']))
+    from .conversation_facts import sources_allowed
+    allowed = set(sources_allowed(store, chat['id'], [s['id'] for s in store.list('source', project_id=chat['project_id'])]))
     sources = [s for s in store.list('source', project_id=chat['project_id']) if s.get('_active')
-               and (s.get('chat_id') == chat['id'] or s.get('_project_shared'))]
+               and s['id'] in allowed and (s.get('chat_id') == chat['id'] or s.get('_project_shared'))]
     runs = [await pipeline.snapshot(r['id']) for r in store.runs(chat_id=chat['id'])[-4:]]
+    for run in runs:
+        run['shared_facts_used'] = [{key: fact[key] for key in ('source_id', 'source_version', 'name') if key in fact}
+            for fact in run.get('shared_facts_used', []) if fact.get('source_id') in allowed]
     return {'project_id': chat['project_id'], 'chat_id': chat['id'], 'current_prompt': prompt,
-        'runs': [{k: r.get(k) for k in ('id', 'status', 'mode', 'stage', 'stop_after', 'artifact_ids')} for r in runs],
+        'knowledge_selection': {'version': chat.get('_project_knowledge_version', 1),
+            'excluded_source_ids': list(chat.get('_excluded_project_source_ids', [])),
+            'policy': 'Excluded project facts and earlier assistant answers are not current generation evidence. Explicit historical explanations remain read-only.'},
+        'runs': [{k: r.get(k) for k in ('id', 'status', 'mode', 'stage', 'stop_after', 'artifact_ids', 'knowledge_rebuild_required', 'shared_facts_used')} for r in runs],
         'artifacts': [{'id': a['id'], 'type': a['type'], 'title': a['title'], 'revision': a['revision'],
                        'count': len(a['items'])} for a in artifacts[-60:]],
         'sources': [{'id': s['id'], 'name': s['name'], 'role': chat.get('_source_roles', {}).get(s['id'], s['role']),

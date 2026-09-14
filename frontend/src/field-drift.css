@@ -1,0 +1,3 @@
+.field-drift-suggestion{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;margin-bottom:8px;border:1px solid #e7d9d9;border-radius:12px;background:#fff8f8;font-size:13px;line-height:1.6}
+.field-drift-suggestion>span{flex:1 1 280px;overflow-wrap:anywhere}.field-drift-suggestion>button,.field-drift-export>button{font-size:13px;white-space:normal;flex-shrink:0}
+.field-drift-export{padding:10px 14px;background:#fff8ed;border:1px solid #e7d7bb;border-radius:10px;line-height:1.65;margin:12px 0;overflow-wrap:anywhere}.field-drift-export p{margin:0 0 8px}

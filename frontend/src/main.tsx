@@ -5,4 +5,6 @@ import './artifact-actions.css';
 import './chat-estimate.css';
 import './conversation-layout.css';
 import './artifact-lineage.css';
+import './project-knowledge.css';
+import './field-drift.css';
 createRoot(document.getElementById('root')!).render(<App/>);

@@ -154,6 +154,8 @@ class PipelineRuntime:
                 raise DomainError('起步成果必须是当前对话中可查看的成果')
             if kind and value['type'] != kind:
                 raise DomainError('起步成果的上游关联类型不正确')
+            from .conversation_facts import ensure_artifact_allowed
+            ensure_artifact_allowed(self.store, value)
             return value
 
         current = artifact(artifact_id)
@@ -194,7 +196,7 @@ class PipelineRuntime:
         async with self._mutation_session(chat_id):
             return await self._start_run(chat_id, request)
 
-    async def _start_run(self, chat_id, request):
+    async def _start_run(self, chat_id, request, *, schedule=True):
         request = {**request, 'experience': 'native',
                    'intent': request.get('intent', 'generate_case'),
                    'mode': request.get('mode', 'hitp'),
@@ -212,13 +214,14 @@ class PipelineRuntime:
             inherited_sources = [sid for value in inherited for sid in value.get('_source_ids', [])]
             inherited_roles = {sid: role for value in inherited for sid, role in value.get('_source_roles', {}).items()}
             run = self.store.update_run(run['id'], runtime='native', graph_version=8,
-                stop_after=stop_after, pause_after_step=False,
+                stop_after=stop_after, pause_after_step=bool(request.get('_knowledge_rebuild')),
                 artifact_ids=[a['id'] for a in inherited],
                 _source_ids=list(dict.fromkeys(run['_source_ids'] + inherited_sources)),
                 _source_roles={**run.get('_source_roles', {}), **inherited_roles},
                 start_context=({'artifact_id': request['artifact_id'], 'artifact_revision': entry['artifact_revision'],
                                 'next_stage': entry['stage'], 'behavior': 'review_current_cases' if entry['stage'] == 'review' else 'generate_downstream'} if entry else None))
-        self._schedule(run['id'], self._initial(run))
+        if schedule:
+            self._schedule(run['id'], self._initial(run))
         return public(run)
 
     def _schedule(self, run_id, value):
@@ -283,14 +286,23 @@ class PipelineRuntime:
         run = self.store.run(run_id)
         if run.get('runtime') != 'native' or self.graph is None:
             return public(run)
+        def project(value):
+            if value.get('knowledge_rebuild_required') and value['status'] == 'waiting':
+                value = copy.deepcopy(value)
+                previous = value.get('interrupt') or {}
+                value['interrupt'] = {**previous, 'type': 'strategy_review',
+                    'prompt_id': 'knowledge:' + value['id'] + ':' + str(value.get('knowledge_preference_version', 1)),
+                    'title': '根据当前知识选择重新理解需求',
+                    'message': '项目知识库使用范围已更改。回复同意后，将重新理解当前资料，再请你确认新结果；原成果保留为历史版本。'}
+            return public(value)
         executing = self.tasks.get(run_id)
         if executing and not executing.done() and asyncio.current_task() is not executing:
             # A checkpoint observed mid-superstep may temporarily have no next
             # task. Only the executor may project completion after ainvoke.
-            return public(run)
+            return project(run)
         state = await self.graph.aget_state(self._config(run_id))
         if run['status'] in ('cancelled', 'failed'):
-            return public(run)
+            return project(run)
         pending = [i for task in state.tasks for i in task.interrupts]
         if pending and run_id not in self.tasks:
             value = self._interrupt_value(pending[0])
@@ -304,14 +316,14 @@ class PipelineRuntime:
             changes = {'status': 'completed', 'stage': 'completed', 'interrupt': None,
                        'interrupt_id': None, 'current_artifact_id': state.values.get('current_artifact_id')}
         else:
-            return public(run)
+            return project(run)
         if any(run.get(k) != v for k, v in changes.items()):
             run = self.store.update_run(run_id, **changes)
             if changes['status'] == 'waiting':
                 self._record('node.interrupted', run_id, node=changes['stage'], stage=changes['stage'])
             elif changes['status'] == 'completed':
                 self._record('run.completed', run_id, node='completed', stage='completed')
-        return public(run)
+        return project(run)
 
     def _interrupt_value(self, native_interrupt):
         value = copy.deepcopy(native_interrupt.value)
@@ -343,6 +355,10 @@ class PipelineRuntime:
                 return public(self.store.run(run_id))
             if action not in ('approved', 'approve', 'continue', 'clarified', 'clarify'):
                 raise DomainError('请说明修改意见，或明确同意当前内容')
+            if run.get('knowledge_rebuild_required'):
+                if action in ('clarified', 'clarify'):
+                    raise DomainError('知识库选择已更改，请先同意重新理解需求，再回答新的澄清问题。', 409)
+                return await self._restart_for_knowledge(self.store.run(run_id))
             clarification = action in ('clarified', 'clarify')
             if waiting['type'] == 'clarification':
                 if not clarification:
@@ -358,6 +374,28 @@ class PipelineRuntime:
             self._record('run.resumed', run_id, node=waiting.get('type'))
             self._schedule(run_id, Command(resume={waiting['id']: response}))
             return public(self.store.run(run_id))
+
+    async def _restart_for_knowledge(self, run):
+        # Start a fresh native graph so no cached analysis or inherited artifact
+        # can smuggle an excluded fact back into the generation context.
+        from .conversation_facts import sources_allowed
+        request = copy.deepcopy(run.get('_request', {}))
+        for key in ('artifact_id', 'artifact_revision', 'selected_ids', 'view_order',
+                    '_pipeline_start', '_conversation_turn_id'):
+            request.pop(key, None)
+        request['source_ids'] = sources_allowed(self.store, run['chat_id'],
+            list(dict.fromkeys(run.get('_source_ids', []) + run.get('_knowledge_enabled_source_ids', []))))
+        request.update(_fresh_after_supplement=True, _knowledge_rebuild=True,
+            content=request.get('content', '') + '\n根据当前项目知识库选择，重新理解需求，不继承旧成果中的业务假设。',
+            intent='generate_case' if run['intent'] == 'review_case' else run['intent'],
+            mode=run['mode'], stop_after=run.get('stop_after', 'review'))
+        with self.store.transaction():
+            self.store.update_run(run['id'], status='cancelled', stage='cancelled',
+                interrupt=None, interrupt_id=None, superseded_reason='project_knowledge_changed')
+            result = await self._start_run(run['chat_id'], request, schedule=False)
+            self.store.update_run(run['id'], status='cancelled', replacement_run_id=result['id'])
+        self._schedule(result['id'], self._initial(self.store.run(result['id'])))
+        return result
 
     async def request_pause(self, run_id):
         run = self.store.run(run_id)
@@ -390,6 +428,8 @@ class PipelineRuntime:
             if any(r['id'] != run_id for r in self.store.runs(chat_id=run['chat_id'],
                        statuses=('queued', 'running', 'waiting'))):
                 raise DomainError('当前对话已有另一个活动任务，请先处理当前任务', 409)
+            if run.get('knowledge_rebuild_required'):
+                return await self._restart_for_knowledge(run)
             self.store.update_run(run_id, status='queued', error=None)
             self._record('run.retried', run_id, node=run.get('failed_node') or run.get('stage'))
             state = await self.graph.aget_state(self._config(run_id))
@@ -556,7 +596,8 @@ class PipelineRuntime:
         kind, key, title, next_stage = GATES[name]
         run = self._run(state, kind)
         artifact = self._artifact(state, key)
-        if run['mode'] in ('hitp', 'human') or run.get('pause_after_step'):
+        if run['mode'] in ('hitp', 'human') or run.get('pause_after_step') or (
+                name == 'understanding_gate' and run.get('_request', {}).get('_knowledge_rebuild')):
             response = interrupt({'type': kind, 'artifact_id': artifact['id'], 'title': title,
                                   'message': MESSAGES[kind], 'next_stage': next_stage,
                                   'confirm_label': '同意，继续', 'stop_after': run.get('stop_after')})

@@ -115,7 +115,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
                     await gateway.close()
                 store.close()
 
-    app = FastAPI(title='TCG Case Agent Local', version='3.0.7', lifespan=lifespan)
+    app = FastAPI(title='TCG Case Agent Local', version='3.0.8', lifespan=lifespan)
 
     def run_view(value):
         result = run_public(value)
@@ -174,7 +174,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'version': '3.0.7', 'storage': 'local', 'model_configured': configured()}
+        return {'status': 'ok', 'version': '3.0.8', 'storage': 'local', 'model_configured': configured()}
 
     @app.get('/api/projects/{project_id}/memory')
     def memory_list(project_id: str):
@@ -386,7 +386,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
         run = store.run(run_id)
         history = len(run.get('_conversation', []))
         payload = {
-            'version': '3.0.7', 'run_id': run_id, 'chat_id': run['chat_id'],
+            'version': '3.0.8', 'run_id': run_id, 'chat_id': run['chat_id'],
             'error':run.get('error'),'failed_node':run.get('failed_node'),'failed_stage':run.get('failed_stage'),'validation_errors':run.get('validation_errors',[]),
             'status': run['status'], 'stage': run['stage'], 'created_at': run['created_at'],
             'updated_at': run['updated_at'],
@@ -506,7 +506,8 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
 
     @app.get('/api/artifacts/{artifact_id}')
     def artifact_get(artifact_id: str):
-        return public(visible_artifact(artifact_id))
+        from .conversation_facts import artifact_projection
+        return public(artifact_projection(app.state.store, visible_artifact(artifact_id)))
 
     @app.put('/api/artifacts/{artifact_id}')
     async def artifact_put(artifact_id: str, body: RevisionInput):
@@ -531,7 +532,8 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     @app.get('/api/artifacts/{artifact_id}/revisions/{revision}')
     def artifact_revision(artifact_id: str, revision: int):
         visible_artifact(artifact_id)
-        return public(app.state.store.revision(artifact_id, revision))
+        from .conversation_facts import artifact_projection
+        return public(artifact_projection(app.state.store, app.state.store.revision(artifact_id, revision)))
 
     @app.post('/api/artifacts/{artifact_id}/restore')
     async def artifact_restore(artifact_id: str, body: RestoreInput):
@@ -553,6 +555,7 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
     def artifact_export_options(artifact_id: str, revision: int | None = None):
         artifact = export_snapshot(artifact_id, revision)
         from .case_fields import template_check
+        from .field_drift import detect_field_drift
         profiles=app.state.store.list('profile',project_id=artifact['project_id'])
         current = visible_artifact(artifact_id)
         chat = app.state.store.get('chat', artifact['chat_id'])
@@ -565,8 +568,11 @@ def create_app(data_dir: Path | str | None = None, model_gateway=None):
             return {'kind':'scenarios','revision':artifact['revision'],'default_profile_id':default_profile_id,'snapshot':{**defaults,**artifact.get('_profile',{})},
                     'profiles':[{**p,'config':{**defaults,**p['config']},'field_check':None} for p in profiles]}
         if artifact['type']!='cases':raise DomainError('仅测试场景或测试用例支持 Excel 导出')
-        return {'revision':artifact['revision'],'default_profile_id':default_profile_id,'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
-                'profiles':[{**p,'field_check':template_check(p['config'],artifact['items'])} for p in profiles]}
+        return {'revision':artifact['revision'],'head_revision':current['revision'],'default_profile_id':default_profile_id,
+                'snapshot':artifact.get('_profile',{}),'snapshot_check':template_check(artifact.get('_profile',{}),artifact['items']),
+                'snapshot_drift':detect_field_drift(artifact, artifact.get('_profile',{})),
+                'profiles':[{**p,'field_check':template_check(p['config'],artifact['items']),
+                    'field_drift':detect_field_drift(artifact,p['config'])} for p in profiles]}
 
     async def schedule_field_completion(artifact_id,body,description_compat=False):
         from .case_fields import description_column, template_check, materialize_fields

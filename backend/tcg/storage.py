@@ -283,9 +283,11 @@ class Store:
                 sources = [s['id'] for s in self.list('source', chat_id=chat_id)
                            if s['_active'] and s.get('status') != 'provisional']
                 from .project_context import shared_sources
-                sources = list(dict.fromkeys(sources + [s['id'] for s in shared_sources(self, chat['project_id'])]))
+                sources = list(dict.fromkeys(sources + [s['id'] for s in shared_sources(self, chat['project_id'], chat_id=chat_id)]))
             if not isinstance(sources, list) or len(set(sources)) != len(sources):
                 raise DomainError('source_ids 必须为不重复的数组')
+            from .conversation_facts import sources_allowed
+            sources = sources_allowed(self, chat_id, sources, strict=request.get('source_ids') is not None)
             for source_id in sources:
                 source = self.get('source', source_id)
                 if source['project_id'] != chat['project_id'] or not source['_active']:
