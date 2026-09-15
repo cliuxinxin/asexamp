@@ -678,6 +678,12 @@ class PipelineRuntime:
         questions = self._questions(artifact)
         if not questions:
             return {'phase': 'understood'}
+        if run['mode'] == 'auto' and not run.get('pause_after_step'):
+            # Use the same question-text mapping and application node as a human reply.
+            answers = {q['question']: q['suggestion'] for q in questions}
+            self.store.update_run(run['id'], clarification_answers=answers,
+                clarification_save_to_project=True, clarification_answer_origin='auto')
+            return {'phase': 'clarification_answered'}
         response = interrupt({'type': 'clarification', 'title': '补充需求说明',
                               'artifact_id': artifact['id'], 'questions': questions,
                               'message': '请回答澄清问题，或采用建议答案。提交答案后更新理解；人工模式下还需单独确认更新后的需求理解。'})
@@ -689,7 +695,7 @@ class PipelineRuntime:
             answers = {questions_by_id.get(key, key): value for key, value in answers.items()}
         self.store.update_run(run['id'], clarification_answers=answers,
                               clarification_save_to_project=response.get('save_to_project', True),
-                              pause_after_step=False)
+                              clarification_answer_origin='human', pause_after_step=False)
         return {'phase': 'clarification_answered'}
 
     async def _node_apply_clarification(self, state):

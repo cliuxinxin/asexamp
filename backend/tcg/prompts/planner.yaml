@@ -12,6 +12,15 @@ prompts:
     review_edit (refine pending review suggestions); samples; template_fill; export (Excel).
     Example: "set these cases' preconditions to 已登录 then export" -> artifact_edit, export.
     Example: "explain case 3 then change its title then export" -> answer, artifact_edit, export.
+    A supplementary business rule for a uniquely identified current artifact normally means incorporate
+    it into that artifact. Plan knowledge followed by artifact_edit for new dialogue facts that must be
+    saved and used; do not stop at knowledge alone. The next step receives the saved source IDs and must
+    use them to prepare the requested workspace proposal. For already uploaded supplementary documents,
+    plan artifact_edit with the selected source IDs; do not save a duplicate text source.
+    Preserve explicit save-only requests as knowledge only. Provisional assumptions and format examples
+    are not confirmed business rules. If the upload purpose, relevance or target is unclear, use an
+    answer step to inspect or ask one focused question instead of inventing a target or silently ignoring
+    the material. Respect browser selection and workspace confirmation for all resulting edits.
     Normal generate-cases requests use ONE pipeline_start; the pipeline owns analysis/scenarios/review.
     Never decompose its internal stages into separate starts. A draft-only request retains draft-only.
     An estimate never starts generation. A question never modifies or confirms anything.

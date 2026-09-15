@@ -86,6 +86,9 @@ test('the project trace entry navigates to the exact artifact row without genera
  const otherChat={id:'other',project_id:'project',title:'订单测试'};
  const selectedRow={id:'S-order',title:'创建订单',type:'Business',priority:'P1',description:'已登录用户创建订单',requirement_ids:['R-order'],refs:[]};
  const artifact={id:'order-scenes',chat_id:'other',type:'scenarios',title:'订单场景',revision:3,items:[selectedRow,{...selectedRow,id:'S-hidden',title:'其他订单场景'}],report:{}};
+ const columns=[{field:'id',header:'场景编号',editable:false},{field:'title',header:'标题'},{field:'description',header:'说明'},{field:'requirement_ids',header:'对应需求'}];
+ const row={item_id:selectedRow.id,step_index:null,cells:columns.map(column=>typeof selectedRow[column.field as keyof typeof selectedRow]==='object'?JSON.stringify(selectedRow[column.field as keyof typeof selectedRow]):String(selectedRow[column.field as keyof typeof selectedRow]??''))};
+ const workspace={artifact_id:artifact.id,artifact_type:artifact.type,title:artifact.title,artifact_revision:artifact.revision,mode:'manual',layout:'case',columns,original_items:[selectedRow],proposed_items:[selectedRow],original_rows:[row],proposed_rows:[row],issues:[],read_only:false};
  const node={key:'other/order-scenes/S-order',kind:'scenarios',item_id:'S-order',title:'创建订单',artifact_id:'order-scenes',artifact_title:'订单场景',revision:3,chat_id:'other',parent_keys:[],statuses:['missing_parent'],missing:true,stale:false,independent:false,direct:false,basis:[]};
  const paths:{path:string;method:string}[]=[];
  globalThis.fetch=(async(input:any,init:any={})=>{
@@ -96,7 +99,7 @@ test('the project trace entry navigates to the exact artifact row without genera
   if(path==='/chats/other')return json({chat:otherChat,messages:[],sources:[],runs:[]});
   if(path==='/chats/other/workspace-state')return json({});
   if(path==='/artifacts/order-scenes')return json(artifact);
-  if(path==='/artifacts/order-scenes/workspace')return json({lineage_rows:[]});
+  if(path.startsWith('/artifacts/order-scenes/workspace-grid'))return json(workspace);
   return baseFetch(input,init);
  }) as typeof fetch;
  render(<App/>);
@@ -106,8 +109,8 @@ test('the project trace entry navigates to the exact artifact row without genera
  const matrix=await screen.findByRole('dialog',{name:'追溯矩阵'});
  fireEvent.change(within(matrix).getByLabelText('追溯矩阵范围'),{target:{value:'project'}});
  fireEvent.click(await within(matrix).findByRole('button',{name:'S-order 创建订单'}));
- const viewer=await screen.findByRole('dialog',{name:'查看成果 · 订单场景'});
- const table=within(viewer).getByRole('table',{name:'场景与需求'});
+ const viewer=await screen.findByRole('dialog',{name:'成果工作区'});
+ const table=await within(viewer).findByRole('table',{name:'测试场景工作表'});
  assert.ok(within(table).getByText('创建订单'));
  assert.equal(within(table).queryByText('其他订单场景'),null);
  assert.equal(screen.queryByRole('dialog',{name:'追溯矩阵'}),null);
@@ -117,6 +120,7 @@ test('the project trace entry navigates to the exact artifact row without genera
  assert.equal((screen.getByLabelText('聊天输入') as HTMLTextAreaElement).value,'登录会话的未提交草稿');
  assert.ok(paths.some(({path})=>path==='/projects/project/traceability'));
  assert.ok(paths.some(({path})=>path==='/artifacts/order-scenes'));
+ assert.ok(paths.some(({path})=>path.startsWith('/artifacts/order-scenes/workspace-grid')));
  assert.equal(paths.some(({method})=>method!=='GET'),false);
  assert.equal(request.turns.length,0);
 });

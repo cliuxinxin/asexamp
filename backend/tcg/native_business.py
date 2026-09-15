@@ -959,14 +959,20 @@ class NativeBusiness:
         if not content.strip():
             raise DomainError('请提供或采用具体澄清答案')
         text, chunks = parse_text(content)
+        automatic = run.get('clarification_answer_origin') == 'auto'
         # The source identity is durable even if a model request subsequently fails.
         key = 'native:clarification:' + deps.digest({'analysis': analysis['id'], 'content': content,
-            'shared': run.get('clarification_save_to_project', True)})
+            'shared': run.get('clarification_save_to_project', True),
+            **({'origin': 'auto'} if automatic else {})})
         saved = self.store.cache_get(run['id'], key)
         if saved:
             source = self.store.get('source', saved['source_id'])
         else:
-            source = self.store.add_source(run['chat_id'], '已确认的项目澄清', 'clarification', text, chunks)
+            source = self.store.add_source(run['chat_id'], 'Auto 模式采纳的澄清' if automatic else '已确认的项目澄清',
+                                           'clarification', text, chunks)
+            if automatic:
+                source = self.store.put('source', {**source, 'provenance': {
+                    'origin': 'auto_clarification', 'confirmed_by': 'Auto 模式自动采纳', 'run_id': run['id']}})
             if run.get('clarification_save_to_project', True):
                 share_clarification(self.store, source['id'], run['project_id'])
             self.store.cache_set(run['id'], key, {'source_id': source['id']})

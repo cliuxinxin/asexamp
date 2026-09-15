@@ -381,10 +381,11 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
     async def update_from_sources_tool(source_ids: list[str], instruction: str,
                                         artifact_id: str | None = None,
                                         item_ids: list[str] | None = None, role: str = 'supplement') -> dict:
-        """Adopt uploaded supplementary requirements and update the requested current artifact.
+        """Prepare a workspace proposal from uploaded or newly saved supplementary sources.
 
-        The chosen artifact alone is updated; the pipeline asks to confirm upstream changes before
-        regenerating related downstream scenarios or cases. Examples are never business evidence.
+        Use exact source IDs returned by add_knowledge_tool or the source catalog. Only the chosen
+        artifact is proposed for update; saving in the workspace applies it. The pipeline confirms
+        upstream changes before regenerating related downstream rows. Examples are not business evidence.
         """
         if role not in ('primary', 'supplement', 'change', 'clarification', 'knowledge'):
             raise DomainError('补充业务资料不能采用样例角色')
@@ -403,6 +404,9 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
 
         Set confirmed=false for a proposed assumption; unconfirmed assumptions remain local and are
         excluded from current requirements. Saving alone does not regenerate or approve any stage.
+        If the supplementary facts affect the user's current artifact, the subsequent artifact_edit
+        step must use the returned source ID with update_from_sources_tool to prepare a workspace
+        proposal. Preserve explicit save-only requests and ask when the intended target is ambiguous.
         """
         if role not in ROLES:
             raise DomainError('资料用途无效')
@@ -413,8 +417,17 @@ def build_tools(store, business, pipeline, chat, body, prompt=None, on_result=No
             source = store.put('source', {**source, 'status': 'confirmed' if confirmed else 'provisional'})
             if share and confirmed and role == 'clarification':
                 source = share_clarification(store, source['id'], chat['project_id'])
-        return _result('已保存到项目澄清，同项目成员可复用。' if source.get('_project_shared') else '已保存本次资料。',
-                       source=public(source))
+        message = '已保存到项目澄清，同项目成员可复用。' if source.get('_project_shared') else '已保存本次资料。'
+        eligible = confirmed and role in ('primary', 'supplement', 'change', 'clarification', 'knowledge')
+        if eligible:
+            message += ('成果尚未更新。若本次补充规则用于当前成果，后续 artifact_edit 步骤应使用返回的 source ID '
+                        '调用 update_from_sources_tool 准备修改建议，并引导用户在工作区保存。'
+                        '仅保存、无关资料或目标不明确时，说明未更新的原因；不要声称成果已改变。')
+        else:
+            message += '待确认假设或格式样例不会作为已确认业务规则更新成果。'
+        return _result(message, source=public(source), artifact_update={'status': 'not_applied',
+            'source_ids': [source['id']] if eligible else [],
+            'next_step': 'assess_requested_update' if eligible else 'none'})
 
     @tool
     @emit

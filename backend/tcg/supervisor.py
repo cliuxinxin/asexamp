@@ -243,6 +243,9 @@ class Supervisor:
                 '_supervised': True, '_expected_profile': copy.deepcopy(plan.get('_profile_binding'))}
         if body.get('selected_ids'):
             body['_scope_artifact_id'] = body.get('artifact_id')
+        if step['capability'] in ('artifact_edit', 'pipeline_start') and plan.get('_saved_source_ids'):
+            body['source_ids'] = list(dict.fromkeys([*(body.get('source_ids') or []),
+                                                    *plan['_saved_source_ids']]))
         if step['capability'] == 'export' and plan.get('_output_artifact_id'):
             if body.get('artifact_id') != plan['_output_artifact_id']:
                 body.pop('selected_ids', None)
@@ -254,6 +257,11 @@ class Supervisor:
         return body
 
     def _bind_receipt(self, plan, receipt):
+        source = receipt.get('source')
+        if (receipt.get('tool_name') == 'add_knowledge_tool' and receipt.get('status') == 'succeeded'
+                and isinstance(source, dict) and source.get('id') and source.get('status') == 'confirmed'
+                and source.get('role') in ('primary', 'supplement', 'change', 'clarification', 'knowledge')):
+            plan['_saved_source_ids'] = list(dict.fromkeys([*plan.get('_saved_source_ids', []), source['id']]))
         for part in receipt.get('parts', []):
             if part.get('type') == 'artifact' and part.get('artifact_id') and part.get('revision'):
                 plan['_bindings'][part['artifact_id']] = part['revision']

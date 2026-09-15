@@ -6,23 +6,24 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from tcg.main import create_app
-from tcg.storage import now
+from tcg.table_review import TableSave, save_review
 from test_supervisor_http_v312 import QueueGateway, begin, file_parts, plan, post, seed, wait_files
+from workspace_helpers import save_workspace
 
 
-def test_natural_control_keeps_original_tail_selection_when_ui_selection_changes(tmp_path):
+def test_workspace_save_keeps_original_tail_selection_after_chat_selection_changes(tmp_path):
     gateway = QueueGateway()
     app = create_app(tmp_path, gateway)
     with TestClient(app) as client:
         chat, cases = asyncio.run(seed(app.state.store, gateway))
         initial, part, _ = begin(client, app, gateway, chat, cases)
         prompt = initial['pending'][0]
-        gateway.plans.append({'title': '接受当前已查看修改', 'steps': [
-            {'capability': 'current_control', 'instruction': '仅接受当前修改预览，保留已安排的后续步骤。'}]})
-        gateway.calls.insert(0, ('apply_artifact_preview_tool', {}))
-        result, _ = post(client, chat, 'natural-accept', '我已经看过了，按这份修改保存吧',
+        guidance, _ = post(client, chat, 'natural-accept', '同意',
             reply_to=prompt['id'], artifact_id=cases['id'], artifact_revision=cases['revision'],
             selected_ids=[cases['items'][1]['id']])
+        assert guidance['status'] == 'needs_confirmation'
+        assert not app.state.store.list('frozen_export', chat_id=chat['id'])
+        result, _ = save_workspace(client, prompt)
         files = wait_files(client, chat, result)
         sheet = load_workbook(io.BytesIO(client.get(files[0]['url']).content)).active
         values = list(sheet.values)
@@ -30,7 +31,7 @@ def test_natural_control_keeps_original_tail_selection_when_ui_selection_changes
         assert cases['items'][0]['id'] in values[1], values
         assert cases['items'][1]['id'] not in values[1]
         assert len(app.state.store.list('frozen_export', chat_id=chat['id'])) == 1
-        assert len(gateway.planner_inputs) == 2
+        assert len(gateway.planner_inputs) == 1
 
 
 def test_refining_preview_keeps_original_export_tail_and_selection(tmp_path):
@@ -47,7 +48,7 @@ def test_refining_preview_keeps_original_export_tail_and_selection(tmp_path):
         assert refined['status'] == 'needs_confirmation', refined
         state = client.get(f"/api/chats/{chat['id']}/plans/{original['plan_id']}").json()
         assert state['status'] == 'cancelled'
-        result, _ = post(client, chat, 'accept-refined', '同意', reply_to=refined['pending'][0]['id'])
+        result, _ = save_workspace(client, refined['pending'][0])
         files = wait_files(client, chat, result)
         sheet = load_workbook(io.BytesIO(client.get(files[0]['url']).content)).active
         rows = list(sheet.values)
@@ -63,11 +64,15 @@ def test_restart_after_approval_commit_resumes_tail_using_durable_approval_recei
         initial, part, _ = begin(client, app, gateway, chat, cases)
         prompt = initial['pending'][0]
         # Deliberately stop between the business approval commit and queue continuation.
-        turn = {'id': 'approval-window', 'client_message_id': '', 'project_id': chat['project_id'],
-            'chat_id': chat['id'], 'created_at': now(), 'status': 'running',
-            'message': '', 'parts': [], 'pending': [], 'actions': [], '_runtime': 'native'}
-        client.portal.call(app.state.conversation._execute_direct, chat,
-            {'content': '同意', 'reply_to': prompt['id']}, prompt, turn, 'apply_artifact_preview_tool', {})
+        response = client.get('/api/artifacts/' + cases['id'] + '/workspace-grid',
+                              params={'proposal_id': prompt['proposal_id']})
+        assert response.status_code == 200
+        grid = response.json()
+        body = TableSave(expected_revision=grid['artifact_revision'], items=grid['proposed_items'],
+            layout=grid['layout'], proposal_id=prompt['proposal_id'], prompt_id=prompt['id'],
+            profile_id=grid.get('profile_id'), profile_revision=grid.get('profile_revision'),
+            client_request_id='approval-window')
+        client.portal.call(save_review, app.state.store, app.state.business, app.state.engine, cases['id'], body)
         assert app.state.store.get('artifact', cases['id'])['revision'] == cases['revision'] + 1
         assert not app.state.store.list('frozen_export', chat_id=chat['id'])
     restarted = create_app(tmp_path, gateway)

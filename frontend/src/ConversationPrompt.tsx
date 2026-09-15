@@ -6,7 +6,7 @@ import type {ConversationPrompt as Prompt} from './types';
 const confirmationGates=new Set(['workflow_gate','strategy_review','scenario_review','case_draft_review','case_result_review']);
 
 // WorkflowSummary owns the stage; this area only shows material to answer or review.
-export function ConversationPrompt({prompt,waiting=false,errorInConversation=false,active=true,onAnswer}:{prompt?:Prompt|null;waiting?:boolean;errorInConversation?:boolean;active?:boolean;onAnswer?:ClarificationAnswer}){
+export function ConversationPrompt({prompt,waiting=false,errorInConversation=false,active=true,onAnswer,onFill}:{prompt?:Prompt|null;waiting?:boolean;errorInConversation?:boolean;active?:boolean;onAnswer?:ClarificationAnswer;onFill?:(text:string)=>void}){
  if(!prompt||prompt.busy||prompt.kind==='busy'||prompt.kind==='profile'||prompt.kind==='artifact_proposal')return null;
  if(errorInConversation&&['failed','cancelled'].includes(prompt.kind))return null;
  const review=prompt.kind==='case_result_review'?prompt.review:undefined;
@@ -22,7 +22,7 @@ export function ConversationPrompt({prompt,waiting=false,errorInConversation=fal
    {!!review.notes?.length&&<ul>{review.notes.map((note,index)=><li className="preserve" key={index}>{note}</li>)}</ul>}
    <p className="review-feedback-hint">可以确认评审建议后修改用例，也可以直接在输入框中补充意见；未确认前保留当前用例。</p>
   </>:<><h3>{prompt.title}</h3><p className="preserve">{prompt.message}</p></>}
-  {!!prompt.questions?.length&&<ClarificationQuestions key={prompt.id} questions={prompt.questions} waiting={waiting} active={active&&prompt.kind==='clarification'} onAnswer={onAnswer}/>}
+  {!!prompt.questions?.length&&<ClarificationQuestions key={prompt.id} questions={prompt.questions} waiting={waiting} active={active&&prompt.kind==='clarification'} onAnswer={onAnswer} onFill={onFill}/>}
   {!!prompt.choices?.length&&<ol>{prompt.choices.map(choice=><li key={choice.id}>{choice.title}</li>)}</ol>}
  </section></div></article>;
 }
